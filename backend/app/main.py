@@ -36,6 +36,7 @@ def health():
             "disabled": settings.disable_llm,
         },
         "amap_configured": bool(settings.amap_api_key),
+        "amap_transport": "mcp-stdio",
         "unsplash_configured": bool(settings.unsplash_access_key),
         "external_api_disabled": settings.disable_external_api,
     }

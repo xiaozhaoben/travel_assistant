@@ -47,6 +47,16 @@ class FakeHttpClient:
         return FakeHttpResponse(self.responses.pop(0))
 
 
+class FakeMCPCaller:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def call_tool(self, tool_name, arguments):
+        self.calls.append({"tool_name": tool_name, "arguments": arguments})
+        return self.responses.pop(0)
+
+
 def test_settings_support_reference_env_names(monkeypatch):
     monkeypatch.setenv("LLM_MODEL_ID", "qwen3.6-plus")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
@@ -117,63 +127,73 @@ def test_parser_extracts_city_days_preferences_and_budget():
     assert requirement.budget_level == "中等"
 
 
-def test_amap_client_uses_configured_api_for_poi_search():
-    client = FakeHttpClient(
+def test_amap_client_uses_mcp_for_poi_search_and_detail():
+    caller = FakeMCPCaller(
         [
             {
-                "status": "1",
                 "pois": [
                     {
                         "id": "B000A",
                         "name": "测试景点",
-                        "type": "风景名胜",
                         "address": "测试地址",
-                        "location": "116.40,39.90",
-                        "biz_ext": {"rating": "4.8"},
+                        "typecode": "110200",
                     }
                 ],
-            }
+            },
+            {
+                "id": "B000A",
+                "name": "测试景点",
+                "type": "风景名胜",
+                "address": "测试地址",
+                "location": "116.40,39.90",
+                "rating": "4.8",
+            },
         ]
     )
-    amap = AmapMCPClient(api_key="amap-key", http_client=client)
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
 
     pois = amap.search_pois("北京", ["历史文化"], limit=1)
 
-    assert client.calls[0]["url"].endswith("/v3/place/text")
-    assert client.calls[0]["params"]["key"] == "amap-key"
+    assert caller.calls[0] == {
+        "tool_name": "maps_text_search",
+        "arguments": {"keywords": "博物馆 古迹 景点", "city": "北京"},
+    }
+    assert caller.calls[1] == {
+        "tool_name": "maps_search_detail",
+        "arguments": {"id": "B000A"},
+    }
     assert pois[0].name == "测试景点"
     assert pois[0].location.longitude == 116.40
     assert pois[0].ticket_price > 0
 
 
-def test_amap_client_uses_configured_api_for_weather():
-    client = FakeHttpClient(
+def test_amap_client_uses_mcp_for_weather():
+    caller = FakeMCPCaller(
         [
             {
-                "status": "1",
+                "city": "北京市",
                 "forecasts": [
                     {
-                        "casts": [
-                            {
-                                "date": "2026-05-20",
-                                "dayweather": "晴",
-                                "nightweather": "多云",
-                                "daytemp": "28",
-                                "nighttemp": "18",
-                                "daywind": "东北",
-                                "daypower": "1-3",
-                            }
-                        ]
+                        "date": "2026-05-20",
+                        "dayweather": "晴",
+                        "nightweather": "多云",
+                        "daytemp": "28",
+                        "nighttemp": "18",
+                        "daywind": "东北",
+                        "daypower": "1-3",
                     }
                 ],
             }
         ]
     )
-    amap = AmapMCPClient(api_key="amap-key", http_client=client)
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
 
     weather = amap.get_weather("北京", date(2026, 5, 20), 1)
 
-    assert client.calls[0]["url"].endswith("/v3/weather/weatherInfo")
+    assert caller.calls[0] == {
+        "tool_name": "maps_weather",
+        "arguments": {"city": "110000"},
+    }
     assert weather[0].day_weather == "晴"
     assert weather[0].day_temp == 28
 
@@ -336,6 +356,7 @@ def test_api_health_plan_and_recalculate_endpoints():
     health = client.get("/api/health")
     assert health.status_code == 200
     assert "llm" in health.json()
+    assert health.json()["amap_transport"] == "mcp-stdio"
 
     response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 3 天，喜欢历史文化，预算中等"})
 

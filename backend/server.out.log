@@ -17,3 +17,10 @@ INFO:     127.0.0.1:50497 - "POST /api/trip/plan HTTP/1.1" 200 OK
 INFO:     127.0.0.1:50406 - "GET /api/health HTTP/1.1" 200 OK
 INFO:     127.0.0.1:60741 - "GET /api/health HTTP/1.1" 200 OK
 INFO:     127.0.0.1:64886 - "POST /api/trip/plan HTTP/1.1" 200 OK
+      INFO:     127.0.0.1:59029 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59033 - "GET /api/map/weather?city=%E5%8C%97%E4%BA%AC&days=2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59030 - "GET /api/map/poi?keywords=%E6%95%85%E5%AE%AB&city=%E5%8C%97%E4%BA%AC&limit=2 HTTP/1.1" 200 OK
+  INFO:     127.0.0.1:59312 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59311 - "GET /api/map/poi?keywords=%E5%8E%86%E5%8F%B2%E6%96%87%E5%8C%96&city=%E5%8C%97%E4%BA%AC&limit=2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64574 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61183 - "POST /api/trip/plan HTTP/1.1" 200 OK

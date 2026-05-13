@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from datetime import date, timedelta
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 import httpx
 
 from .config import get_settings
 from .models import Attraction, Budget, DayPlan, Hotel, Location, TravelRequirement, WeatherInfo
+
+logger = logging.getLogger(__name__)
 
 
 class TravelRequirementParser:
@@ -61,27 +65,57 @@ class TravelRequirementParser:
         ]
 
 
-class AmapMCPClient:
-    """高德地图 MCP 风格适配器。
+class AmapStdioMCPToolCaller:
+    """通过 stdio 启动 amap-mcp-server 并调用 MCP 工具。"""
 
-    当前实现优先保证本地可运行：没有真实 MCP 服务时使用稳定内置数据。
-    后续接入真实 MCP 只需要把这些方法内部替换为工具调用。
+    command = ["uvx", "amap-mcp-server"]
+
+    def __init__(self, api_key: str | None):
+        self.api_key = api_key or ""
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        import anyio
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        async def _call() -> str:
+            server = StdioServerParameters(
+                command=self.command[0],
+                args=self.command[1:],
+                env={"AMAP_MAPS_API_KEY": self.api_key},
+            )
+            async with stdio_client(server) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return "\n".join(
+                        getattr(item, "text", "")
+                        for item in result.content
+                        if getattr(item, "text", "")
+                    )
+
+        return anyio.run(_call)
+
+
+class AmapMCPClient:
+    """高德地图 MCP 适配器。
+
+    生产环境通过 stdio 启动 `uvx amap-mcp-server` 调用高德地图工具；
+    MCP 不可用或没有 API Key 时回退到本地稳定数据，保证开发和测试可运行。
     """
 
-    base_url = "https://restapi.amap.com"
-
-    def __init__(self, api_key: str | None = None, http_client=None):
+    def __init__(self, api_key: str | None = None, mcp_caller=None):
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.amap_api_key or os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY")
-        self.http_client = http_client or httpx.Client()
+        self.mcp_caller = mcp_caller or (AmapStdioMCPToolCaller(self.api_key) if self.api_key else None)
 
     def search_pois(self, city: str, keywords: Iterable[str], limit: int = 9) -> List[Attraction]:
-        if self.api_key:
-            pois = self._search_pois_from_api(city, list(keywords), limit)
+        keyword_list = list(keywords)
+        if self.mcp_caller:
+            pois = self._search_pois_from_mcp(city, keyword_list, limit)
             if pois:
                 return pois
 
-        keyword_list = list(keywords)
         seed = self._beijing_attractions() if city == "北京" else self._generic_attractions(city)
         preferred = [
             item
@@ -92,8 +126,8 @@ class AmapMCPClient:
         return ordered[:limit]
 
     def search_hotels(self, city: str, budget_level: str, limit: int = 3) -> List[Hotel]:
-        if self.api_key:
-            hotels = self._search_hotels_from_api(city, budget_level, limit)
+        if self.mcp_caller:
+            hotels = self._search_hotels_from_mcp(city, budget_level, limit)
             if hotels:
                 return hotels
 
@@ -115,8 +149,8 @@ class AmapMCPClient:
         ][:limit]
 
     def get_weather(self, city: str, start: date, days: int) -> List[WeatherInfo]:
-        if self.api_key:
-            weather = self._get_weather_from_api(city, start, days)
+        if self.mcp_caller:
+            weather = self._get_weather_from_mcp(city, start, days)
             if weather:
                 return weather
 
@@ -134,91 +168,79 @@ class AmapMCPClient:
             for index in range(days)
         ]
 
-    def _search_pois_from_api(self, city: str, keywords: List[str], limit: int) -> List[Attraction]:
+    def _search_pois_from_mcp(self, city: str, keywords: List[str], limit: int) -> List[Attraction]:
         try:
-            response = self.http_client.get(
-                f"{self.base_url}/v3/place/text",
-                params={
-                    "key": self.api_key,
-                    "keywords": " ".join(keywords) or "景点",
-                    "city": city,
-                    "citylimit": "true",
-                    "offset": limit,
-                    "page": 1,
-                    "extensions": "all",
-                },
-                timeout=10,
+            data = self._call_mcp_json(
+                "maps_text_search",
+                {"keywords": self._mcp_poi_keywords(keywords), "city": city},
             )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") != "1":
-                return []
-            return [
-                self._poi_to_attraction(poi, index)
-                for index, poi in enumerate(data.get("pois", [])[:limit])
-                if poi.get("location")
-            ]
-        except Exception:
+            attractions = []
+            for index, poi in enumerate((data.get("pois") or [])[:limit]):
+                detail = {}
+                poi_id = poi.get("id")
+                if poi_id:
+                    detail = self._call_mcp_json("maps_search_detail", {"id": poi_id})
+                merged = {**poi, **detail}
+                location = self._parse_location(merged.get("location"))
+                if location:
+                    attractions.append(self._poi_to_attraction(merged, index))
+            return attractions
+        except Exception as exc:
+            logger.warning("高德 MCP POI 搜索失败，使用本地景点数据: %s", exc)
             return []
 
-    def _search_hotels_from_api(self, city: str, budget_level: str, limit: int) -> List[Hotel]:
+    def _mcp_poi_keywords(self, keywords: List[str]) -> str:
+        mapping = {
+            "历史文化": "博物馆 古迹 景点",
+            "自然风光": "公园 风景名胜",
+            "美食": "美食 餐厅 小吃",
+            "购物": "商场 步行街",
+            "艺术": "美术馆 展览",
+            "休闲": "公园 休闲",
+            "经典必游": "景点",
+        }
+        expanded = [mapping.get(keyword, keyword) for keyword in keywords if keyword]
+        return " ".join(expanded) or "景点"
+
+    def _search_hotels_from_mcp(self, city: str, budget_level: str, limit: int) -> List[Hotel]:
         try:
-            response = self.http_client.get(
-                f"{self.base_url}/v3/place/text",
-                params={
-                    "key": self.api_key,
-                    "keywords": f"{budget_level} 酒店",
-                    "city": city,
-                    "citylimit": "true",
-                    "offset": limit,
-                    "page": 1,
-                    "extensions": "all",
-                },
-                timeout=10,
+            data = self._call_mcp_json(
+                "maps_text_search",
+                {"keywords": f"{budget_level} 酒店", "city": city},
             )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") != "1":
-                return []
             price = {"低": 280, "中等": 520, "高": 1100}.get(budget_level, 520)
             hotels = []
             for index, poi in enumerate(data.get("pois", [])[:limit]):
-                location = self._parse_location(poi.get("location"))
+                detail = {}
+                poi_id = poi.get("id")
+                if poi_id:
+                    detail = self._call_mcp_json("maps_search_detail", {"id": poi_id})
+                merged = {**poi, **detail}
+                location = self._parse_location(merged.get("location"))
                 if not location:
                     continue
-                rating = self._parse_rating(poi.get("biz_ext", {}).get("rating"))
+                rating = self._parse_rating(merged.get("rating")) or 4.6
                 hotels.append(
                     Hotel(
-                        id=poi.get("id") or f"hotel-{index}",
-                        name=poi.get("name") or f"{city}酒店",
-                        address=poi.get("address") or f"{city}核心游览区附近",
+                        id=merged.get("id") or f"hotel-{index}",
+                        name=merged.get("name") or f"{city}酒店",
+                        address=merged.get("address") or f"{city}核心游览区附近",
                         location=location,
                         type=f"{budget_level}型酒店",
                         rating=rating,
                         nightly_price=price + index * 80,
-                        description=poi.get("type") or "交通便利，适合多日行程中作为稳定落脚点。",
+                        description=merged.get("type") or "交通便利，适合多日行程中作为稳定落脚点。",
                     )
                 )
             return hotels
-        except Exception:
+        except Exception as exc:
+            logger.warning("高德 MCP 酒店搜索失败，使用本地酒店数据: %s", exc)
             return []
 
-    def _get_weather_from_api(self, city: str, start: date, days: int) -> List[WeatherInfo]:
+    def _get_weather_from_mcp(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         try:
-            response = self.http_client.get(
-                f"{self.base_url}/v3/weather/weatherInfo",
-                params={
-                    "key": self.api_key,
-                    "city": city,
-                    "extensions": "all",
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") != "1":
-                return []
-            casts = (data.get("forecasts") or [{}])[0].get("casts") or []
+            data = self._call_mcp_json("maps_weather", {"city": self._weather_city_code(city)})
+            casts = data.get("forecasts") or []
             result = []
             for index, cast in enumerate(casts[:days]):
                 result.append(
@@ -233,8 +255,28 @@ class AmapMCPClient:
                     )
                 )
             return result
-        except Exception:
+        except Exception as exc:
+            logger.warning("高德 MCP 天气查询失败，使用本地天气数据: %s", exc)
             return []
+
+    def _call_mcp_json(self, tool_name: str, arguments: dict[str, Any]) -> dict:
+        if not self.mcp_caller:
+            return {}
+        result = self.mcp_caller.call_tool(tool_name, arguments)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            return self._extract_json_object(result)
+        return {}
+
+    def _extract_json_object(self, text: str) -> dict:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if not match:
+                return {}
+            return json.loads(match.group(0))
 
     def _poi_to_attraction(self, poi: dict, index: int) -> Attraction:
         location = self._parse_location(poi.get("location")) or self.city_center("")
@@ -276,6 +318,23 @@ class AmapMCPClient:
             return int(float(value))
         except (TypeError, ValueError):
             return 0
+
+    def _weather_city_code(self, city: str) -> str:
+        codes = {
+            "北京": "110000",
+            "上海": "310000",
+            "广州": "440100",
+            "深圳": "440300",
+            "杭州": "330100",
+            "成都": "510100",
+            "西安": "610100",
+            "南京": "320100",
+            "苏州": "320500",
+            "重庆": "500000",
+            "厦门": "350200",
+            "青岛": "370200",
+        }
+        return codes.get(city, city)
 
     def city_center(self, city: str) -> Location:
         centers = {

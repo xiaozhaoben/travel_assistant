@@ -32,6 +32,14 @@ UNSPLASH_ACCESS_KEY=你的Unsplash Access Key
 `PlannerAgent` 会通过 LangChain 的 OpenAI-compatible `ChatOpenAI` 调用大模型；如果没有配置 `LLM_API_KEY`，会自动使用本地 fallback 行程，保证开发环境仍可运行。
 DashScope/Qwen 模型默认建议保持 `LLM_ENABLE_THINKING=false`，这样更适合快速返回结构化 JSON 行程。
 
+高德地图后端调用走 MCP stdio，不再直接请求高德 REST API。后端会通过以下 MCP server 启动方式调用工具：
+
+```json
+["uvx", "amap-mcp-server"]
+```
+
+MCP server 使用 `AMAP_MAPS_API_KEY` 环境变量。当前配置兼容 `AMAP_API_KEY` 和 `AMAP_MAPS_API_KEY`，代码会把读取到的高德 Web 服务 Key 传给 MCP server。
+
 ```bash
 cd backend
 pip install -r requirements.txt
@@ -79,8 +87,8 @@ set VITE_AMAP_SECURITY_JS_CODE=你的高德Web端安全密钥
 - `GET /api/health`：查看大模型、高德地图、Unsplash 配置状态。
 - `POST /api/trip/plan`：根据自然语言需求生成完整行程。
 - `POST /api/trip/recalculate`：删除景点或调整顺序后重新计算路线点和预算。
-- `GET /api/map/poi`：通过高德 MCP 风格适配层搜索 POI。
-- `GET /api/map/weather`：通过高德 MCP 风格适配层查询天气。
+- `GET /api/map/poi`：通过 `uvx amap-mcp-server` 的 `maps_text_search` / `maps_search_detail` 工具搜索 POI。
+- `GET /api/map/weather`：通过 `uvx amap-mcp-server` 的 `maps_weather` 工具查询天气。
 - `GET /api/poi/photo`：通过 Unsplash MCP 风格适配层获取景点图片。
 
 ## 验证
