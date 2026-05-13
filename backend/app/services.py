@@ -245,7 +245,7 @@ class AmapMCPClient:
             for index, cast in enumerate(casts[:days]):
                 result.append(
                     WeatherInfo(
-                        date=date.fromisoformat(cast.get("date")) if cast.get("date") else start + timedelta(days=index),
+                        date=start + timedelta(days=index),
                         day_weather=cast.get("dayweather") or "",
                         night_weather=cast.get("nightweather") or "",
                         day_temp=self._parse_int(cast.get("daytemp")),

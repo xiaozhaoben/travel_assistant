@@ -6,12 +6,15 @@ import re
 from datetime import timedelta
 from typing import Any, List
 
+from langchain.agents import create_agent
+
 try:
     from langchain_core.messages import HumanMessage, SystemMessage
 except Exception:  # pragma: no cover - optional until dependencies are installed
     HumanMessage = None
     SystemMessage = None
 
+from .agent_prompts import AgentPrompts
 from .llm_service import create_llm
 from .config import get_settings
 from .logging_config import log_agent_event
@@ -21,12 +24,33 @@ from .services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, 
 logger = logging.getLogger(__name__)
 
 
+def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, name: str):
+    if model is None:
+        return None
+    try:
+        return create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=system_prompt,
+            name=name,
+        )
+    except Exception as exc:
+        logger.warning("LangChain create_agent failed for %s: %s", name, exc)
+        return None
+
+
 class AttractionSearchAgent:
     name = "AttractionSearchAgent"
 
-    def __init__(self, amap: AmapMCPClient, unsplash: UnsplashMCPClient):
+    def __init__(self, amap: AmapMCPClient, unsplash: UnsplashMCPClient, llm: Any | None = None):
         self.amap = amap
         self.unsplash = unsplash
+        self.langchain_agent = _safe_create_agent(
+            llm,
+            [],
+            AgentPrompts.ATTRACTION_SEARCH,
+            "attraction_search_agent",
+        )
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
         attractions = self.amap.search_pois(requirement.city, requirement.preferences, limit=requirement.days * 3)
@@ -39,8 +63,14 @@ class AttractionSearchAgent:
 class WeatherQueryAgent:
     name = "WeatherQueryAgent"
 
-    def __init__(self, amap: AmapMCPClient):
+    def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
         self.amap = amap
+        self.langchain_agent = _safe_create_agent(
+            llm,
+            [],
+            AgentPrompts.WEATHER_QUERY,
+            "weather_query_agent",
+        )
 
     def run(self, requirement: TravelRequirement):
         return self.amap.get_weather(requirement.city, requirement.start_date, requirement.days)
@@ -49,8 +79,14 @@ class WeatherQueryAgent:
 class HotelAgent:
     name = "HotelAgent"
 
-    def __init__(self, amap: AmapMCPClient):
+    def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
         self.amap = amap
+        self.langchain_agent = _safe_create_agent(
+            llm,
+            [],
+            AgentPrompts.HOTEL,
+            "hotel_agent",
+        )
 
     def run(self, requirement: TravelRequirement) -> List[Hotel]:
         return self.amap.search_hotels(requirement.city, requirement.budget_level, limit=3)
@@ -61,9 +97,15 @@ class PlannerAgent:
 
     def __init__(self, llm: Any | None = None):
         self.llm = llm
+        self.langchain_agent = _safe_create_agent(
+            llm,
+            [],
+            AgentPrompts.PLANNER,
+            "planner_agent",
+        )
 
     def run(self, requirement: TravelRequirement, attractions: List[Attraction], weather, hotels: List[Hotel]) -> TripPlan:
-        if self.llm is not None:
+        if self.langchain_agent is not None or self.llm is not None:
             llm_plan = self._try_llm_plan(requirement, attractions, weather, hotels)
             if llm_plan is not None:
                 return llm_plan
@@ -85,14 +127,28 @@ class PlannerAgent:
                 ]
             else:
                 messages = prompt
-            response = self.llm.invoke(messages)
-            content = getattr(response, "content", response)
+            if self.langchain_agent is not None:
+                response = self.langchain_agent.invoke(
+                    {"messages": [{"role": "user", "content": prompt}]}
+                )
+                content = self._extract_agent_content(response)
+            elif self.llm is not None:
+                response = self.llm.invoke(messages)
+                content = getattr(response, "content", response)
+            else:
+                return None
             data = self._extract_json(str(content))
             data = self._normalize_llm_data(data, requirement, attractions, weather, hotels)
             return TripPlan.model_validate(data).model_copy(update={"generation_mode": "llm"})
         except Exception as exc:
             logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
             return None
+
+    def _extract_agent_content(self, response: Any) -> str:
+        if isinstance(response, dict) and response.get("messages"):
+            message = response["messages"][-1]
+            return str(getattr(message, "content", message))
+        return str(getattr(response, "content", response))
 
     def _build_prompt(self, requirement: TravelRequirement, attractions: List[Attraction], weather, hotels: List[Hotel]) -> str:
         selected_attractions = attractions[: min(len(attractions), 6)]
@@ -348,11 +404,12 @@ class TravelAgentOrchestrator:
         self.parser = TravelRequirementParser()
         self.amap = AmapMCPClient(api_key="" if disable_external_api else None)
         self.unsplash = UnsplashMCPClient(access_key="" if disable_external_api else None)
-        self.attractions = AttractionSearchAgent(self.amap, self.unsplash)
-        self.weather = WeatherQueryAgent(self.amap)
-        self.hotels = HotelAgent(self.amap)
         configured_llm = None if disable_llm else create_llm()
-        self.planner = PlannerAgent(llm=llm if llm is not None else configured_llm)
+        agent_llm = llm if llm is not None else configured_llm
+        self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
+        self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
+        self.hotels = HotelAgent(self.amap, llm=agent_llm)
+        self.planner = PlannerAgent(llm=agent_llm)
 
     def plan(self, request: TripPlanRequest) -> TripPlan:
         requirement = self.parser.parse(request.prompt)

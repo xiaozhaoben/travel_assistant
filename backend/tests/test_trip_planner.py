@@ -4,10 +4,11 @@ from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
+from app.agent_prompts import AgentPrompts
 from app.agents import PlannerAgent, TravelAgentOrchestrator
 from app.config import get_settings
 from app.main import app
-import app.main as main_module
 from app.models import TripPlanRequest
 from app.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 
@@ -25,6 +26,16 @@ class FakeLLM:
     def invoke(self, messages):
         self.calls.append(messages)
         return FakeMessage(self.content)
+
+
+class FakeLangChainAgent:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = []
+
+    def invoke(self, state):
+        self.calls.append(state)
+        return {"messages": [FakeMessage(self.content)]}
 
 
 class FakeHttpResponse:
@@ -128,6 +139,31 @@ def test_parser_extracts_city_days_preferences_and_budget():
     assert requirement.budget_level == "中等"
 
 
+def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
+    calls = []
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        calls.append({"model": model, "tools": tools or [], "system_prompt": system_prompt, "name": name})
+        return object()
+
+    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+
+    TravelAgentOrchestrator(llm=FakeLLM("{}"), disable_external_api=True)
+
+    assert [call["name"] for call in calls] == [
+        "attraction_search_agent",
+        "weather_query_agent",
+        "hotel_agent",
+        "planner_agent",
+    ]
+    assert [call["system_prompt"] for call in calls] == [
+        AgentPrompts.ATTRACTION_SEARCH,
+        AgentPrompts.WEATHER_QUERY,
+        AgentPrompts.HOTEL,
+        AgentPrompts.PLANNER,
+    ]
+
+
 def test_amap_client_uses_mcp_for_poi_search_and_detail():
     caller = FakeMCPCaller(
         [
@@ -195,6 +231,7 @@ def test_amap_client_uses_mcp_for_weather():
         "tool_name": "maps_weather",
         "arguments": {"city": "110000"},
     }
+    assert weather[0].date == date(2026, 5, 20)
     assert weather[0].day_weather == "晴"
     assert weather[0].day_temp == 28
 
@@ -265,17 +302,58 @@ def test_orchestrator_logs_each_agent_input_and_output_with_timestamp(caplog):
         assert all("payload" in event for event in agent_events)
 
 
-def test_planner_agent_invokes_llm_when_model_is_available():
+def test_planner_agent_invokes_langchain_runtime_when_model_is_available(monkeypatch):
     fake_plan = _fake_llm_plan()
-    llm = FakeLLM(json.dumps(fake_plan, ensure_ascii=False))
-    orchestrator = TravelAgentOrchestrator(llm=llm)
+    runtime = FakeLangChainAgent(json.dumps(fake_plan, ensure_ascii=False))
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        return runtime if name == "planner_agent" else object()
+
+    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
 
-    assert llm.calls, "PlannerAgent should call the injected LangChain-compatible LLM"
+    assert runtime.calls, "PlannerAgent should call the LangChain create_agent runtime"
+    assert runtime.calls[0]["messages"][0]["role"] == "user"
     assert plan.city == "北京"
     assert plan.days[0].summary == "LLM生成的历史文化一日游"
     assert plan.budget.total == 860
+    assert plan.generation_mode == "llm"
+
+
+def test_planner_agent_falls_back_to_raw_llm_when_create_agent_fails(monkeypatch):
+    fake_plan = _fake_llm_plan()
+    llm = FakeLLM(json.dumps(fake_plan, ensure_ascii=False))
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        raise RuntimeError("unsupported model")
+
+    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    orchestrator = TravelAgentOrchestrator(llm=llm, disable_external_api=True)
+
+    plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
+
+    assert llm.calls
+    assert plan.days[0].summary == fake_plan["days"][0]["summary"]
+    assert plan.generation_mode == "llm"
+
+
+def test_planner_agent_invokes_langchain_agent_runtime():
+    fake_plan = _fake_llm_plan()
+    runtime = FakeLangChainAgent(json.dumps(fake_plan, ensure_ascii=False))
+    planner = PlannerAgent(llm=None)
+    planner.langchain_agent = runtime
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等")
+    attractions = orchestrator.attractions.run(requirement)
+    weather = orchestrator.weather.run(requirement)
+    hotels = orchestrator.hotels.run(requirement)
+
+    plan = planner.run(requirement, attractions, weather, hotels)
+
+    assert runtime.calls
+    assert runtime.calls[0]["messages"][0]["role"] == "user"
     assert plan.generation_mode == "llm"
 
 
@@ -287,7 +365,7 @@ def test_planner_agent_marks_fallback_generation_mode_without_model():
     assert plan.generation_mode == "fallback"
 
 
-def test_planner_agent_repairs_common_llm_schema_variants():
+def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     start = date.today() + timedelta(days=7)
     llm_payload = {
         "city": "北京",
@@ -325,11 +403,17 @@ def test_planner_agent_repairs_common_llm_schema_variants():
         "overall_suggestions": "热门景点提前预约。",
         "agent_trace": "plan_generated_v1.0",
     }
-    llm = FakeLLM(json.dumps(llm_payload, ensure_ascii=False))
-    orchestrator = TravelAgentOrchestrator(llm=llm, disable_external_api=True)
+    runtime = FakeLangChainAgent(json.dumps(llm_payload, ensure_ascii=False))
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        return runtime if name == "planner_agent" else object()
+
+    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
 
+    assert runtime.calls
     assert plan.generation_mode == "llm"
     assert plan.days[0].day_index == 1
     assert plan.days[0].hotel.name
