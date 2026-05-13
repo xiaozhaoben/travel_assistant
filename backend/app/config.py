@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+ENV_PATH = BACKEND_DIR / ".env"
+
+
+@dataclass(frozen=True)
+class Settings:
+    llm_model_id: str
+    llm_api_key: str | None
+    llm_base_url: str | None
+    llm_timeout: float
+    llm_enable_thinking: bool
+    model_provider: str
+    host: str
+    port: int
+    cors_origins: list[str]
+    log_level: str
+    unsplash_access_key: str | None
+    unsplash_secret_key: str | None
+    amap_api_key: str | None
+    disable_llm: bool
+    disable_external_api: bool
+
+    @property
+    def has_llm_credentials(self) -> bool:
+        return bool(self.llm_api_key)
+
+
+def get_settings() -> Settings:
+    load_dotenv(ENV_PATH, override=False)
+
+    model_provider = os.getenv("MODEL_PROVIDER", "openai-compatible")
+    llm_model_id = os.getenv("LLM_MODEL_ID") or os.getenv("MODEL_NAME") or "gpt-4o-mini"
+    llm_api_key = (
+        os.getenv("LLM_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("DEEPSEEK_API_KEY")
+    )
+    llm_base_url = (
+        os.getenv("LLM_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("DEEPSEEK_BASE_URL")
+    )
+    cors_origins = [
+        item.strip()
+        for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174").split(",")
+        if item.strip()
+    ]
+
+    return Settings(
+        llm_model_id=llm_model_id,
+        llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
+        llm_timeout=float(os.getenv("LLM_TIMEOUT", "60")),
+        llm_enable_thinking=_env_bool("LLM_ENABLE_THINKING", default=False),
+        model_provider=model_provider,
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        cors_origins=cors_origins,
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY"),
+        unsplash_secret_key=os.getenv("UNSPLASH_SECRET_KEY"),
+        amap_api_key=os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY"),
+        disable_llm=_env_bool("DISABLE_LLM"),
+        disable_external_api=_env_bool("DISABLE_EXTERNAL_API"),
+    )
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}

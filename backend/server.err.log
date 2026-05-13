@@ -1,0 +1,428 @@
+INFO:     Will watch for changes in these directories: ['D:\\python project\\travel_assistant\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
+INFO:     Started reloader process [31696] using WatchFiles
+INFO:     Started server process [21196]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [21196]
+INFO:     Started server process [15520]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\models.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [15520]
+INFO:     Started server process [35332]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [35332]
+INFO:     Started server process [39372]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [39372]
+INFO:     Started server process [42688]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\config.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [42688]
+INFO:     Started server process [19656]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\llm_service.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [19656]
+INFO:     Started server process [42672]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [42672]
+INFO:     Started server process [40880]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+PlannerAgent LLM planning failed, falling back to local planner: 82 validation errors for TripPlan
+days.0.day_index
+  Field required [type=missing, input_value={'day_number': 1, 'date':...行或短途打车。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.summary
+  Field required [type=missing, input_value={'day_number': 1, 'date':...行或短途打车。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.transportation
+  Field required [type=missing, input_value={'day_number': 1, 'date':...行或短途打车。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.address
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.location
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.type
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.rating
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.description
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.0.category
+  Field required [type=missing, input_value={'id': 'B000A8UIN8', 'nam...伟与历史沉淀。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.0.address
+  Field required [type=missing, input_value={'id': 'B000A8UIN8', 'nam...伟与历史沉淀。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.0.location
+  Field required [type=missing, input_value={'id': 'B000A8UIN8', 'nam...伟与历史沉淀。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.0.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B000A8UIN8', 'nam...伟与历史沉淀。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.0.ticket_price
+  Field required [type=missing, input_value={'id': 'B000A8UIN8', 'nam...伟与历史沉淀。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.1.category
+  Field required [type=missing, input_value={'id': 'B000A83U0P', 'nam...文明发展历程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.1.address
+  Field required [type=missing, input_value={'id': 'B000A83U0P', 'nam...文明发展历程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.1.location
+  Field required [type=missing, input_value={'id': 'B000A83U0P', 'nam...文明发展历程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.1.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B000A83U0P', 'nam...文明发展历程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.attractions.1.ticket_price
+  Field required [type=missing, input_value={'id': 'B000A83U0P', 'nam...文明发展历程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.0.name
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.0.address
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.0.description
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.1.name
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.1.address
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.1.description
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.2.name
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.2.address
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.meals.2.description
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.estimated_transport_cost
+  Field required [type=missing, input_value={'day_number': 1, 'date':...行或短途打车。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.day_index
+  Field required [type=missing, input_value={'day_number': 2, 'date':...注意交通时间。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.summary
+  Field required [type=missing, input_value={'day_number': 2, 'date':...注意交通时间。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.transportation
+  Field required [type=missing, input_value={'day_number': 2, 'date':...注意交通时间。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.address
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.location
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.type
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.rating
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.description
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...', 'nightly_price': 520}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.0.category
+  Field required [type=missing, input_value={'id': 'B0FFFAH7Q3', 'nam...化与市井气息。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.0.address
+  Field required [type=missing, input_value={'id': 'B0FFFAH7Q3', 'nam...化与市井气息。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.0.location
+  Field required [type=missing, input_value={'id': 'B0FFFAH7Q3', 'nam...化与市井气息。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.0.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B0FFFAH7Q3', 'nam...化与市井气息。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.0.ticket_price
+  Field required [type=missing, input_value={'id': 'B0FFFAH7Q3', 'nam...化与市井气息。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.1.category
+  Field required [type=missing, input_value={'id': 'B000A5702C', 'nam...品与建筑之美。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.1.address
+  Field required [type=missing, input_value={'id': 'B000A5702C', 'nam...品与建筑之美。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.1.location
+  Field required [type=missing, input_value={'id': 'B000A5702C', 'nam...品与建筑之美。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.1.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B000A5702C', 'nam...品与建筑之美。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.attractions.1.ticket_price
+  Field required [type=missing, input_value={'id': 'B000A5702C', 'nam...品与建筑之美。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.0.name
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.0.address
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.0.description
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.1.name
+  Field required [type=missing, input_value={'type': '午餐', 'sugge..., 'estimated_cost': 100}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.1.address
+  Field required [type=missing, input_value={'type': '午餐', 'sugge..., 'estimated_cost': 100}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.1.description
+  Field required [type=missing, input_value={'type': '午餐', 'sugge..., 'estimated_cost': 100}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.2.name
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 120}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.2.address
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 120}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.meals.2.description
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 120}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.estimated_transport_cost
+  Field required [type=missing, input_value={'day_number': 2, 'date':...注意交通时间。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.day_index
+  Field required [type=missing, input_value={'day_number': 3, 'date':...选一深入游览。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.summary
+  Field required [type=missing, input_value={'day_number': 3, 'date':...选一深入游览。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.transportation
+  Field required [type=missing, input_value={'day_number': 3, 'date':...选一深入游览。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel
+  Input should be a valid dictionary or instance of Hotel [type=model_type, input_value=None, input_type=NoneType]
+    For further information visit https://errors.pydantic.dev/2.12/v/model_type
+days.2.attractions.0.category
+  Field required [type=missing, input_value={'id': 'B000A7CRPA', 'nam...适合全年龄段。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.0.address
+  Field required [type=missing, input_value={'id': 'B000A7CRPA', 'nam...适合全年龄段。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.0.location
+  Field required [type=missing, input_value={'id': 'B000A7CRPA', 'nam...适合全年龄段。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.0.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B000A7CRPA', 'nam...适合全年龄段。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.0.ticket_price
+  Field required [type=missing, input_value={'id': 'B000A7CRPA', 'nam...适合全年龄段。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.1.category
+  Field required [type=missing, input_value={'id': 'B000A7YN39', 'nam...互动体验丰富。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.1.address
+  Field required [type=missing, input_value={'id': 'B000A7YN39', 'nam...互动体验丰富。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.1.location
+  Field required [type=missing, input_value={'id': 'B000A7YN39', 'nam...互动体验丰富。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.1.visit_duration_minutes
+  Field required [type=missing, input_value={'id': 'B000A7YN39', 'nam...互动体验丰富。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.attractions.1.ticket_price
+  Field required [type=missing, input_value={'id': 'B000A7YN39', 'nam...互动体验丰富。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.0.name
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.0.address
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.0.description
+  Field required [type=missing, input_value={'type': '早餐', 'sugge...', 'estimated_cost': 50}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.1.name
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.1.address
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.1.description
+  Field required [type=missing, input_value={'type': '午餐', 'sugge...', 'estimated_cost': 80}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.2.name
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.2.address
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.meals.2.description
+  Field required [type=missing, input_value={'type': '晚餐', 'sugge..., 'estimated_cost': 150}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.estimated_transport_cost
+  Field required [type=missing, input_value={'day_number': 3, 'date':...选一深入游览。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+overall_suggestions
+  Input should be a valid list [type=list_type, input_value='北京夏季气温较高...行以避开拥堵。', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/list_type
+agent_trace
+  Input should be a valid list [type=list_type, input_value='plan_generated_v1.0', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/list_type
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [40880]
+INFO:     Started server process [19184]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [19184]
+INFO:     Started server process [27568]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+PlannerAgent LLM planning failed, falling back to local planner: 18 validation errors for TripPlan
+days.0.hotel.address
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.location
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.type
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.rating
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.nightly_price
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.0.hotel.description
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...近，方便往返。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.address
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.location
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.type
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.rating
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.nightly_price
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.1.hotel.description
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...持行程稳定性。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.address
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.location
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.type
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.rating
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.nightly_price
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+days.2.hotel.description
+  Field required [type=missing, input_value={'id': 'hotel-0', 'name':...程或结束行程。'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [27568]
+INFO:     Started server process [47628]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [47628]
+INFO:     Started server process [48632]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [48632]
+INFO:     Started server process [46232]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\agents.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [46232]
+INFO:     Started server process [48256]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_trip_planner.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [48256]
+INFO:     Started server process [46348]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\services.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [46348]
+INFO:     Started server process [48508]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
