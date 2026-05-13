@@ -91,6 +91,17 @@ set VITE_AMAP_SECURITY_JS_CODE=你的高德Web端安全密钥
 - `GET /api/map/weather`：通过 `uvx amap-mcp-server` 的 `maps_weather` 工具查询天气。
 - `GET /api/poi/photo`：通过 Unsplash MCP 风格适配层获取景点图片。
 
+## 日志
+
+后端启动时会初始化统一日志系统，日志同时输出到控制台和 `backend/logs/travel_assistant.log`。
+
+每条日志都会带有时间；四个 Agent 的调用日志是 JSON 格式，包含：
+
+- `timestamp`：日志产生时间。
+- `agent`：Agent 名称，例如 `AttractionSearchAgent`。
+- `event`：`input` 或 `output`。
+- `payload`：该 Agent 的输入或输出数据。
+
 ## 验证
 
 ```bash

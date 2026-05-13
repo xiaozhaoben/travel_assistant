@@ -5,10 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .agents import TravelAgentOrchestrator
 from .config import get_settings
+from .logging_config import setup_logging
 from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanRequest
 from .services import UnsplashMCPClient
 
 settings = get_settings()
+setup_logging(settings.log_level)
 
 app = FastAPI(title="Travel Assistant API", version="1.0.0")
 

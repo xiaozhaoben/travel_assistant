@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
 
 from .llm_service import create_llm
 from .config import get_settings
+from .logging_config import log_agent_event
 from .models import Attraction, DayPlan, Hotel, Meal, TripPlan, TripPlanRequest, TravelRequirement
 from .services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 
@@ -364,10 +365,31 @@ class TravelAgentOrchestrator:
             updates["days"] = max(1, min((request.end_date - request.start_date).days + 1, 30))
         if updates:
             requirement = requirement.model_copy(update=updates)
+        log_agent_event(self.attractions.name, "input", {"requirement": requirement})
         attractions = self.attractions.run(requirement)
+        log_agent_event(self.attractions.name, "output", {"attractions": attractions})
+
+        log_agent_event(self.weather.name, "input", {"requirement": requirement})
         weather = self.weather.run(requirement)
+        log_agent_event(self.weather.name, "output", {"weather": weather})
+
+        log_agent_event(self.hotels.name, "input", {"requirement": requirement})
         hotels = self.hotels.run(requirement)
-        return self.planner.run(requirement, attractions, weather, hotels)
+        log_agent_event(self.hotels.name, "output", {"hotels": hotels})
+
+        log_agent_event(
+            self.planner.name,
+            "input",
+            {
+                "requirement": requirement,
+                "attractions": attractions,
+                "weather": weather,
+                "hotels": hotels,
+            },
+        )
+        plan = self.planner.run(requirement, attractions, weather, hotels)
+        log_agent_event(self.planner.name, "output", {"plan": plan})
+        return plan
 
     def recalculate(self, plan: TripPlan) -> TripPlan:
         updated_days = [

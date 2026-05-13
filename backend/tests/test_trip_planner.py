@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
@@ -241,6 +242,27 @@ def test_orchestrator_generates_complete_plan_with_four_agent_outputs():
         assert len(day.attractions) >= 2
         assert len(day.meals) == 3
         assert day.hotel.name
+
+
+def test_orchestrator_logs_each_agent_input_and_output_with_timestamp(caplog):
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+
+    with caplog.at_level(logging.INFO, logger="travel_assistant.agent"):
+        orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
+
+    events = [json.loads(record.message) for record in caplog.records]
+    expected_agents = [
+        "AttractionSearchAgent",
+        "WeatherQueryAgent",
+        "HotelAgent",
+        "PlannerAgent",
+    ]
+
+    for agent_name in expected_agents:
+        agent_events = [event for event in events if event["agent"] == agent_name]
+        assert [event["event"] for event in agent_events] == ["input", "output"]
+        assert all(event["timestamp"] for event in agent_events)
+        assert all("payload" in event for event in agent_events)
 
 
 def test_planner_agent_invokes_llm_when_model_is_available():
