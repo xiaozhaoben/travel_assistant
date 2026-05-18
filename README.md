@@ -109,3 +109,15 @@ pytest backend/tests/test_trip_planner.py -q
 cd frontend
 npm run build
 ```
+
+## 景点图片 API Key 注册地址
+
+多源图片搜索说明见 `docs/image-providers.md`。常用注册入口：
+
+- Wikimedia Commons：无需 Key，文档 https://commons.wikimedia.org/wiki/Commons:API
+- Openverse：基础搜索无需 Key，高额度 OAuth 文档 https://api.openverse.org/v1/#tag/auth
+- Pexels：https://www.pexels.com/api/
+- Pixabay：https://pixabay.com/api/docs/
+- Unsplash：https://unsplash.com/developers
+- Google Places Photos：https://developers.google.com/maps/documentation/places/web-service/photos
+- Foursquare Places：https://location.foursquare.com/developer/
