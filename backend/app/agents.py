@@ -754,6 +754,7 @@ class TravelAgentOrchestrator:
         settings = get_settings()
         disable_llm = settings.disable_llm if disable_llm is None else disable_llm
         disable_external_api = settings.disable_external_api if disable_external_api is None else disable_external_api
+        self.planner_mode = settings.planner_mode
         self.parser = TravelRequirementParser()
         self.amap = AmapMCPClient(api_key="" if disable_external_api else None)
         self.unsplash = (
@@ -763,7 +764,7 @@ class TravelAgentOrchestrator:
         )
         configured_llm = None if disable_llm else create_llm()
         agent_llm = llm if llm is not None else configured_llm
-        planner_llm = llm if llm is not None else None
+        planner_llm = llm if llm is not None else (configured_llm if self.planner_mode == "quality" else None)
         self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)

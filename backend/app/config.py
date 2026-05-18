@@ -33,6 +33,10 @@ class Settings:
     amap_api_key: str | None
     web_search_mcp_command: str | None
     web_search_mcp_tool: str
+    planner_mode: str
+    research_cache_enabled: bool
+    research_cache_ttl_seconds: int
+    research_cache_max_entries: int
     disable_llm: bool
     disable_external_api: bool
 
@@ -83,6 +87,10 @@ def get_settings() -> Settings:
         amap_api_key=os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY"),
         web_search_mcp_command=os.getenv("WEB_SEARCH_MCP_COMMAND"),
         web_search_mcp_tool=os.getenv("WEB_SEARCH_MCP_TOOL", "web_search"),
+        planner_mode=_planner_mode(os.getenv("PLANNER_MODE", "fast")),
+        research_cache_enabled=_env_bool("RESEARCH_CACHE_ENABLED", default=True),
+        research_cache_ttl_seconds=int(os.getenv("RESEARCH_CACHE_TTL_SECONDS", str(60 * 60 * 24))),
+        research_cache_max_entries=int(os.getenv("RESEARCH_CACHE_MAX_ENTRIES", "200")),
         disable_llm=_env_bool("DISABLE_LLM"),
         disable_external_api=_env_bool("DISABLE_EXTERNAL_API"),
     )
@@ -93,3 +101,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _planner_mode(value: str) -> str:
+    normalized = value.strip().lower()
+    return normalized if normalized in {"fast", "quality"} else "fast"

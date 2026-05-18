@@ -103,6 +103,34 @@ def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path
     assert "预约" in snippets[0].keywords
 
 
+def test_destination_research_cache_uses_ttl_and_structured_entries(tmp_path, monkeypatch):
+    from app.research import DestinationResearchService, WebSearchMCPClient
+
+    monkeypatch.setenv("RESEARCH_CACHE_TTL_SECONDS", "86400")
+    caller = FakeWebSearchCaller()
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    cache_path = tmp_path / "research_cache.json"
+    service = DestinationResearchService(web_client=web, cache_path=cache_path)
+
+    first = service.research("北京", ["历史文化"], days=3)
+    second = service.research("北京", ["历史文化"], days=3)
+    cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    entry = next(iter(cache_payload.values()))
+
+    assert len(caller.calls) == 1
+    assert first[0].title == second[0].title
+    assert "cached_at" in entry
+    assert entry["items"][0]["title"] == "北京故宫预约攻略"
+
+    entry["cached_at"] = "2000-01-01T00:00:00+00:00"
+    cache_path.write_text(json.dumps(cache_payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("RESEARCH_CACHE_TTL_SECONDS", "1")
+    expired_service = DestinationResearchService(web_client=web, cache_path=cache_path)
+    expired_service.research("北京", ["历史文化"], days=3)
+
+    assert len(caller.calls) == 2
+
+
 def test_settings_support_reference_env_names(monkeypatch):
     monkeypatch.setenv("LLM_MODEL_ID", "qwen3.6-plus")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
@@ -358,6 +386,25 @@ def test_orchestrator_skips_configured_planner_llm_to_keep_reports_responsive(mo
     assert orchestrator.planner.llm is None
     assert "planner_agent" not in calls
     assert "attraction_search_agent" in calls
+
+
+def test_orchestrator_quality_mode_enables_configured_planner_llm(monkeypatch):
+    calls = []
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        calls.append(name)
+        return object()
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("PLANNER_MODE", "quality")
+    monkeypatch.setattr("app.agents.create_llm", lambda: object())
+    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+
+    orchestrator = TravelAgentOrchestrator(disable_external_api=True)
+
+    assert orchestrator.planner_mode == "quality"
+    assert orchestrator.planner.llm is not None
+    assert "planner_agent" in calls
 
 
 def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
@@ -1315,6 +1362,8 @@ def test_api_health_plan_and_recalculate_endpoints():
     assert health.status_code == 200
     assert "llm" in health.json()
     assert health.json()["amap_transport"] == "mcp-stdio"
+    assert health.json()["planner_mode"] in {"fast", "quality"}
+    assert health.json()["cache_enabled"] is True
 
     response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 3 天，喜欢历史文化，预算中等"})
 

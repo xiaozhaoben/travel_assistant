@@ -52,9 +52,9 @@ function formatRating(value: unknown): string {
 }
 
 function normalizePlan(raw: any, formData: TripFormData): TripPlan {
-  const days: DayPlan[] = raw.days.map((day: any) => ({
+  const days: DayPlan[] = raw.days.map((day: any, index: number) => ({
     date: day.date,
-    day_index: Number(day.day_index) - 1,
+    day_index: Number(day.day_index || index + 1),
     description: day.summary || day.description,
     transportation: day.transportation || formData.transportation,
     accommodation: formData.accommodation,
@@ -215,8 +215,8 @@ function denormalizePlan(plan: TripPlan): any {
     preferences: [],
     budget_level: '中等',
     generation_mode: plan.generation_mode,
-    days: plan.days.map((day) => ({
-      day_index: day.day_index + 1,
+    days: plan.days.map((day, index) => ({
+      day_index: day.day_index || index + 1,
       date: day.date,
       theme: day.description,
       summary: day.description,

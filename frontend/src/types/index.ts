@@ -140,5 +140,7 @@ export interface ServiceHealth {
   }
   amap_configured: boolean
   unsplash_configured: boolean
+  planner_mode: 'fast' | 'quality'
+  cache_enabled: boolean
   external_api_disabled: boolean
 }

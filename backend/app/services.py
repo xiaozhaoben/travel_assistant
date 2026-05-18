@@ -305,6 +305,8 @@ class AmapMCPClient:
         self.api_key = api_key if api_key is not None else settings.amap_api_key or os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY")
         self.mcp_caller = mcp_caller or (AmapStdioMCPToolCaller(self.api_key) if self.api_key else None)
         self.recommendation_service = recommendation_service or AttractionRecommendationService()
+        self._poi_cache: dict[tuple[str, tuple[str, ...], int], List[Attraction]] = {}
+        self._weather_cache: dict[tuple[str, str, int], List[WeatherInfo]] = {}
 
     def search_pois(
         self,
@@ -381,13 +383,17 @@ class AmapMCPClient:
         ][:limit]
 
     def get_weather(self, city: str, start: date, days: int) -> List[WeatherInfo]:
+        cache_key = (city, start.isoformat(), days)
+        if cache_key in self._weather_cache:
+            return [item.model_copy(deep=True) for item in self._weather_cache[cache_key]]
         if self.mcp_caller:
             weather = self._get_weather_from_mcp(city, start, days)
             if weather:
+                self._weather_cache[cache_key] = [item.model_copy(deep=True) for item in weather]
                 return weather
 
         weathers = [("晴", "多云", 25, 15), ("多云", "晴", 24, 14), ("小雨", "阴", 21, 13), ("晴", "晴", 26, 16)]
-        return [
+        fallback_weather = [
             WeatherInfo(
                 date=start + timedelta(days=index),
                 day_weather=weathers[index % len(weathers)][0],
@@ -399,8 +405,13 @@ class AmapMCPClient:
             )
             for index in range(days)
         ]
+        self._weather_cache[cache_key] = [item.model_copy(deep=True) for item in fallback_weather]
+        return fallback_weather
 
     def _search_pois_from_mcp(self, city: str, queries: List[str], limit: int) -> List[Attraction]:
+        cache_key = (city, tuple(queries), limit)
+        if cache_key in self._poi_cache:
+            return [item.model_copy(deep=True) for item in self._poi_cache[cache_key]]
         try:
             attractions = []
             seen: set[str] = set()
@@ -433,7 +444,9 @@ class AmapMCPClient:
                         break
                 if len(attractions) >= limit * 2:
                     break
-            return self._select_spatially_diverse_attractions(attractions, limit)
+            selected = self._select_spatially_diverse_attractions(attractions, limit)
+            self._poi_cache[cache_key] = [item.model_copy(deep=True) for item in selected]
+            return selected
         except Exception as exc:
             logger.warning("高德 MCP POI 搜索失败，使用本地景点数据: %s", exc)
             return []
@@ -952,19 +965,25 @@ class UnsplashMCPClient:
         self.wikimedia_user_agent = settings.wikimedia_user_agent
         self.enable_open_sources = enable_open_sources
         self.http_client = http_client or httpx.Client()
+        self._image_cache: dict[tuple[str, bool], str] = {}
 
     def image_for(self, query: str, use_api: bool = True) -> str:
+        cache_key = (query, use_api)
+        if cache_key in self._image_cache:
+            return self._image_cache[cache_key]
         if use_api:
             for provider, search in self._provider_order():
                 self._log_image_event("image_search_attempt", query, provider=provider)
                 url = search(query)
                 if url:
                     self._log_image_event("image_search_success", query, provider=provider, url=url)
+                    self._image_cache[cache_key] = url
                     return url
                 self._log_image_event("image_search_no_result", query, provider=provider)
         encoded = quote(query)
         fallback_url = f"https://placehold.co/960x640/e8f1ff/1f2937?text={encoded}"
         self._log_image_event("image_search_fallback", query, url=fallback_url)
+        self._image_cache[cache_key] = fallback_url
         return fallback_url
 
     def _provider_order(self):

@@ -24,7 +24,7 @@
             <a-menu-item key="map">景点地图</a-menu-item>
             <a-sub-menu key="days" title="每日行程">
               <a-menu-item v-for="day in tripPlan.days" :key="`day-${day.day_index}`">
-                第{{ day.day_index + 1 }}天
+                第{{ day.day_index }}天
               </a-menu-item>
             </a-sub-menu>
             <a-menu-item key="weather">天气信息</a-menu-item>
@@ -118,7 +118,7 @@
             <a-collapse-panel v-for="day in tripPlan.days" :key="day.day_index" :id="`day-${day.day_index}`">
               <template #header>
                 <div class="day-header">
-                  <span>第{{ day.day_index + 1 }}天</span>
+                  <span>第{{ day.day_index }}天</span>
                   <span>{{ day.date }}</span>
                 </div>
               </template>
@@ -245,7 +245,7 @@ const selectedOptionId = ref('balanced')
 const editMode = ref(false)
 const saving = ref(false)
 const activeSection = ref('overview')
-const activeDays = ref<number[]>([0])
+const activeDays = ref<number[]>([1])
 const attractionPhotos = ref<Record<string, string>>({})
 const mapMode = ref<MapMode>('mock')
 const mapHint = ref('未配置高德地图 Web JS Key，当前显示路线示意图')
@@ -369,7 +369,7 @@ async function smartAdjustDay(operation: 'refill_day' | 'reorder_day') {
   if (!tripPlan.value) return
   saving.value = true
   try {
-    const activeDay = Number(activeDays.value[0] ?? 0) + 1
+    const activeDay = Number(activeDays.value[0] ?? 1)
     tripPlan.value = await recalculateTripPlan(tripPlan.value, {
       operation,
       day_index: activeDay,
@@ -406,8 +406,9 @@ function getMealLabel(type: string) {
 
 async function loadAttractionPhotos() {
   if (!tripPlan.value) return
-  const tasks = tripPlan.value.days.flatMap((day) =>
-    day.attractions.map(async (attraction) => {
+  const tasks = tripPlan.value.days
+    .flatMap((day) => day.attractions)
+    .map((attraction) => async () => {
       if (attraction.image_url && !isRetiredImageUrl(attraction.image_url)) {
         attractionPhotos.value[attraction.name] = attraction.image_url
         return
@@ -417,9 +418,14 @@ async function loadAttractionPhotos() {
       } catch {
         attractionPhotos.value[attraction.name] = ''
       }
-    }),
-  )
-  await Promise.all(tasks)
+    })
+  await runLimited(tasks, 4)
+}
+
+async function runLimited(tasks: Array<() => Promise<void>>, limit: number) {
+  for (let index = 0; index < tasks.length; index += limit) {
+    await Promise.all(tasks.slice(index, index + limit).map((task) => task()))
+  }
 }
 
 function isRetiredImageUrl(url?: string) {
