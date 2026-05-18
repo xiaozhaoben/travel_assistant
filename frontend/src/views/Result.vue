@@ -58,6 +58,25 @@
           </a-list>
         </a-card>
 
+        <a-card v-if="planningResult?.quality_report" title="质量审校" :bordered="false" class="research-section">
+          <a-space direction="vertical" style="width: 100%">
+            <a-progress
+              :percent="planningResult.quality_report.score"
+              :status="planningResult.quality_report.warnings.length ? 'exception' : 'success'"
+            />
+            <a-alert
+              v-for="warning in planningResult.quality_report.warnings"
+              :key="warning"
+              type="warning"
+              show-icon
+              :message="warning"
+            />
+            <div class="option-detail">
+              <span v-for="item in planningResult.quality_report.recommendations" :key="item">{{ item }}</span>
+            </div>
+          </a-space>
+        </a-card>
+
         <section class="top-info-section">
           <div class="left-info">
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false">

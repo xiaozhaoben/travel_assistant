@@ -138,6 +138,7 @@ function normalizePlanningResult(raw: any, formData: TripFormData): TripPlanning
           ],
     research_context: raw.research_context || [],
     clarifying_suggestions: raw.clarifying_suggestions || [],
+    quality_report: raw.quality_report,
     city: fallbackPlan?.city,
     days: fallbackPlan?.days,
     weather_info: fallbackPlan?.weather_info,

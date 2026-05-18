@@ -99,11 +99,19 @@ export interface TripPlanningResult {
   options: TripPlanOption[]
   research_context: ResearchSnippet[]
   clarifying_suggestions: string[]
+  quality_report?: QualityReport
   city?: string
   days?: DayPlan[]
   weather_info?: WeatherInfo[]
   overall_suggestions?: string
   budget?: Budget
+}
+
+export interface QualityReport {
+  score: number
+  checks: string[]
+  warnings: string[]
+  recommendations: string[]
 }
 
 export interface TripFormData {

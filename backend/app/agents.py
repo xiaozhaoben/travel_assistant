@@ -23,6 +23,7 @@ from .models import (
     DayPlan,
     Hotel,
     Meal,
+    QualityReport,
     ResearchSnippet,
     TripPlan,
     TripPlanOption,
@@ -358,6 +359,14 @@ class PlannerAgent:
         research_context = research_context or []
         payload = {
             "user_request": requirement.model_dump(mode="json"),
+            "hard_constraints": {
+                "must_visit": requirement.must_visit,
+                "avoid_places": requirement.avoid_places,
+                "low_intensity": requirement.low_intensity,
+                "companions": requirement.companions,
+                "transportation": requirement.transportation,
+                "food_preferences": requirement.food_preferences,
+            },
             "attractions": [
                 {
                     "id": item.id,
@@ -391,6 +400,8 @@ class PlannerAgent:
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
             "options 必须包含 balanced、relaxed、deep_dive 三套方案；每项包含 id,title,style,suitable_for,highlights,tradeoffs,plan。"
             "plan 字段必须匹配 TripPlan：city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。"
+            "必须遵守 hard_constraints，不得安排 avoid_places；must_visit 要优先进入 balanced 或 deep_dive。"
+            "每天景点应来自 attractions 列表，若需要补充也必须保持真实 POI 风格并写清不确定性。"
             "请把 research_context 中的预约、交通、避坑、餐饮信息写入建议或每日摘要；不要 Markdown，不要额外解释。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
@@ -749,6 +760,119 @@ class PlannerAgent:
         ]
 
 
+class QualityAssuranceAgent:
+    name = "QualityAssuranceAgent"
+
+    def __init__(self, llm: Any | None = None):
+        self.langchain_agent = _safe_create_agent(
+            llm,
+            [],
+            AgentPrompts.QUALITY_ASSURANCE,
+            "quality_assurance_agent",
+        )
+
+    def run(self, result: TripPlanningResult, requirement: TravelRequirement) -> TripPlanningResult:
+        report = self._audit(result, requirement)
+        options = [
+            option.model_copy(update={"plan": self._append_trace(option.plan)})
+            for option in result.options
+        ]
+        suggestions = list(dict.fromkeys([*result.clarifying_suggestions, *report.recommendations[:3]]))
+        return result.model_copy(
+            update={
+                "options": options,
+                "clarifying_suggestions": suggestions,
+                "quality_report": report,
+            }
+        )
+
+    def _append_trace(self, plan: TripPlan) -> TripPlan:
+        trace = list(plan.agent_trace)
+        if self.name not in trace:
+            trace.append(self.name)
+        return plan.model_copy(update={"agent_trace": trace})
+
+    def _audit(self, result: TripPlanningResult, requirement: TravelRequirement) -> QualityReport:
+        checks: list[str] = []
+        warnings: list[str] = []
+        recommendations: list[str] = []
+        score = 100
+
+        if len(result.options) == 3:
+            checks.append("已生成 balanced、relaxed、deep_dive 三套方案。")
+        else:
+            warnings.append("方案数量不足 3 套。")
+            score -= 12
+
+        for option in result.options:
+            plan = option.plan
+            option_label = option.title or option.id
+            if plan.days_count != requirement.days or len(plan.days) != requirement.days:
+                warnings.append(f"{option_label} 的天数与用户需求不一致。")
+                score -= 12
+            if plan.budget.total <= 0:
+                warnings.append(f"{option_label} 缺少有效预算估算。")
+                score -= 10
+            names = [attraction.name for day in plan.days for attraction in day.attractions]
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            if duplicates:
+                warnings.append(f"{option_label} 存在重复景点：{'、'.join(duplicates[:3])}。")
+                score -= min(10, len(duplicates) * 3)
+            avoided = [name for name in names for avoid in requirement.avoid_places if avoid and avoid in name]
+            if avoided:
+                warnings.append(f"{option_label} 安排了用户要求避开的地点：{'、'.join(sorted(set(avoided))[:3])}。")
+                score -= 20
+            for day in plan.days:
+                if not day.attractions:
+                    warnings.append(f"{option_label} 第 {day.day_index} 天没有景点安排。")
+                    score -= 8
+                if requirement.low_intensity and len(day.attractions) > 2:
+                    warnings.append(f"{option_label} 第 {day.day_index} 天对低强度用户偏紧。")
+                    score -= 4
+                if len(day.route_points) != len(day.attractions):
+                    warnings.append(f"{option_label} 第 {day.day_index} 天路线点与景点数量不一致。")
+                    score -= 4
+
+        all_names = [attraction.name for option in result.options for day in option.plan.days for attraction in day.attractions]
+        missing_must_visit = [
+            place for place in requirement.must_visit
+            if place and not any(place in name for name in all_names)
+        ]
+        if missing_must_visit:
+            warnings.append(f"未覆盖必去地点：{'、'.join(missing_must_visit[:3])}。")
+            recommendations.append("建议补充必去地点，或在方案取舍里说明未安排原因。")
+            score -= 12
+        else:
+            checks.append("必去/避开地点约束已通过基础检查。")
+
+        research_keywords = {keyword for snippet in result.research_context for keyword in snippet.keywords}
+        suggestion_text = " ".join(result.selected_plan.overall_suggestions)
+        if result.research_context and not any(keyword in suggestion_text for keyword in research_keywords if keyword):
+            warnings.append("资料依据尚未明显体现在整体建议中。")
+            recommendations.append("建议把预约、交通、避坑或餐饮信息写入每日摘要或整体建议。")
+            score -= 6
+        elif result.research_context:
+            checks.append("资料依据已进入计划输出。")
+
+        weather_risk_days = [
+            item.date.isoformat()
+            for item in result.selected_plan.weather
+            if any(term in f"{item.day_weather}{item.night_weather}" for term in ["雨", "雪", "雷", "雾"])
+        ]
+        if weather_risk_days:
+            recommendations.append(f"{'、'.join(weather_risk_days[:3])} 天气可能影响户外游览，建议保留室内备选。")
+
+        if not recommendations:
+            recommendations.append("上线前建议用真实 API Key 对目标城市进行一次端到端抽样验收。")
+        checks.append("已完成天数、约束、预算、重复景点和天气风险基础审校。")
+        return QualityReport(
+            score=max(0, min(100, score)),
+            checks=list(dict.fromkeys(checks)),
+            warnings=list(dict.fromkeys(warnings)),
+            recommendations=list(dict.fromkeys(recommendations)),
+        )
+
+
 class TravelAgentOrchestrator:
     def __init__(self, llm: Any | None = None, disable_llm: bool | None = None, disable_external_api: bool | None = None):
         settings = get_settings()
@@ -769,6 +893,7 @@ class TravelAgentOrchestrator:
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)
         self.planner = PlannerAgent(llm=planner_llm)
+        self.quality = QualityAssuranceAgent(llm=None)
         self.research = DestinationResearchService()
 
     def plan(self, request: TripPlanRequest) -> TripPlanningResult:
@@ -822,7 +947,11 @@ class TravelAgentOrchestrator:
         )
         result = self.planner.run(requirement, attractions, weather, hotels, research_context)
         log_agent_event(self.planner.name, "output", {"result": result})
-        return result
+
+        log_agent_event(self.quality.name, "input", {"requirement": requirement, "result": result})
+        audited_result = self.quality.run(result, requirement)
+        log_agent_event(self.quality.name, "output", {"quality_report": audited_result.quality_report})
+        return audited_result
 
     def recalculate(
         self,

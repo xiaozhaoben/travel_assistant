@@ -139,11 +139,19 @@ class TripPlanOption(BaseModel):
     plan: TripPlan
 
 
+class QualityReport(BaseModel):
+    score: int = Field(default=100, ge=0, le=100)
+    checks: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+
+
 class TripPlanningResult(BaseModel):
     selected_option_id: str
     options: List[TripPlanOption]
     research_context: List[ResearchSnippet] = Field(default_factory=list)
     clarifying_suggestions: List[str] = Field(default_factory=list)
+    quality_report: QualityReport = Field(default_factory=QualityReport)
 
     @property
     def selected_plan(self) -> TripPlan:

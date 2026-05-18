@@ -1144,7 +1144,10 @@ def test_orchestrator_generates_complete_plan_with_four_agent_outputs():
         "WeatherQueryAgent",
         "HotelAgent",
         "PlannerAgent",
+        "QualityAssuranceAgent",
     ]
+    assert result.quality_report.score > 0
+    assert result.quality_report.checks
     for day in plan.days:
         assert len(day.attractions) >= 2
         assert len(day.meals) == 3
@@ -1167,6 +1170,7 @@ def test_orchestrator_logs_each_agent_input_and_output_with_timestamp(caplog):
         "WeatherQueryAgent",
         "HotelAgent",
         "PlannerAgent",
+        "QualityAssuranceAgent",
     ]
 
     for agent_name in expected_agents:
@@ -1198,7 +1202,22 @@ def test_planner_prompt_includes_research_context():
     payload = json.loads(prompt.rsplit("\n", 1)[1])
 
     assert payload["research_context"][0]["title"] == "故宫预约提醒"
+    assert payload["hard_constraints"]["must_visit"] == []
     assert "提前预约" in AgentPrompts.PLANNER
+
+
+def test_quality_agent_flags_avoid_places_and_appends_trace():
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+
+    result = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
+    requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等").model_copy(
+        update={"avoid_places": ["故宫"]}
+    )
+    audited = orchestrator.quality.run(result, requirement)
+
+    assert "QualityAssuranceAgent" in audited.selected_plan.agent_trace
+    assert audited.quality_report.score < 100
+    assert any("避开" in warning for warning in audited.quality_report.warnings)
 
 
 def test_planner_agent_invokes_langchain_runtime_when_model_is_available(monkeypatch):
@@ -1375,6 +1394,7 @@ def test_api_health_plan_and_recalculate_endpoints():
     assert [option["id"] for option in payload["data"]["options"]] == ["balanced", "relaxed", "deep_dive"]
     assert payload["data"]["research_context"]
     assert payload["data"]["clarifying_suggestions"]
+    assert payload["data"]["quality_report"]["score"] > 0
 
     plan = payload["data"]["options"][0]["plan"]
     original_total = plan["budget"]["total"]
