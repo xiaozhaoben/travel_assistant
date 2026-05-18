@@ -18,7 +18,19 @@ from .agent_prompts import AgentPrompts
 from .llm_service import create_llm
 from .config import get_settings
 from .logging_config import log_agent_event
-from .models import Attraction, DayPlan, Hotel, Meal, TripPlan, TripPlanRequest, TravelRequirement
+from .models import (
+    Attraction,
+    DayPlan,
+    Hotel,
+    Meal,
+    ResearchSnippet,
+    TripPlan,
+    TripPlanOption,
+    TripPlanningResult,
+    TripPlanRequest,
+    TravelRequirement,
+)
+from .research import DestinationResearchService
 from .services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 
 logger = logging.getLogger(__name__)
@@ -45,6 +57,7 @@ class AttractionSearchAgent:
     def __init__(self, amap: AmapMCPClient, unsplash: UnsplashMCPClient, llm: Any | None = None):
         self.amap = amap
         self.unsplash = unsplash
+        self.llm = llm
         self.langchain_agent = _safe_create_agent(
             llm,
             [],
@@ -53,11 +66,177 @@ class AttractionSearchAgent:
         )
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
-        attractions = self.amap.search_pois(requirement.city, requirement.preferences, limit=requirement.days * 3)
+        search_queries = self._build_search_queries(requirement)
+        attractions = self.amap.search_pois(requirement.city, search_queries, limit=requirement.days * 3)
         return [
             attraction.model_copy(update={"image_url": self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
             for attraction in attractions
         ]
+
+    def _build_search_queries(self, requirement: TravelRequirement) -> List[str]:
+        ai_queries = self._try_ai_search_queries(requirement)
+        if ai_queries:
+            return ai_queries
+        return self._fallback_search_queries(requirement)
+
+    def _try_ai_search_queries(self, requirement: TravelRequirement) -> List[str]:
+        if self.langchain_agent is None and self.llm is None:
+            return []
+        prompt = self._build_query_prompt(requirement)
+        try:
+            if self.langchain_agent is not None:
+                response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+                content = self._extract_agent_content(response)
+            else:
+                response = self.llm.invoke(prompt)
+                content = str(getattr(response, "content", response))
+            data = self._extract_json(str(content))
+            queries = data.get("queries") if isinstance(data, dict) else None
+            return self._normalize_search_queries(queries, requirement.city)
+        except Exception as exc:
+            logger.warning("AttractionSearchAgent query planning failed, using fallback queries: %s", exc)
+            return []
+
+    def _build_query_prompt(self, requirement: TravelRequirement) -> str:
+        payload = requirement.model_dump(mode="json")
+        return (
+            "请为高德地图 maps_text_search 生成 8-12 个中文 POI 搜索关键词。"
+            "优先输出你判断真实存在、可独立游览、可在地图中直接搜到的具体地点名称，例如陈家祠、沙面岛、南越王博物院、越秀公园这类 POI。"
+            "不要输出模板词或泛分类词，例如“广州历史街区”“广州特色街区”“广州城市公园”“广州城市地标”“广州历史文化景点”。"
+            "可以根据城市和偏好自由发挥，覆盖不同片区、不同类型和不同强度，但每个关键词都应尽量指向一个真实景点、街区、场馆或景区。"
+            "不要只围绕一个大景区生成入口、检票处、服务中心、讲解处、馆内小景点。"
+            "如果不确定具体名称，宁可输出更知名的真实地标，不要编造“xx历史街区”这种固定形式。"
+            "只返回 JSON：{\"queries\":[\"...\"]}。\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+
+    def _extract_agent_content(self, response: Any) -> str:
+        if isinstance(response, dict) and response.get("messages"):
+            message = response["messages"][-1]
+            return str(getattr(message, "content", message))
+        return str(getattr(response, "content", response))
+
+    def _extract_json(self, content: str) -> dict:
+        if "```json" in content:
+            content = content.split("```json", 1)[1].split("```", 1)[0]
+        elif "```" in content:
+            content = content.split("```", 1)[1].split("```", 1)[0]
+        else:
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                content = match.group(0)
+        return json.loads(content.strip())
+
+    def _normalize_search_queries(self, queries: Any, city: str) -> List[str]:
+        if not isinstance(queries, list):
+            return []
+        normalized: list[str] = []
+        forbidden_terms = ["酒店", "厕所", "停车场", "公交站", "地铁站"]
+        for query in queries:
+            text = str(query).strip()
+            if not text or any(term in text for term in forbidden_terms):
+                continue
+            if city not in text:
+                text = f"{city}{text}"
+            if self._is_generic_query(text, city):
+                continue
+            if text not in normalized:
+                normalized.append(text)
+            if len(normalized) >= 12:
+                break
+        return normalized
+
+    def _fallback_search_queries(self, requirement: TravelRequirement) -> List[str]:
+        queries: list[str] = self._seed_search_queries(requirement)
+        for place in requirement.must_visit:
+            queries.append(f"{requirement.city}{place}")
+        for preference in requirement.preferences:
+            if preference == "历史文化":
+                queries.extend(
+                    [
+                        f"{requirement.city}古镇",
+                        f"{requirement.city}故居",
+                        f"{requirement.city}博物院",
+                        f"{requirement.city}博物馆",
+                        f"{requirement.city}文化遗址",
+                    ]
+                )
+            elif preference == "自然风光":
+                queries.extend(
+                    [
+                        f"{requirement.city}风景名胜",
+                        f"{requirement.city}公园",
+                        f"{requirement.city}山水",
+                        f"{requirement.city}海滨",
+                    ]
+                )
+            else:
+                queries.extend(
+                    [
+                        f"{requirement.city}{preference}景点",
+                        f"{requirement.city}{preference}路线",
+                    ]
+                )
+        queries.extend([f"{requirement.city}必游景点", f"{requirement.city}风景名胜"])
+        unique_queries: list[str] = []
+        for query in queries:
+            if query and query not in unique_queries and not self._is_generic_query(query, requirement.city):
+                unique_queries.append(query)
+        return unique_queries[:12]
+
+    def _seed_search_queries(self, requirement: TravelRequirement) -> list[str]:
+        fallback = getattr(self.amap, "_fallback_attractions_for_city", None)
+        if not callable(fallback):
+            return []
+        try:
+            attractions = fallback(requirement.city)
+        except Exception:
+            return []
+        preferred = [
+            attraction
+            for attraction in attractions
+            if self._matches_preferences(attraction, requirement.preferences)
+        ]
+        ordered = preferred + [attraction for attraction in attractions if attraction not in preferred]
+        return [f"{requirement.city}{attraction.name}" for attraction in ordered[:8]]
+
+    def _matches_preferences(self, attraction: Attraction, preferences: list[str]) -> bool:
+        text = f"{attraction.name} {attraction.category} {attraction.description}"
+        if not preferences:
+            return True
+        preference_terms = {
+            "历史文化": ["历史", "文化", "博物", "故居", "古", "祠", "遗址", "街区"],
+            "自然风光": ["自然", "风景", "公园", "山", "湖", "海", "岛"],
+            "美食": ["美食", "小吃", "步行街", "街"],
+            "艺术": ["艺术", "美术", "展览", "博物"],
+            "购物": ["购物", "商业", "步行街"],
+            "休闲": ["休闲", "公园", "街区"],
+        }
+        for preference in preferences:
+            terms = preference_terms.get(preference, [preference])
+            if any(term in text for term in terms):
+                return True
+        return False
+
+    def _is_generic_query(self, query: str, city: str) -> bool:
+        if not city or not query.startswith(city):
+            return False
+        suffix = query[len(city):].strip()
+        generic_suffixes = {
+            "历史街区",
+            "特色街区",
+            "城市公园",
+            "城市地标",
+            "历史文化景点",
+            "历史文化路线",
+            "自然风光路线",
+            "文物古迹",
+            "必游景点",
+            "风景名胜",
+            "观景地",
+            "美食街",
+        }
+        return suffix in generic_suffixes
 
 
 class WeatherQueryAgent:
@@ -104,12 +283,20 @@ class PlannerAgent:
             "planner_agent",
         )
 
-    def run(self, requirement: TravelRequirement, attractions: List[Attraction], weather, hotels: List[Hotel]) -> TripPlan:
+    def run(
+        self,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        research_context: List[ResearchSnippet] | None = None,
+    ) -> TripPlanningResult:
+        research_context = research_context or []
         if self.langchain_agent is not None or self.llm is not None:
-            llm_plan = self._try_llm_plan(requirement, attractions, weather, hotels)
-            if llm_plan is not None:
-                return llm_plan
-        return self._fallback_plan(requirement, attractions, weather, hotels)
+            llm_result = self._try_llm_plan(requirement, attractions, weather, hotels, research_context)
+            if llm_result is not None:
+                return llm_result
+        return self._fallback_result(requirement, attractions, weather, hotels, research_context)
 
     def _try_llm_plan(
         self,
@@ -117,8 +304,9 @@ class PlannerAgent:
         attractions: List[Attraction],
         weather,
         hotels: List[Hotel],
-    ) -> TripPlan | None:
-        prompt = self._build_prompt(requirement, attractions, weather, hotels)
+        research_context: List[ResearchSnippet],
+    ) -> TripPlanningResult | None:
+        prompt = self._build_prompt(requirement, attractions, weather, hotels, research_context)
         try:
             if SystemMessage is not None and HumanMessage is not None:
                 messages = [
@@ -138,8 +326,7 @@ class PlannerAgent:
             else:
                 return None
             data = self._extract_json(str(content))
-            data = self._normalize_llm_data(data, requirement, attractions, weather, hotels)
-            return TripPlan.model_validate(data).model_copy(update={"generation_mode": "llm"})
+            return self._normalize_llm_result(data, requirement, attractions, weather, hotels, research_context)
         except Exception as exc:
             logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
             return None
@@ -150,9 +337,17 @@ class PlannerAgent:
             return str(getattr(message, "content", message))
         return str(getattr(response, "content", response))
 
-    def _build_prompt(self, requirement: TravelRequirement, attractions: List[Attraction], weather, hotels: List[Hotel]) -> str:
+    def _build_prompt(
+        self,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        research_context: List[ResearchSnippet] | None = None,
+    ) -> str:
         selected_attractions = attractions[: min(len(attractions), 6)]
         selected_hotels = hotels[: min(len(hotels), 2)]
+        research_context = research_context or []
         payload = {
             "user_request": requirement.model_dump(mode="json"),
             "attractions": [
@@ -182,12 +377,61 @@ class PlannerAgent:
                 }
                 for item in selected_hotels
             ],
+            "research_context": [item.model_dump(mode="json") for item in research_context[:6]],
         }
         return (
-            "请根据资料生成完整旅行计划。每天2-3个景点，包含早午晚餐、酒店、路线点、预算和建议；"
-            "只返回可解析 JSON，不要 Markdown，不要额外解释。字段必须匹配："
-            "city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。\n"
+            "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
+            "options 必须包含 balanced、relaxed、deep_dive 三套方案；每项包含 id,title,style,suitable_for,highlights,tradeoffs,plan。"
+            "plan 字段必须匹配 TripPlan：city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。"
+            "请把 research_context 中的预约、交通、避坑、餐饮信息写入建议或每日摘要；不要 Markdown，不要额外解释。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+
+    def _normalize_llm_result(
+        self,
+        data: dict,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        research_context: List[ResearchSnippet],
+    ) -> TripPlanningResult:
+        raw_options = data.get("options")
+        if not isinstance(raw_options, list) or not raw_options:
+            plan_data = self._normalize_llm_data(data, requirement, attractions, weather, hotels)
+            plan = TripPlan.model_validate(plan_data).model_copy(update={"generation_mode": "llm"})
+            return self._wrap_plan_options(plan, requirement, research_context)
+
+        options: List[TripPlanOption] = []
+        variants = self._variant_meta()
+        variant_ids = list(variants.keys())
+        for index, raw_option in enumerate(raw_options[:3]):
+            raw_option = raw_option if isinstance(raw_option, dict) else {}
+            option_id = raw_option.get("id") or variant_ids[min(index, len(variant_ids) - 1)]
+            meta = variants.get(option_id, variants[variant_ids[min(index, len(variant_ids) - 1)]])
+            plan_payload = raw_option.get("plan") if isinstance(raw_option.get("plan"), dict) else raw_option
+            plan_data = self._normalize_llm_data(plan_payload, requirement, attractions, weather, hotels)
+            plan = TripPlan.model_validate(plan_data).model_copy(update={"generation_mode": "llm"})
+            options.append(
+                TripPlanOption(
+                    id=option_id,
+                    title=raw_option.get("title") or meta["title"],
+                    style=raw_option.get("style") or meta["style"],
+                    suitable_for=raw_option.get("suitable_for") or meta["suitable_for"],
+                    highlights=self._ensure_list(raw_option.get("highlights"), meta["highlights"]),
+                    tradeoffs=self._ensure_list(raw_option.get("tradeoffs"), meta["tradeoffs"]),
+                    plan=plan,
+                )
+            )
+        if len(options) < 3:
+            fallback = self._fallback_result(requirement, attractions, weather, hotels, research_context)
+            existing = {option.id for option in options}
+            options.extend([option for option in fallback.options if option.id not in existing][: 3 - len(options)])
+        return TripPlanningResult(
+            selected_option_id=data.get("selected_option_id") or options[0].id,
+            options=options[:3],
+            research_context=research_context,
+            clarifying_suggestions=self._clarifying_suggestions(requirement),
         )
 
     def _extract_json(self, content: str) -> dict:
@@ -340,28 +584,129 @@ class PlannerAgent:
             return fallback
         return [value]
 
-    def _fallback_plan(self, requirement: TravelRequirement, attractions: List[Attraction], weather, hotels: List[Hotel]) -> TripPlan:
+    def _fallback_result(
+        self,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        research_context: List[ResearchSnippet],
+    ) -> TripPlanningResult:
+        options = [
+            self._option_from_plan("balanced", self._fallback_plan(requirement, attractions, weather, hotels, "balanced")),
+            self._option_from_plan("relaxed", self._fallback_plan(requirement, attractions, weather, hotels, "relaxed")),
+            self._option_from_plan("deep_dive", self._fallback_plan(requirement, attractions, weather, hotels, "deep_dive")),
+        ]
+        return TripPlanningResult(
+            selected_option_id="balanced",
+            options=options,
+            research_context=research_context,
+            clarifying_suggestions=self._clarifying_suggestions(requirement),
+        )
+
+    def _wrap_plan_options(
+        self,
+        plan: TripPlan,
+        requirement: TravelRequirement,
+        research_context: List[ResearchSnippet],
+    ) -> TripPlanningResult:
+        fallback = self._fallback_result(requirement, plan.days[0].attractions if plan.days else [], plan.weather, [plan.days[0].hotel] if plan.days else [], research_context)
+        options = [self._option_from_plan("balanced", plan), *fallback.options[1:]]
+        return TripPlanningResult(
+            selected_option_id="balanced",
+            options=options[:3],
+            research_context=research_context,
+            clarifying_suggestions=self._clarifying_suggestions(requirement),
+        )
+
+    def _option_from_plan(self, option_id: str, plan: TripPlan) -> TripPlanOption:
+        meta = self._variant_meta()[option_id]
+        return TripPlanOption(
+            id=option_id,
+            title=meta["title"],
+            style=meta["style"],
+            suitable_for=meta["suitable_for"],
+            highlights=meta["highlights"],
+            tradeoffs=meta["tradeoffs"],
+            plan=plan,
+        )
+
+    def _variant_meta(self) -> dict[str, dict[str, Any]]:
+        return {
+            "balanced": {
+                "title": "经典均衡方案",
+                "style": "经典均衡",
+                "suitable_for": "第一次到访、希望覆盖代表性景点的旅行者",
+                "highlights": ["覆盖城市代表景点", "预算和体力较均衡", "适合多数用户直接采用"],
+                "tradeoffs": ["热门景点较多，需要提前预约"],
+            },
+            "relaxed": {
+                "title": "轻松舒适方案",
+                "style": "轻松舒适",
+                "suitable_for": "亲子、带老人、希望少走路或慢游的旅行者",
+                "highlights": ["每天景点更少", "减少跨城折返", "预留更多休息时间"],
+                "tradeoffs": ["覆盖景点数量少于均衡方案"],
+            },
+            "deep_dive": {
+                "title": "深度探索方案",
+                "style": "深度探索",
+                "suitable_for": "体力较好、想深入了解城市主题的人",
+                "highlights": ["主题更集中", "加入更多支线景点", "文化体验更完整"],
+                "tradeoffs": ["步行和换乘强度更高"],
+            },
+        }
+
+    def _clarifying_suggestions(self, requirement: TravelRequirement) -> list[str]:
+        suggestions = []
+        if requirement.companions == "未指定":
+            suggestions.append("可以补充同行人群，例如亲子、情侣、老人或朋友。")
+        if not requirement.food_preferences:
+            suggestions.append("可以补充餐饮偏好或忌口，例如想吃本地菜、清淡、素食。")
+        if not requirement.must_visit:
+            suggestions.append("可以指定必去景点，系统会优先安排。")
+        suggestions.append("删除不喜欢的景点后，可以使用智能补景点或重排当天路线。")
+        return suggestions
+
+    def _fallback_plan(
+        self,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        variant_id: str = "balanced",
+    ) -> TripPlan:
         days: List[DayPlan] = []
         hotel = hotels[0]
-        per_day = max(2, min(3, len(attractions) // requirement.days or 2))
+        target_per_day = 2 if variant_id == "relaxed" or requirement.low_intensity else 3
+        per_day = max(1, min(target_per_day, len(attractions) // requirement.days or target_per_day))
+        ordered_attractions = list(attractions)
+        if variant_id == "deep_dive":
+            ordered_attractions = attractions[1:] + attractions[:1]
 
         for index in range(requirement.days):
             start = index * per_day
-            selected = attractions[start : start + per_day] or attractions[:2]
+            selected = ordered_attractions[start : start + per_day] or ordered_attractions[:per_day]
             day_hotel = hotels[index % len(hotels)]
             meals = self._meals(requirement.city, requirement.budget_level)
+            variant_summary = {
+                "balanced": "控制步行和换乘强度",
+                "relaxed": "减少景点数量并保留休息时间",
+                "deep_dive": "强化主题串联和深度体验",
+            }.get(variant_id, "控制步行和换乘强度")
             days.append(
                 DayPlan(
                     day_index=index + 1,
                     date=requirement.start_date + timedelta(days=index),
                     theme=self._theme(requirement.preferences, index),
-                    summary=f"第 {index + 1} 天围绕{self._theme(requirement.preferences, index)}展开，控制步行和换乘强度。",
-                    transportation="公共交通 + 步行",
+                    summary=f"第 {index + 1} 天围绕{self._theme(requirement.preferences, index)}展开，{variant_summary}。",
+                    transportation=requirement.transportation or "公共交通 + 步行",
                     hotel=day_hotel,
                     attractions=selected,
                     meals=meals,
                     route_points=[item.location for item in selected],
-                    estimated_transport_cost=60 if requirement.budget_level != "高" else 140,
+                    estimated_transport_cost=(45 if variant_id == "relaxed" else 80 if variant_id == "deep_dive" else 60)
+                    if requirement.budget_level != "高"
+                    else 140,
                 )
             )
 
@@ -403,15 +748,21 @@ class TravelAgentOrchestrator:
         disable_external_api = settings.disable_external_api if disable_external_api is None else disable_external_api
         self.parser = TravelRequirementParser()
         self.amap = AmapMCPClient(api_key="" if disable_external_api else None)
-        self.unsplash = UnsplashMCPClient(access_key="" if disable_external_api else None)
+        self.unsplash = (
+            UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
+            if disable_external_api
+            else UnsplashMCPClient()
+        )
         configured_llm = None if disable_llm else create_llm()
         agent_llm = llm if llm is not None else configured_llm
+        planner_llm = llm if llm is not None else None
         self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)
-        self.planner = PlannerAgent(llm=agent_llm)
+        self.planner = PlannerAgent(llm=planner_llm)
+        self.research = DestinationResearchService()
 
-    def plan(self, request: TripPlanRequest) -> TripPlan:
+    def plan(self, request: TripPlanRequest) -> TripPlanningResult:
         requirement = self.parser.parse(request.prompt)
         updates = {}
         if request.start_date is not None:
@@ -420,6 +771,19 @@ class TravelAgentOrchestrator:
             updates["days"] = request.days
         elif request.start_date is not None and request.end_date is not None:
             updates["days"] = max(1, min((request.end_date - request.start_date).days + 1, 30))
+        for field_name in (
+            "travel_style",
+            "companions",
+            "transportation",
+            "accommodation",
+            "food_preferences",
+            "must_visit",
+            "avoid_places",
+            "low_intensity",
+        ):
+            value = getattr(request, field_name)
+            if value not in (None, [], ""):
+                updates[field_name] = value
         if updates:
             requirement = requirement.model_copy(update=updates)
         log_agent_event(self.attractions.name, "input", {"requirement": requirement})
@@ -434,6 +798,8 @@ class TravelAgentOrchestrator:
         hotels = self.hotels.run(requirement)
         log_agent_event(self.hotels.name, "output", {"hotels": hotels})
 
+        research_context = self.research.research(requirement.city, requirement.preferences, requirement.days)
+
         log_agent_event(
             self.planner.name,
             "input",
@@ -442,15 +808,44 @@ class TravelAgentOrchestrator:
                 "attractions": attractions,
                 "weather": weather,
                 "hotels": hotels,
+                "research_context": research_context,
             },
         )
-        plan = self.planner.run(requirement, attractions, weather, hotels)
-        log_agent_event(self.planner.name, "output", {"plan": plan})
-        return plan
+        result = self.planner.run(requirement, attractions, weather, hotels, research_context)
+        log_agent_event(self.planner.name, "output", {"result": result})
+        return result
 
-    def recalculate(self, plan: TripPlan) -> TripPlan:
+    def recalculate(
+        self,
+        plan: TripPlan,
+        operation: str = "recalculate_only",
+        research_context: List[ResearchSnippet] | None = None,
+        day_index: int | None = None,
+    ) -> TripPlan:
+        updated_plan = plan
+        if operation in {"refill_day", "reorder_day"}:
+            updated_plan = self._adjust_plan(updated_plan, operation, day_index)
         updated_days = [
             day.model_copy(update={"route_points": [item.location for item in day.attractions]})
-            for day in plan.days
+            for day in updated_plan.days
         ]
-        return plan.model_copy(update={"days": updated_days, "budget": BudgetCalculator().calculate(updated_days)})
+        return updated_plan.model_copy(update={"days": updated_days, "budget": BudgetCalculator().calculate(updated_days)})
+
+    def _adjust_plan(self, plan: TripPlan, operation: str, day_index: int | None) -> TripPlan:
+        target_index = max(1, day_index or 1)
+        days = list(plan.days)
+        target = next((day for day in days if day.day_index == target_index), days[0] if days else None)
+        if target is None:
+            return plan
+        if operation == "reorder_day":
+            reordered = sorted(target.attractions, key=lambda item: (item.location.longitude, item.location.latitude))
+            days = [day.model_copy(update={"attractions": reordered}) if day.day_index == target.day_index else day for day in days]
+            return plan.model_copy(update={"days": days})
+
+        existing_names = {item.name for day in days for item in day.attractions}
+        candidates = self.amap.search_pois(plan.city, plan.preferences, limit=12)
+        additions = [item for item in candidates if item.name not in existing_names]
+        if additions and len(target.attractions) < 3:
+            filled = [*target.attractions, *additions[: 3 - len(target.attractions)]]
+            days = [day.model_copy(update={"attractions": filled}) if day.day_index == target.day_index else day for day in days]
+        return plan.model_copy(update={"days": days})
