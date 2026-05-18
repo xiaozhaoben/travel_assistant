@@ -1,5 +1,14 @@
 import axios from 'axios'
-import type { Budget, DayPlan, ServiceHealth, TripFormData, TripPlan, TripPlanResponse } from '@/types'
+import type {
+  Budget,
+  DayPlan,
+  ResearchSnippet,
+  ServiceHealth,
+  TripFormData,
+  TripPlan,
+  TripPlanningResult,
+  TripPlanResponse,
+} from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -15,15 +24,31 @@ function formToPrompt(formData: TripFormData): string {
   const preferenceText =
     formData.preferences.length > 0 ? `喜欢${formData.preferences.join('、')}` : '偏好经典路线'
   const extra = formData.free_text_input ? `，额外要求：${formData.free_text_input}` : ''
+  const advanced = [
+    formData.travel_style ? `旅行节奏${formData.travel_style}` : '',
+    formData.companions ? `同行人群${formData.companions}` : '',
+    formData.food_preferences ? `餐饮偏好${formData.food_preferences}` : '',
+    formData.must_visit ? `必去${formData.must_visit}` : '',
+    formData.avoid_places ? `避开${formData.avoid_places}` : '',
+    formData.low_intensity ? '希望低强度少走路' : '',
+  ]
+    .filter(Boolean)
+    .join('，')
+  const advancedText = advanced ? `，${advanced}` : ''
   return `我想去${formData.city}玩 ${formData.travel_days} 天，${preferenceText}，预算${budgetText(
     formData.accommodation,
-  )}，交通方式${formData.transportation}${extra}`
+  )}，交通方式${formData.transportation}${advancedText}${extra}`
 }
 
 function budgetText(accommodation: string): string {
   if (accommodation.includes('豪华')) return '高'
   if (accommodation.includes('经济') || accommodation.includes('民宿')) return '低'
   return '中等'
+}
+
+function formatRating(value: unknown): string {
+  const rating = Number(value)
+  return Number.isFinite(rating) ? rating.toFixed(1) : '4.6'
 }
 
 function normalizePlan(raw: any, formData: TripFormData): TripPlan {
@@ -39,7 +64,7 @@ function normalizePlan(raw: any, formData: TripFormData): TripPlan {
           address: day.hotel.address,
           location: day.hotel.location,
           price_range: `约${day.hotel.nightly_price || day.hotel.estimated_cost || 0}元/晚`,
-          rating: String(day.hotel.rating || '4.6'),
+          rating: formatRating(day.hotel.rating ?? 4.6),
           distance: day.hotel.description || '靠近主要游览区',
           type: day.hotel.type || formData.accommodation,
           estimated_cost: day.hotel.nightly_price || day.hotel.estimated_cost || 0,
@@ -84,6 +109,43 @@ function normalizePlan(raw: any, formData: TripFormData): TripPlan {
   }
 }
 
+function normalizePlanningResult(raw: any, formData: TripFormData): TripPlanningResult {
+  const options = (raw.options || []).map((option: any) => ({
+    id: option.id,
+    title: option.title,
+    style: option.style,
+    suitable_for: option.suitable_for,
+    highlights: option.highlights || [],
+    tradeoffs: option.tradeoffs || [],
+    plan: normalizePlan(option.plan, formData),
+  }))
+  const fallbackPlan = raw.days ? normalizePlan(raw, formData) : options[0]?.plan
+  return {
+    selected_option_id: raw.selected_option_id || options[0]?.id || 'balanced',
+    options:
+      options.length > 0
+        ? options
+        : [
+            {
+              id: 'balanced',
+              title: '经典均衡方案',
+              style: '经典均衡',
+              suitable_for: '适合首次到访',
+              highlights: [],
+              tradeoffs: [],
+              plan: fallbackPlan,
+            },
+          ],
+    research_context: raw.research_context || [],
+    clarifying_suggestions: raw.clarifying_suggestions || [],
+    city: fallbackPlan?.city,
+    days: fallbackPlan?.days,
+    weather_info: fallbackPlan?.weather_info,
+    overall_suggestions: fallbackPlan?.overall_suggestions,
+    budget: fallbackPlan?.budget,
+  }
+}
+
 export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
   try {
     const response = await apiClient.post('/api/trip/plan', {
@@ -91,20 +153,36 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
       start_date: formData.start_date,
       end_date: formData.end_date,
       days: formData.travel_days,
+      travel_style: formData.travel_style,
+      companions: formData.companions,
+      transportation: formData.transportation,
+      accommodation: formData.accommodation,
+      food_preferences: formData.food_preferences,
+      must_visit: splitCsv(formData.must_visit),
+      avoid_places: splitCsv(formData.avoid_places),
+      low_intensity: formData.low_intensity,
     })
     return {
       success: response.data.success,
       message: response.data.message,
-      data: response.data.data ? normalizePlan(response.data.data, formData) : undefined,
+      data: response.data.data ? normalizePlanningResult(response.data.data, formData) : undefined,
     }
   } catch (error: any) {
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
   }
 }
 
-export async function recalculateTripPlan(plan: TripPlan): Promise<TripPlan> {
+export async function recalculateTripPlan(
+  plan: TripPlan,
+  options: { operation?: 'recalculate_only' | 'refill_day' | 'reorder_day'; day_index?: number; research_context?: ResearchSnippet[] } = {},
+): Promise<TripPlan> {
   const payload = denormalizePlan(plan)
-  const response = await apiClient.post('/api/trip/recalculate', { plan: payload })
+  const response = await apiClient.post('/api/trip/recalculate', {
+    plan: payload,
+    operation: options.operation || 'recalculate_only',
+    day_index: options.day_index,
+    research_context: options.research_context || [],
+  })
   return normalizePlan(response.data.data, {
     city: plan.city,
     start_date: plan.start_date,
@@ -114,7 +192,20 @@ export async function recalculateTripPlan(plan: TripPlan): Promise<TripPlan> {
     accommodation: plan.days[0]?.accommodation || '舒适型酒店',
     preferences: [],
     free_text_input: '',
+    travel_style: '经典均衡',
+    companions: '',
+    food_preferences: '',
+    must_visit: '',
+    avoid_places: '',
+    low_intensity: false,
   })
+}
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(/[，,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 function denormalizePlan(plan: TripPlan): any {

@@ -67,6 +67,56 @@
 
         <div class="form-section">
           <div class="section-header">
+            <span class="section-icon">🧭</span>
+            <span class="section-title">方案细化</span>
+          </div>
+
+          <a-row :gutter="[24, 16]">
+            <a-col :xs="24" :md="6">
+              <a-form-item label="旅行节奏">
+                <a-select v-model:value="formData.travel_style" size="large">
+                  <a-select-option value="经典均衡">经典均衡</a-select-option>
+                  <a-select-option value="轻松舒适">轻松舒适</a-select-option>
+                  <a-select-option value="深度探索">深度探索</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="6">
+              <a-form-item label="同行人群">
+                <a-select v-model:value="formData.companions" size="large">
+                  <a-select-option value="朋友">朋友</a-select-option>
+                  <a-select-option value="情侣">情侣</a-select-option>
+                  <a-select-option value="亲子">亲子</a-select-option>
+                  <a-select-option value="老人">老人</a-select-option>
+                  <a-select-option value="独自旅行">独自旅行</a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="6">
+              <a-form-item label="餐饮偏好">
+                <a-input v-model:value="formData.food_preferences" size="large" placeholder="本地菜、清淡、素食" />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="6">
+              <a-form-item label="低强度">
+                <a-switch v-model:checked="formData.low_intensity" checked-children="是" un-checked-children="否" />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="12">
+              <a-form-item label="必去地点">
+                <a-input v-model:value="formData.must_visit" size="large" placeholder="用逗号分隔，例如故宫、天坛" />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="12">
+              <a-form-item label="避开地点">
+                <a-input v-model:value="formData.avoid_places" size="large" placeholder="用逗号分隔，例如商场、远郊" />
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </div>
+
+        <div class="form-section">
+          <div class="section-header">
             <span class="section-icon">⚙️</span>
             <span class="section-title">偏好设置</span>
           </div>
@@ -169,6 +219,12 @@ const formData = reactive<TripFormData>({
   accommodation: '舒适型酒店',
   preferences: ['历史文化'],
   free_text_input: '',
+  travel_style: '经典均衡',
+  companions: '朋友',
+  food_preferences: '',
+  must_visit: '',
+  avoid_places: '',
+  low_intensity: false,
 })
 
 watch(
@@ -233,7 +289,9 @@ async function handleSubmit() {
     loadingStatus.value = '规划完成'
 
     if (response.success && response.data) {
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
+      const selected = response.data.options.find((option) => option.id === response.data!.selected_option_id)
+      sessionStorage.setItem('tripPlanningResult', JSON.stringify(response.data))
+      sessionStorage.setItem('tripPlan', JSON.stringify(selected?.plan || response.data.options[0]?.plan))
       message.success('旅行计划生成成功')
       window.setTimeout(() => router.push('/result'), 400)
     } else {

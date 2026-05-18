@@ -31,7 +31,7 @@ def setup_logging(level: str = "INFO") -> None:
 
         file_handler = RotatingFileHandler(
             log_dir / "travel_assistant.log",
-            maxBytes=2_000_000,
+            maxBytes=50_000_000,
             backupCount=5,
             encoding="utf-8",
         )

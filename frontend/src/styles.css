@@ -219,6 +219,44 @@ body {
   min-width: 0;
 }
 
+.option-section,
+.research-section {
+  margin-bottom: 20px;
+}
+
+.option-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.option-grid .ant-radio-button-wrapper {
+  height: auto;
+  padding: 14px;
+  border-radius: 8px;
+  white-space: normal;
+}
+
+.option-card strong,
+.option-card span,
+.option-card small {
+  display: block;
+  line-height: 1.5;
+}
+
+.option-card span {
+  color: #667085;
+}
+
+.option-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  color: #475467;
+}
+
 .top-info-section {
   display: grid;
   grid-template-columns: 420px minmax(0, 1fr);

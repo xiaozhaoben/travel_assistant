@@ -4,7 +4,9 @@
       <a-button size="large" @click="goBack">返回首页</a-button>
       <a-space>
         <a-button v-if="!editMode" @click="startEdit">编辑行程</a-button>
-        <a-button v-else type="primary" :loading="saving" @click="saveChanges">保存修改</a-button>
+        <a-button v-if="editMode" :loading="saving" @click="smartRefillDay">智能补景点</a-button>
+        <a-button v-if="editMode" :loading="saving" @click="smartReorderDay">重排当天</a-button>
+        <a-button v-if="editMode" type="primary" :loading="saving" @click="saveChanges">保存修改</a-button>
         <a-button v-if="editMode" @click="cancelEdit">取消编辑</a-button>
       </a-space>
     </div>
@@ -31,6 +33,31 @@
       </aside>
 
       <main class="main-content">
+        <a-card v-if="planningResult" title="方案对比" :bordered="false" class="option-section">
+          <a-radio-group v-model:value="selectedOptionId" class="option-grid" @change="switchOption">
+            <a-radio-button v-for="option in planningResult.options" :key="option.id" :value="option.id" class="option-card">
+              <strong>{{ option.title }}</strong>
+              <span>{{ option.suitable_for }}</span>
+              <small>预算 ¥{{ option.plan.budget?.total || 0 }}</small>
+            </a-radio-button>
+          </a-radio-group>
+          <div v-if="currentOption" class="option-detail">
+            <a-tag color="blue">{{ currentOption.style }}</a-tag>
+            <span v-for="item in currentOption.highlights" :key="item">{{ item }}</span>
+          </div>
+        </a-card>
+
+        <a-card v-if="planningResult?.research_context.length" title="资料依据" :bordered="false" class="research-section">
+          <a-list :data-source="planningResult.research_context" size="small">
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <a-list-item-meta :title="item.title" :description="item.summary" />
+                <a-tag>{{ item.source }}</a-tag>
+              </a-list-item>
+            </template>
+          </a-list>
+        </a-card>
+
         <section class="top-info-section">
           <div class="left-info">
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false">
@@ -206,13 +233,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
-import type { Attraction, TripPlan } from '@/types'
+import type { Attraction, TripPlanningResult, TripPlan } from '@/types'
 
 type MapMode = 'amap' | 'mock'
 
 const router = useRouter()
+const planningResult = ref<TripPlanningResult | null>(null)
 const tripPlan = ref<TripPlan | null>(null)
 const originalPlan = ref<TripPlan | null>(null)
+const selectedOptionId = ref('balanced')
 const editMode = ref(false)
 const saving = ref(false)
 const activeSection = ref('overview')
@@ -225,9 +254,19 @@ let amapInstance: any = null
 let AMapRuntime: any = null
 
 onMounted(async () => {
-  const data = sessionStorage.getItem('tripPlan')
-  if (data) {
-    tripPlan.value = JSON.parse(data)
+  const resultData = sessionStorage.getItem('tripPlanningResult')
+  const planData = sessionStorage.getItem('tripPlan')
+  if (resultData) {
+    planningResult.value = JSON.parse(resultData)
+    selectedOptionId.value = planningResult.value?.selected_option_id || 'balanced'
+    const selectedPlan = currentOption.value?.plan || planningResult.value?.options[0]?.plan || null
+    tripPlan.value = selectedPlan ? JSON.parse(JSON.stringify(selectedPlan)) : null
+    if (tripPlan.value) sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
+    await loadAttractionPhotos()
+    await nextTick()
+    await initAmap()
+  } else if (planData) {
+    tripPlan.value = JSON.parse(planData)
     await loadAttractionPhotos()
     await nextTick()
     await initAmap()
@@ -257,6 +296,23 @@ function scrollToSection({ key }: { key: string }) {
   if (element) element.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+const currentOption = computed(() => {
+  return planningResult.value?.options.find((option) => option.id === selectedOptionId.value)
+})
+
+async function switchOption() {
+  const option = currentOption.value
+  if (!option) return
+  tripPlan.value = JSON.parse(JSON.stringify(option.plan))
+  sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
+  if (planningResult.value) {
+    planningResult.value.selected_option_id = option.id
+    sessionStorage.setItem('tripPlanningResult', JSON.stringify(planningResult.value))
+  }
+  await nextTick()
+  renderAmapMarkers()
+}
+
 function startEdit() {
   editMode.value = true
   originalPlan.value = JSON.parse(JSON.stringify(tripPlan.value))
@@ -266,7 +322,10 @@ async function saveChanges() {
   if (!tripPlan.value) return
   saving.value = true
   try {
-    tripPlan.value = await recalculateTripPlan(tripPlan.value)
+    tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      research_context: planningResult.value?.research_context || [],
+    })
+    syncSelectedOption()
     sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
     editMode.value = false
     await nextTick()
@@ -298,6 +357,43 @@ function moveAttraction(dayIndex: number, attrIndex: number, direction: 'up' | '
   ;[day.attractions[attrIndex], day.attractions[nextIndex]] = [day.attractions[nextIndex], day.attractions[attrIndex]]
 }
 
+async function smartRefillDay() {
+  await smartAdjustDay('refill_day')
+}
+
+async function smartReorderDay() {
+  await smartAdjustDay('reorder_day')
+}
+
+async function smartAdjustDay(operation: 'refill_day' | 'reorder_day') {
+  if (!tripPlan.value) return
+  saving.value = true
+  try {
+    const activeDay = Number(activeDays.value[0] ?? 0) + 1
+    tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      operation,
+      day_index: activeDay,
+      research_context: planningResult.value?.research_context || [],
+    })
+    syncSelectedOption()
+    sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
+    await nextTick()
+    renderAmapMarkers()
+    message.success(operation === 'refill_day' ? '已智能补充当天景点' : '已重排当天路线')
+  } catch (error: any) {
+    message.error(error.message || '智能调整失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+function syncSelectedOption() {
+  if (!planningResult.value || !tripPlan.value) return
+  const option = planningResult.value.options.find((item) => item.id === selectedOptionId.value)
+  if (option) option.plan = tripPlan.value
+  sessionStorage.setItem('tripPlanningResult', JSON.stringify(planningResult.value))
+}
+
 function getMealLabel(type: string) {
   const labels: Record<string, string> = {
     breakfast: '早餐',
@@ -312,7 +408,7 @@ async function loadAttractionPhotos() {
   if (!tripPlan.value) return
   const tasks = tripPlan.value.days.flatMap((day) =>
     day.attractions.map(async (attraction) => {
-      if (attraction.image_url) {
+      if (attraction.image_url && !isRetiredImageUrl(attraction.image_url)) {
         attractionPhotos.value[attraction.name] = attraction.image_url
         return
       }
@@ -326,8 +422,12 @@ async function loadAttractionPhotos() {
   await Promise.all(tasks)
 }
 
+function isRetiredImageUrl(url?: string) {
+  return !url || url.includes('source.unsplash.com')
+}
+
 function getAttractionImage(item: Attraction, index: number) {
-  if (item.image_url) return item.image_url
+  if (item.image_url && !isRetiredImageUrl(item.image_url)) return item.image_url
   if (attractionPhotos.value[item.name]) return attractionPhotos.value[item.name]
   const colors = ['667eea', 'f093fb', '4facfe', '43e97b', 'fa709a']
   const color = colors[index % colors.length]

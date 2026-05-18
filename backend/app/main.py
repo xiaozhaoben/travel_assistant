@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .agents import TravelAgentOrchestrator
 from .config import get_settings
 from .logging_config import setup_logging
-from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanRequest
+from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest
 from .services import UnsplashMCPClient
 
 settings = get_settings()
@@ -23,7 +23,11 @@ app.add_middleware(
 )
 
 orchestrator = TravelAgentOrchestrator()
-image_provider = UnsplashMCPClient()
+image_provider = (
+    UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
+    if settings.disable_external_api
+    else UnsplashMCPClient()
+)
 
 
 @app.get("/api/health")
@@ -40,19 +44,46 @@ def health():
         "amap_configured": bool(settings.amap_api_key),
         "amap_transport": "mcp-stdio",
         "unsplash_configured": bool(settings.unsplash_access_key),
+        "image_providers": {
+            "wikimedia": True,
+            "openverse": True,
+            "pexels_configured": bool(settings.pexels_api_key),
+            "pixabay_configured": bool(settings.pixabay_api_key),
+            "unsplash_configured": bool(settings.unsplash_access_key),
+        },
         "external_api_disabled": settings.disable_external_api,
     }
 
 
-@app.post("/api/trip/plan", response_model=ApiResponse[TripPlan])
+@app.get("/api/trip/plan")
+def plan_trip_usage():
+    return {
+        "success": False,
+        "message": "该接口需要使用 POST 提交旅行需求。请回到首页生成行程，或用 POST /api/trip/plan 调用。",
+        "method": "POST",
+        "example": {
+            "prompt": "我想去北京玩 3 天，喜欢历史文化，预算中等",
+            "days": 3,
+            "pace": "balanced",
+            "companions": "friends",
+        },
+    }
+
+
+@app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
 def plan_trip(request: TripPlanRequest):
-    plan = orchestrator.plan(request)
-    return ApiResponse[TripPlan](success=True, message="行程计划生成成功", data=plan)
+    result = orchestrator.plan(request)
+    return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
 
 
 @app.post("/api/trip/recalculate", response_model=ApiResponse[TripPlan])
 def recalculate_trip(request: PlanEditRequest):
-    plan = orchestrator.recalculate(request.plan)
+    plan = orchestrator.recalculate(
+        request.plan,
+        operation=request.operation,
+        research_context=request.research_context,
+        day_index=request.day_index,
+    )
     return ApiResponse[TripPlan](success=True, message="行程已更新", data=plan)
 
 

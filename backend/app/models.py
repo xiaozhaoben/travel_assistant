@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Generic, List, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class TripPlanRequest(BaseModel):
@@ -11,6 +11,14 @@ class TripPlanRequest(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     days: Optional[int] = Field(default=None, ge=1, le=30)
+    travel_style: Optional[str] = None
+    companions: Optional[str] = None
+    transportation: Optional[str] = None
+    accommodation: Optional[str] = None
+    food_preferences: Optional[str] = None
+    must_visit: List[str] = Field(default_factory=list)
+    avoid_places: List[str] = Field(default_factory=list)
+    low_intensity: bool = False
 
 
 class TravelRequirement(BaseModel):
@@ -20,6 +28,14 @@ class TravelRequirement(BaseModel):
     preferences: List[str]
     budget_level: str
     start_date: date
+    travel_style: str = "经典均衡"
+    companions: str = "未指定"
+    transportation: str = "公共交通"
+    accommodation: str = "舒适型酒店"
+    food_preferences: str = ""
+    must_visit: List[str] = Field(default_factory=list)
+    avoid_places: List[str] = Field(default_factory=list)
+    low_intensity: bool = False
 
 
 class Location(BaseModel):
@@ -37,6 +53,7 @@ class Attraction(BaseModel):
     description: str
     ticket_price: int
     image_url: Optional[str] = None
+    rating: Optional[float] = None
 
 
 class Meal(BaseModel):
@@ -103,8 +120,99 @@ class TripPlan(BaseModel):
     agent_trace: List[str]
 
 
+class ResearchSnippet(BaseModel):
+    source: str
+    title: str
+    url: Optional[str] = None
+    summary: str
+    keywords: List[str] = Field(default_factory=list)
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TripPlanOption(BaseModel):
+    id: str
+    title: str
+    style: str
+    suitable_for: str
+    highlights: List[str]
+    tradeoffs: List[str]
+    plan: TripPlan
+
+
+class TripPlanningResult(BaseModel):
+    selected_option_id: str
+    options: List[TripPlanOption]
+    research_context: List[ResearchSnippet] = Field(default_factory=list)
+    clarifying_suggestions: List[str] = Field(default_factory=list)
+
+    @property
+    def selected_plan(self) -> TripPlan:
+        for option in self.options:
+            if option.id == self.selected_option_id:
+                return option.plan
+        return self.options[0].plan
+
+    @computed_field
+    @property
+    def city(self) -> str:
+        return self.selected_plan.city
+
+    @computed_field
+    @property
+    def days_count(self) -> int:
+        return self.selected_plan.days_count
+
+    @computed_field
+    @property
+    def preferences(self) -> List[str]:
+        return self.selected_plan.preferences
+
+    @computed_field
+    @property
+    def budget_level(self) -> str:
+        return self.selected_plan.budget_level
+
+    @computed_field
+    @property
+    def generation_mode(self) -> Literal["llm", "fallback"]:
+        return self.selected_plan.generation_mode
+
+    @computed_field
+    @property
+    def days(self) -> List[DayPlan]:
+        return self.selected_plan.days
+
+    @computed_field
+    @property
+    def weather(self) -> List[WeatherInfo]:
+        return self.selected_plan.weather
+
+    @computed_field
+    @property
+    def budget(self) -> Budget:
+        return self.selected_plan.budget
+
+    @computed_field
+    @property
+    def map_center(self) -> Location:
+        return self.selected_plan.map_center
+
+    @computed_field
+    @property
+    def overall_suggestions(self) -> List[str]:
+        return self.selected_plan.overall_suggestions
+
+    @computed_field
+    @property
+    def agent_trace(self) -> List[str]:
+        return self.selected_plan.agent_trace
+
+
 class PlanEditRequest(BaseModel):
     plan: TripPlan
+    research_context: List[ResearchSnippet] = Field(default_factory=list)
+    operation: Literal["recalculate_only", "refill_day", "reorder_day"] = "recalculate_only"
+    day_index: Optional[int] = None
 
 
 T = TypeVar("T")

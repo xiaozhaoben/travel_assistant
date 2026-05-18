@@ -27,6 +27,7 @@ def create_llm() -> Any | None:
         "model": settings.llm_model_id,
         "temperature": 0.4,
         "timeout": settings.llm_timeout,
+        "max_retries": 0,
         "extra_body": {"enable_thinking": settings.llm_enable_thinking},
     }
     if settings.llm_base_url:

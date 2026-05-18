@@ -25,7 +25,14 @@ class Settings:
     log_level: str
     unsplash_access_key: str | None
     unsplash_secret_key: str | None
+    pexels_api_key: str | None
+    pixabay_api_key: str | None
+    openverse_client_id: str | None
+    openverse_client_secret: str | None
+    wikimedia_user_agent: str
     amap_api_key: str | None
+    web_search_mcp_command: str | None
+    web_search_mcp_tool: str
     disable_llm: bool
     disable_external_api: bool
 
@@ -68,7 +75,14 @@ def get_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         unsplash_access_key=os.getenv("UNSPLASH_ACCESS_KEY"),
         unsplash_secret_key=os.getenv("UNSPLASH_SECRET_KEY"),
+        pexels_api_key=os.getenv("PEXELS_API_KEY"),
+        pixabay_api_key=os.getenv("PIXABAY_API_KEY"),
+        openverse_client_id=os.getenv("OPENVERSE_CLIENT_ID"),
+        openverse_client_secret=os.getenv("OPENVERSE_CLIENT_SECRET"),
+        wikimedia_user_agent=os.getenv("WIKIMEDIA_USER_AGENT", "travel-assistant/1.0 (local development; contact: example@example.com)"),
         amap_api_key=os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY"),
+        web_search_mcp_command=os.getenv("WEB_SEARCH_MCP_COMMAND"),
+        web_search_mcp_tool=os.getenv("WEB_SEARCH_MCP_TOOL", "web_search"),
         disable_llm=_env_bool("DISABLE_LLM"),
         disable_external_api=_env_bool("DISABLE_EXTERNAL_API"),
     )
