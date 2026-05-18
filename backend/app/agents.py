@@ -67,7 +67,12 @@ class AttractionSearchAgent:
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
         search_queries = self._build_search_queries(requirement)
-        attractions = self.amap.search_pois(requirement.city, search_queries, limit=requirement.days * 3)
+        search_options: dict[str, Any] = {"limit": requirement.days * 3}
+        if requirement.must_visit:
+            search_options["must_visit"] = requirement.must_visit
+        if requirement.avoid_places:
+            search_options["avoid_places"] = requirement.avoid_places
+        attractions = self.amap.search_pois(requirement.city, search_queries, **search_options)
         return [
             attraction.model_copy(update={"image_url": self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
             for attraction in attractions

@@ -231,6 +231,92 @@ def test_local_fallback_recommends_real_guangzhou_attractions():
     assert all("广州城市公园" != name for name in names)
     assert all("广州特色街区" != name for name in names)
 
+
+def test_recommendation_service_prioritizes_real_attractions_over_generic_names():
+    from app.services import AttractionRecommendationService
+
+    generic = Attraction(
+        id="generic",
+        name="广州历史文化景点",
+        category="旅游景点",
+        address="广州市越秀区",
+        location=Location(longitude=113.2600, latitude=23.1300),
+        visit_duration_minutes=90,
+        description="模板化地点",
+        ticket_price=0,
+        rating=4.8,
+    )
+    real = Attraction(
+        id="real",
+        name="陈家祠",
+        category="历史文化;博物馆",
+        address="广州市荔湾区中山七路",
+        location=Location(longitude=113.2466, latitude=23.1317),
+        visit_duration_minutes=120,
+        description="岭南祠堂建筑代表",
+        ticket_price=10,
+        rating=4.6,
+    )
+
+    ranked = AttractionRecommendationService().rank(
+        [generic, real],
+        city="广州",
+        preferences=["历史文化"],
+        limit=2,
+    )
+
+    assert [item.name for item in ranked] == ["陈家祠", "广州历史文化景点"]
+
+
+def test_recommendation_service_filters_avoid_places_and_boosts_must_visit():
+    from app.services import AttractionRecommendationService
+
+    chen = Attraction(
+        id="chen",
+        name="陈家祠",
+        category="历史文化",
+        address="广州市荔湾区",
+        location=Location(longitude=113.2466, latitude=23.1317),
+        visit_duration_minutes=120,
+        description="岭南建筑",
+        ticket_price=10,
+        rating=4.5,
+    )
+    sha = Attraction(
+        id="sha",
+        name="沙面岛",
+        category="历史文化;街区",
+        address="广州市荔湾区",
+        location=Location(longitude=113.2384, latitude=23.1092),
+        visit_duration_minutes=120,
+        description="近代建筑街区",
+        ticket_price=0,
+        rating=4.4,
+    )
+    avoided = Attraction(
+        id="avoid",
+        name="广州塔",
+        category="城市地标",
+        address="广州市海珠区",
+        location=Location(longitude=113.3307, latitude=23.1066),
+        visit_duration_minutes=120,
+        description="城市地标",
+        ticket_price=150,
+        rating=4.9,
+    )
+
+    ranked = AttractionRecommendationService().rank(
+        [chen, sha, avoided],
+        city="广州",
+        preferences=["历史文化"],
+        limit=3,
+        must_visit=["沙面岛"],
+        avoid_places=["广州塔"],
+    )
+
+    assert [item.name for item in ranked] == ["沙面岛", "陈家祠"]
+
+
 def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
     calls = []
 
@@ -492,6 +578,41 @@ def test_amap_client_prefixes_city_for_generic_poi_keyword():
     amap.search_pois("珠海", ["历史文化"], limit=1)
 
     assert caller.calls[0]["arguments"] == {"keywords": "珠海历史文化", "city": "珠海"}
+
+
+def test_amap_client_ranks_specific_relevant_pois_ahead_of_generic_high_rating_results():
+    class RankingMCPCaller:
+        def __init__(self):
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "pois": [
+                    {
+                        "id": "generic",
+                        "name": "广州历史文化景点",
+                        "type": "旅游景点",
+                        "address": "广州市越秀区",
+                        "location": "113.2600,23.1300",
+                        "biz_ext": {"rating": "4.9"},
+                    },
+                    {
+                        "id": "chen",
+                        "name": "陈家祠",
+                        "type": "科教文化服务;博物馆",
+                        "address": "广州市荔湾区中山七路",
+                        "location": "113.2466,23.1317",
+                        "biz_ext": {"rating": "4.6"},
+                    },
+                ]
+            }
+
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=RankingMCPCaller())
+
+    pois = amap.search_pois("广州", ["广州历史文化景点"], limit=2)
+
+    assert [poi.name for poi in pois] == ["陈家祠", "广州历史文化景点"]
 
 
 def test_amap_client_batches_many_poi_queries_to_avoid_slow_mcp_startups():

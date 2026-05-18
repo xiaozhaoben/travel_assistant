@@ -120,6 +120,179 @@ class AmapStdioMCPToolCaller:
         return anyio.run(_call)
 
 
+class AttractionRecommendationService:
+    """Rank raw POI candidates into concrete, travel-worthy attractions."""
+
+    generic_terms = {
+        "历史文化景点",
+        "历史街区",
+        "特色街区",
+        "城市公园",
+        "城市地标",
+        "观景台",
+        "美食街",
+        "必游景点",
+        "风景名胜",
+        "旅游路线",
+    }
+    excluded_terms = {
+        "酒店",
+        "民宿",
+        "公寓",
+        "停车",
+        "公交",
+        "地铁",
+        "零食",
+        "便利店",
+        "餐厅",
+        "餐饮",
+        "售票",
+        "检票",
+        "入口",
+        "出口",
+        "出入口",
+        "服务中心",
+        "游客中心",
+        "讲解",
+        "咨询",
+        "客服",
+        "卫生间",
+        "厕所",
+        "管理中心",
+        "管委会",
+        "办公室",
+    }
+    quality_terms = {
+        "风景名胜",
+        "旅游景点",
+        "博物馆",
+        "展览馆",
+        "文化",
+        "古镇",
+        "古村",
+        "故居",
+        "牌坊",
+        "遗址",
+        "公园",
+        "地标",
+        "街区",
+        "街",
+    }
+    preference_terms = {
+        "历史文化": {"历史", "文化", "博物", "故居", "古镇", "古村", "遗址", "牌坊", "祠", "街区"},
+        "自然风光": {"自然", "风景", "公园", "山", "湖", "海", "岛", "湿地"},
+        "美食": {"美食", "小吃", "步行街", "街"},
+        "亲子": {"亲子", "儿童", "乐园", "公园", "博物"},
+        "艺术": {"艺术", "美术", "展览", "博物"},
+        "购物": {"购物", "商业", "步行街"},
+        "休闲": {"休闲", "公园", "街区", "海滨"},
+        "经典必游": {"地标", "风景名胜", "旅游景点", "博物", "公园"},
+    }
+
+    def rank(
+        self,
+        attractions: List[Attraction],
+        city: str,
+        preferences: Iterable[str],
+        limit: int,
+        must_visit: Iterable[str] | None = None,
+        avoid_places: Iterable[str] | None = None,
+    ) -> List[Attraction]:
+        must_visit_list = [str(item).strip() for item in must_visit or [] if str(item).strip()]
+        avoid_list = [str(item).strip() for item in avoid_places or [] if str(item).strip()]
+        scored: list[tuple[float, Attraction]] = []
+        seen: set[str] = set()
+        for attraction in attractions:
+            key = self._group_key(attraction.name)
+            if key in seen:
+                continue
+            score = self._score(attraction, city, preferences, must_visit_list, avoid_list)
+            if score is None:
+                continue
+            seen.add(key)
+            scored.append((score, attraction))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return self._select_spatially_diverse([item for _, item in scored], limit)
+
+    def _score(
+        self,
+        attraction: Attraction,
+        city: str,
+        preferences: Iterable[str],
+        must_visit: list[str],
+        avoid_places: list[str],
+    ) -> float | None:
+        text = f"{attraction.name} {attraction.category} {attraction.address} {attraction.description}"
+        if any(place and place in attraction.name for place in avoid_places):
+            return None
+        if any(term in text for term in self.excluded_terms):
+            return None
+
+        score = 0.0
+        if attraction.name and attraction.address and attraction.location:
+            score += 8
+        if city and city in attraction.address:
+            score += 3
+        if any(term in text for term in self.quality_terms):
+            score += 10
+        for preference in preferences:
+            terms = self.preference_terms.get(str(preference), {str(preference)})
+            if any(term and term in text for term in terms):
+                score += 12
+        if any(place and place in attraction.name for place in must_visit):
+            score += 40
+        if attraction.rating is not None:
+            score += max(0.0, min(float(attraction.rating), 5.0)) * 2
+        score -= self._generic_penalty(attraction.name, city)
+        if self._looks_like_sub_poi(attraction.name):
+            score -= 12
+        return score
+
+    def _generic_penalty(self, name: str, city: str) -> float:
+        suffix = name.replace(city, "", 1).strip() if city and name.startswith(city) else name.strip()
+        if suffix in self.generic_terms:
+            return 30
+        if any(term == suffix for term in self.generic_terms):
+            return 30
+        return 0
+
+    def _group_key(self, name: str) -> str:
+        return re.sub(r"[\s\-—·路街区景区旅游区]+", "", name)
+
+    def _looks_like_sub_poi(self, name: str) -> bool:
+        for separator in ("-", "—", "·"):
+            if separator in name:
+                parent, child = name.split(separator, 1)
+                if len(parent) >= 3 and any(term in child for term in self.excluded_terms):
+                    return True
+        return False
+
+    def _select_spatially_diverse(self, attractions: List[Attraction], limit: int) -> List[Attraction]:
+        selected: list[Attraction] = []
+        deferred: list[Attraction] = []
+        min_distance_km = 1.2
+        for attraction in attractions:
+            if not selected or all(self._distance_km(attraction.location, item.location) >= min_distance_km for item in selected):
+                selected.append(attraction)
+            else:
+                deferred.append(attraction)
+            if len(selected) >= limit:
+                return selected[:limit]
+        for attraction in deferred:
+            if attraction not in selected:
+                selected.append(attraction)
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
+
+    def _distance_km(self, left: Location, right: Location) -> float:
+        average_latitude = math.radians((left.latitude + right.latitude) / 2)
+        longitude_km = (left.longitude - right.longitude) * 111.0 * math.cos(average_latitude)
+        latitude_km = (left.latitude - right.latitude) * 111.0
+        return math.hypot(longitude_km, latitude_km)
+
+
 class AmapMCPClient:
     """高德地图 MCP 适配器。
 
@@ -127,17 +300,32 @@ class AmapMCPClient:
     MCP 不可用或没有 API Key 时回退到本地稳定数据，保证开发和测试可运行。
     """
 
-    def __init__(self, api_key: str | None = None, mcp_caller=None):
+    def __init__(self, api_key: str | None = None, mcp_caller=None, recommendation_service: AttractionRecommendationService | None = None):
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.amap_api_key or os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY")
         self.mcp_caller = mcp_caller or (AmapStdioMCPToolCaller(self.api_key) if self.api_key else None)
+        self.recommendation_service = recommendation_service or AttractionRecommendationService()
 
-    def search_pois(self, city: str, keywords: Iterable[str], limit: int = 9) -> List[Attraction]:
+    def search_pois(
+        self,
+        city: str,
+        keywords: Iterable[str],
+        limit: int = 9,
+        must_visit: Iterable[str] | None = None,
+        avoid_places: Iterable[str] | None = None,
+    ) -> List[Attraction]:
         query_list = self._normalize_poi_queries(city, keywords)
         if self.mcp_caller:
             pois = self._search_pois_from_mcp(city, query_list, limit)
             if len(pois) >= limit:
-                return pois
+                return self.recommendation_service.rank(
+                    pois,
+                    city=city,
+                    preferences=query_list,
+                    limit=limit,
+                    must_visit=must_visit,
+                    avoid_places=avoid_places,
+                )
         else:
             pois = []
 
@@ -147,8 +335,25 @@ class AmapMCPClient:
             for item in seed
             if any(query.replace(city, "") in item.name or query.replace(city, "") in item.category or query.replace(city, "") in item.description for query in query_list)
         ]
-        ordered = pois + preferred + [item for item in seed if item not in pois and item not in preferred]
-        return self._select_spatially_diverse_attractions(ordered, limit)
+        ranked_pois = self.recommendation_service.rank(
+            pois,
+            city=city,
+            preferences=query_list,
+            limit=limit,
+            must_visit=must_visit,
+            avoid_places=avoid_places,
+        )
+        fallback_candidates = preferred + [item for item in seed if item not in pois and item not in preferred]
+        ranked_fallback = self.recommendation_service.rank(
+            fallback_candidates,
+            city=city,
+            preferences=query_list,
+            limit=limit,
+            must_visit=must_visit,
+            avoid_places=avoid_places,
+        )
+        combined = ranked_pois + [item for item in ranked_fallback if item.name not in {poi.name for poi in ranked_pois}]
+        return combined[:limit]
 
     def search_hotels(self, city: str, budget_level: str, limit: int = 3) -> List[Hotel]:
         if self.mcp_caller:

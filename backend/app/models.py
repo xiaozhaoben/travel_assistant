@@ -53,6 +53,7 @@ class Attraction(BaseModel):
     description: str
     ticket_price: int
     image_url: Optional[str] = None
+    rating: Optional[float] = None
 
 
 class Meal(BaseModel):
