@@ -313,15 +313,17 @@ class AmapMCPClient:
         limit: int = 9,
         must_visit: Iterable[str] | None = None,
         avoid_places: Iterable[str] | None = None,
+        ranking_preferences: Iterable[str] | None = None,
     ) -> List[Attraction]:
         query_list = self._normalize_poi_queries(city, keywords)
+        rank_preferences = list(ranking_preferences or query_list)
         if self.mcp_caller:
             pois = self._search_pois_from_mcp(city, query_list, limit)
             if len(pois) >= limit:
                 return self.recommendation_service.rank(
                     pois,
                     city=city,
-                    preferences=query_list,
+                    preferences=rank_preferences,
                     limit=limit,
                     must_visit=must_visit,
                     avoid_places=avoid_places,
@@ -338,7 +340,7 @@ class AmapMCPClient:
         ranked_pois = self.recommendation_service.rank(
             pois,
             city=city,
-            preferences=query_list,
+            preferences=rank_preferences,
             limit=limit,
             must_visit=must_visit,
             avoid_places=avoid_places,
@@ -347,7 +349,7 @@ class AmapMCPClient:
         ranked_fallback = self.recommendation_service.rank(
             fallback_candidates,
             city=city,
-            preferences=query_list,
+            preferences=rank_preferences,
             limit=limit,
             must_visit=must_visit,
             avoid_places=avoid_places,

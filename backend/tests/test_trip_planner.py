@@ -368,8 +368,8 @@ def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def search_pois(self, city, keywords, limit=9):
-            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit})
+        def search_pois(self, city, keywords, limit=9, **kwargs):
+            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit, **kwargs})
             return [
                 Attraction(
                     id="poi-ai",
@@ -398,6 +398,7 @@ def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
 
     assert amap.calls[0]["keywords"] == ["珠海唐家古镇", "珠海海滨公园"]
     assert amap.calls[0]["keywords"] != requirement.preferences
+    assert amap.calls[0]["ranking_preferences"] == ["历史文化"]
     assert attractions[0].name == "唐家古镇"
 
 
@@ -406,8 +407,8 @@ def test_attraction_agent_filters_ai_generic_category_queries(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def search_pois(self, city, keywords, limit=9):
-            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit})
+        def search_pois(self, city, keywords, limit=9, **kwargs):
+            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit, **kwargs})
             return []
 
     runtime = FakeLangChainAgent(
@@ -440,6 +441,7 @@ def test_attraction_agent_filters_ai_generic_category_queries(monkeypatch):
     agent.run(requirement)
 
     assert amap.calls[0]["keywords"] == ["广州陈家祠", "广州沙面岛", "广州南越王博物院"]
+    assert amap.calls[0]["ranking_preferences"] == ["历史文化"]
 
 
 def test_attraction_agent_fallback_queries_prefer_real_seed_pois():
@@ -448,8 +450,8 @@ def test_attraction_agent_fallback_queries_prefer_real_seed_pois():
             super().__init__(api_key="")
             self.calls = []
 
-        def search_pois(self, city, keywords, limit=9):
-            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit})
+        def search_pois(self, city, keywords, limit=9, **kwargs):
+            self.calls.append({"city": city, "keywords": list(keywords), "limit": limit, **kwargs})
             return []
 
     amap = FakeAmap()
@@ -467,6 +469,7 @@ def test_attraction_agent_fallback_queries_prefer_real_seed_pois():
     queries = amap.calls[0]["keywords"]
 
     assert queries[:5] == ["广州陈家祠", "广州沙面岛", "广州越秀公园", "广州南越王博物院", "广州广东省博物馆"]
+    assert amap.calls[0]["ranking_preferences"] == ["历史文化"]
     assert "广州历史街区" not in queries
     assert "广州城市公园" not in queries
     assert "广州特色街区" not in queries
@@ -613,6 +616,41 @@ def test_amap_client_ranks_specific_relevant_pois_ahead_of_generic_high_rating_r
     pois = amap.search_pois("广州", ["广州历史文化景点"], limit=2)
 
     assert [poi.name for poi in pois] == ["陈家祠", "广州历史文化景点"]
+
+
+def test_amap_client_uses_original_preferences_for_recommendation_ranking():
+    class PreferenceAwareMCPCaller:
+        def __init__(self):
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "pois": [
+                    {
+                        "id": "tower",
+                        "name": "广州塔",
+                        "type": "风景名胜;城市地标",
+                        "address": "广州市海珠区阅江西路",
+                        "location": "113.3307,23.1066",
+                        "biz_ext": {"rating": "4.9"},
+                    },
+                    {
+                        "id": "children",
+                        "name": "广州儿童公园",
+                        "type": "风景名胜;公园广场;公园",
+                        "address": "广州市白云区齐心路",
+                        "location": "113.2730,23.1840",
+                        "biz_ext": {"rating": "4.2"},
+                    },
+                ]
+            }
+
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=PreferenceAwareMCPCaller())
+
+    pois = amap.search_pois("广州", ["广州亲子景点"], limit=2, ranking_preferences=["亲子"])
+
+    assert [poi.name for poi in pois] == ["广州儿童公园", "广州塔"]
 
 
 def test_amap_client_batches_many_poi_queries_to_avoid_slow_mcp_startups():

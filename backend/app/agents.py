@@ -67,7 +67,10 @@ class AttractionSearchAgent:
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
         search_queries = self._build_search_queries(requirement)
-        search_options: dict[str, Any] = {"limit": requirement.days * 3}
+        search_options: dict[str, Any] = {
+            "limit": requirement.days * 3,
+            "ranking_preferences": requirement.preferences,
+        }
         if requirement.must_visit:
             search_options["must_visit"] = requirement.must_visit
         if requirement.avoid_places:
