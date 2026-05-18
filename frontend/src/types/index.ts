@@ -75,6 +75,37 @@ export interface TripPlan {
   budget?: Budget
 }
 
+export interface ResearchSnippet {
+  source: string
+  title: string
+  url?: string | null
+  summary: string
+  keywords: string[]
+  retrieved_at: string
+}
+
+export interface TripPlanOption {
+  id: string
+  title: string
+  style: string
+  suitable_for: string
+  highlights: string[]
+  tradeoffs: string[]
+  plan: TripPlan
+}
+
+export interface TripPlanningResult {
+  selected_option_id: string
+  options: TripPlanOption[]
+  research_context: ResearchSnippet[]
+  clarifying_suggestions: string[]
+  city?: string
+  days?: DayPlan[]
+  weather_info?: WeatherInfo[]
+  overall_suggestions?: string
+  budget?: Budget
+}
+
 export interface TripFormData {
   city: string
   start_date: string
@@ -84,12 +115,18 @@ export interface TripFormData {
   accommodation: string
   preferences: string[]
   free_text_input: string
+  travel_style: string
+  companions: string
+  food_preferences: string
+  must_visit: string
+  avoid_places: string
+  low_intensity: boolean
 }
 
 export interface TripPlanResponse {
   success: boolean
   message: string
-  data?: TripPlan
+  data?: TripPlanningResult
 }
 
 export interface ServiceHealth {
