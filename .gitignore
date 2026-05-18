@@ -10,5 +10,7 @@ dist/
 *.log
 logs/
 backend/logs/
+backend/runtime/
 backend/server.err.log
 backend/server.out.log
+frontend/*.log
