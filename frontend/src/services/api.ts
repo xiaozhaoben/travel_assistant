@@ -46,6 +46,11 @@ function budgetText(accommodation: string): string {
   return '中等'
 }
 
+function formatRating(value: unknown): string {
+  const rating = Number(value)
+  return Number.isFinite(rating) ? rating.toFixed(1) : '4.6'
+}
+
 function normalizePlan(raw: any, formData: TripFormData): TripPlan {
   const days: DayPlan[] = raw.days.map((day: any) => ({
     date: day.date,
@@ -59,7 +64,7 @@ function normalizePlan(raw: any, formData: TripFormData): TripPlan {
           address: day.hotel.address,
           location: day.hotel.location,
           price_range: `约${day.hotel.nightly_price || day.hotel.estimated_cost || 0}元/晚`,
-          rating: String(day.hotel.rating || '4.6'),
+          rating: formatRating(day.hotel.rating ?? 4.6),
           distance: day.hotel.description || '靠近主要游览区',
           type: day.hotel.type || formData.accommodation,
           estimated_cost: day.hotel.nightly_price || day.hotel.estimated_cost || 0,
