@@ -12,7 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from .config import get_settings
-from .models import Attraction, Budget, DayPlan, Hotel, Location, TravelRequirement, WeatherInfo
+from .models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +380,21 @@ class AmapMCPClient:
             for index, name in enumerate(names)
         ][:limit]
 
+    def search_meals(
+        self,
+        city: str,
+        budget_level: str,
+        food_preferences: str = "",
+        route_points: Iterable[Location] | None = None,
+    ) -> List[Meal]:
+        defaults = self._fallback_meals(city, budget_level)
+        if self.mcp_caller:
+            meals = self._search_meals_from_mcp(city, budget_level, food_preferences, list(route_points or []))
+            if meals:
+                by_type = {meal.type: meal for meal in meals}
+                return [by_type.get(default.type, default) for default in defaults]
+        return defaults
+
     def get_weather(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         if self.mcp_caller:
             weather = self._get_weather_from_mcp(city, start, days)
@@ -486,6 +501,33 @@ class AmapMCPClient:
             logger.warning("高德 MCP 酒店搜索失败，使用本地酒店数据: %s", exc)
             return []
 
+    def _search_meals_from_mcp(self, city: str, budget_level: str, food_preferences: str, route_points: List[Location]) -> List[Meal]:
+        try:
+            meals = []
+            for meal_type, label in (("breakfast", "早餐"), ("lunch", "午餐"), ("dinner", "晚餐")):
+                query = self._meal_query(city, label, food_preferences)
+                data = self._call_mcp_json("maps_text_search", {"keywords": query, "city": city})
+                candidates = []
+                for poi in data.get("pois", [])[:8]:
+                    detail = {}
+                    poi_id = poi.get("id")
+                    if poi_id and not poi.get("location"):
+                        detail = self._call_mcp_json("maps_search_detail", {"id": poi_id})
+                    merged = {**poi, **detail}
+                    if not self._is_relevant_restaurant_poi(merged, city):
+                        continue
+                    location = self._parse_location(merged.get("location"))
+                    if not location:
+                        continue
+                    candidates.append(self._poi_to_meal(merged, meal_type, budget_level, location, route_points))
+                if candidates:
+                    candidates.sort(key=lambda item: self._meal_sort_key(item, route_points))
+                    meals.append(candidates[0])
+            return meals
+        except Exception as exc:
+            logger.warning("高德 MCP 餐饮搜索失败，使用本地餐饮数据: %s", exc)
+            return []
+
     def _get_weather_from_mcp(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         try:
             data = self._call_mcp_json("maps_weather", {"city": self._weather_city_code(city)})
@@ -540,6 +582,59 @@ class AmapMCPClient:
             ticket_price=self._estimate_ticket_price(poi.get("type") or "", index),
             rating=self._parse_rating(poi.get("biz_ext", {}).get("rating")),
         )
+
+    def _poi_to_meal(self, poi: dict, meal_type: str, budget_level: str, location: Location, route_points: List[Location]) -> Meal:
+        name = poi.get("name") or "餐饮推荐"
+        category = poi.get("type") or poi.get("typecode") or "餐饮"
+        address = poi.get("address") or ""
+        rating = self._parse_rating(poi.get("biz_ext", {}).get("rating")) or self._parse_rating(poi.get("rating"))
+        distance_hint = ""
+        if route_points:
+            nearest = min(self._distance_km(location, point) for point in route_points)
+            distance_hint = f"，距离当日路线约{nearest:.1f}公里"
+        return Meal(
+            id=poi.get("id"),
+            type=meal_type,
+            name=name,
+            address=address,
+            estimated_cost=self._estimate_meal_cost(meal_type, budget_level),
+            description=f"{category}{distance_hint}，适合安排为{self._meal_label(meal_type)}。",
+            location=location,
+            rating=rating,
+            category=category,
+        )
+
+    def _fallback_meals(self, city: str, budget_level: str) -> List[Meal]:
+        base = {"低": 35, "中等": 70, "高": 150}.get(budget_level, 70)
+        return [
+            Meal(type="breakfast", name=f"{city}胡同早餐", address="酒店周边", estimated_cost=max(20, base - 35), description="豆浆、包子或当地早餐，节省出行时间。"),
+            Meal(type="lunch", name=f"{city}特色午餐", address="当日景点附近", estimated_cost=base, description="选择评分稳定、排队可控的本地餐厅。"),
+            Meal(type="dinner", name=f"{city}风味晚餐", address="夜游区域附近", estimated_cost=base + 35, description="安排在返程动线附近，避免夜间跨城折返。"),
+        ]
+
+    def _meal_query(self, city: str, label: str, food_preferences: str) -> str:
+        preference = food_preferences.strip()
+        if preference:
+            return f"{city}{preference}{label}"
+        return f"{city}{label}"
+
+    def _meal_label(self, meal_type: str) -> str:
+        return {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}.get(meal_type, "餐饮")
+
+    def _estimate_meal_cost(self, meal_type: str, budget_level: str) -> int:
+        base = {"低": 35, "中等": 70, "高": 150}.get(budget_level, 70)
+        if meal_type == "breakfast":
+            return max(20, base - 35)
+        if meal_type == "dinner":
+            return base + 35
+        return base
+
+    def _meal_sort_key(self, meal: Meal, route_points: List[Location]) -> tuple[float, float]:
+        rating_score = -(meal.rating or 0)
+        if route_points and meal.location:
+            distance = min(self._distance_km(meal.location, point) for point in route_points)
+            return (distance, rating_score)
+        return (0.0, rating_score)
 
     def _estimate_ticket_price(self, category: str, index: int) -> int:
         if any(keyword in category for keyword in ["博物馆", "科教文化"]):
@@ -611,6 +706,20 @@ class AmapMCPClient:
             return False
         allowed_terms = ["风景名胜", "旅游景点", "博物馆", "展览馆", "文化", "古镇", "古村", "故居", "牌坊", "公园", "街"]
         return any(term in searchable_text for term in allowed_terms)
+
+    def _is_relevant_restaurant_poi(self, poi: dict, city: str) -> bool:
+        poi_city = str(poi.get("city") or "")
+        if poi_city and city not in poi_city:
+            return False
+        name = str(poi.get("name") or "")
+        category = str(poi.get("type") or poi.get("typecode") or "")
+        address = str(poi.get("address") or "")
+        searchable_text = f"{name} {category} {address}"
+        restaurant_terms = ["餐饮", "餐厅", "中餐", "西餐", "小吃", "咖啡", "茶", "快餐", "火锅", "海鲜", "素食", "早茶", "面馆", "饭店"]
+        excluded_terms = ["便利店", "零食", "超市", "商店", "酒店", "宾馆", "停车场", "公交", "地铁"]
+        if any(term in searchable_text for term in excluded_terms):
+            return False
+        return any(term in searchable_text for term in restaurant_terms)
 
     def _unique_attractions(self, attractions: List[Attraction]) -> List[Attraction]:
         unique: list[Attraction] = []

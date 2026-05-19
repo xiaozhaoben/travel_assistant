@@ -16,12 +16,15 @@ export interface Attraction {
 }
 
 export interface Meal {
+  id?: string
   type: 'breakfast' | 'lunch' | 'dinner' | 'snack'
   name: string
   address?: string
   location?: Location
   description?: string
   estimated_cost?: number
+  rating?: number
+  category?: string
 }
 
 export interface Hotel {

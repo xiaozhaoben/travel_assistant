@@ -9,7 +9,7 @@ from app.agent_prompts import AgentPrompts
 from app.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
 from app.config import get_settings
 from app.main import app
-from app.models import Attraction, Location, TravelRequirement, TripPlanRequest
+from app.models import Attraction, Location, Meal, TravelRequirement, TripPlanRequest
 from app.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 
 
@@ -342,22 +342,28 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
     ]
 
 
-def test_orchestrator_skips_configured_planner_llm_to_keep_reports_responsive(monkeypatch):
+def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
     calls = []
+    configured_llm = object()
 
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
-        calls.append(name)
+        calls.append({"name": name, "model": model})
         return object()
 
     monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setattr("app.agents.create_llm", lambda: object())
+    monkeypatch.setattr("app.agents.create_llm", lambda: configured_llm)
     monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
 
     orchestrator = TravelAgentOrchestrator(disable_external_api=True)
 
-    assert orchestrator.planner.llm is None
-    assert "planner_agent" not in calls
-    assert "attraction_search_agent" in calls
+    assert orchestrator.planner.llm is configured_llm
+    assert [call["name"] for call in calls] == [
+        "attraction_search_agent",
+        "weather_query_agent",
+        "hotel_agent",
+        "planner_agent",
+    ]
+    assert all(call["model"] is configured_llm for call in calls)
 
 
 def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
@@ -870,6 +876,116 @@ def test_amap_client_filters_non_attraction_and_out_of_city_pois():
     assert "接霞庄" not in names
 
 
+def test_amap_client_uses_mcp_for_restaurant_meals_near_day_route():
+    caller = FakeMCPCaller(
+        [
+            {
+                "pois": [
+                    {
+                        "id": "breakfast-1",
+                        "name": "珠海老字号早茶",
+                        "address": "情侣中路1号",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.5760,22.2920",
+                        "biz_ext": {"rating": "4.7"},
+                    }
+                ],
+            },
+            {
+                "pois": [
+                    {
+                        "id": "lunch-1",
+                        "name": "海湾素食馆",
+                        "address": "海虹路88号",
+                        "type": "餐饮服务;中餐厅;素食",
+                        "location": "113.5770,22.2930",
+                        "biz_ext": {"rating": "4.8"},
+                    }
+                ],
+            },
+            {
+                "pois": [
+                    {
+                        "id": "dinner-1",
+                        "name": "珠海本地海鲜小馆",
+                        "address": "唐家湾镇",
+                        "type": "餐饮服务;中餐厅;海鲜",
+                        "location": "113.5960,22.3580",
+                        "biz_ext": {"rating": "4.6"},
+                    }
+                ],
+            },
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
+
+    meals = amap.search_meals(
+        city="珠海",
+        budget_level="中等",
+        food_preferences="素食",
+        route_points=[Location(longitude=113.576561, latitude=22.292980)],
+    )
+
+    assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
+    assert meals[0].name == "珠海老字号早茶"
+    assert meals[0].id == "breakfast-1"
+    assert meals[0].category == "餐饮服务;中餐厅;广东菜"
+    assert meals[0].rating == 4.7
+    assert meals[0].location.longitude == 113.5760
+    assert meals[1].name == "海湾素食馆"
+    assert "素食" in caller.calls[1]["arguments"]["keywords"]
+    assert all(call["tool_name"] == "maps_text_search" for call in caller.calls)
+
+
+def test_amap_client_falls_back_to_template_meals_without_mcp():
+    amap = AmapMCPClient(api_key="")
+
+    meals = amap.search_meals("珠海", "中等", food_preferences="素食")
+
+    assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
+    assert meals[0].name == "珠海胡同早餐"
+    assert meals[1].estimated_cost == 70
+    assert meals[0].location is None
+
+
+def test_amap_client_prefers_restaurants_near_day_route_over_slightly_higher_rating():
+    caller = FakeMCPCaller(
+        [
+            {
+                "pois": [
+                    {
+                        "id": "far-breakfast",
+                        "name": "远处高分早茶",
+                        "address": "远处商圈",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.9000,22.7000",
+                        "biz_ext": {"rating": "4.9"},
+                    },
+                    {
+                        "id": "near-breakfast",
+                        "name": "路线附近早茶",
+                        "address": "海虹路88号",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.5768,22.2931",
+                        "biz_ext": {"rating": "4.4"},
+                    },
+                ]
+            },
+            {"pois": []},
+            {"pois": []},
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
+
+    meals = amap.search_meals(
+        "珠海",
+        "中等",
+        route_points=[Location(longitude=113.576561, latitude=22.292980)],
+    )
+
+    assert meals[0].name == "路线附近早茶"
+
+
 def test_amap_client_uses_mcp_for_weather():
     caller = FakeMCPCaller(
         [
@@ -1273,6 +1389,64 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     assert plan.days[0].meals[0].type == "breakfast"
     assert plan.budget.total > 0
     assert plan.overall_suggestions == ["热门景点提前预约。"]
+
+
+def test_planner_agent_prefers_real_amap_meals_over_generic_llm_meal_text():
+    class FakeMealAmap:
+        def search_meals(self, city, budget_level, food_preferences="", route_points=None):
+            return [
+                Meal(
+                    id="real-breakfast",
+                    type="breakfast",
+                    name="珠海老字号早茶",
+                    address="情侣中路1号",
+                    estimated_cost=35,
+                    description="餐饮服务;早茶，距离当日路线约0.5公里，适合安排为早餐。",
+                    location=Location(longitude=113.576, latitude=22.292),
+                    rating=4.7,
+                    category="餐饮服务;中餐厅;广东菜",
+                ),
+                Meal(
+                    id="real-lunch",
+                    type="lunch",
+                    name="珠海本地菜馆",
+                    address="海虹路88号",
+                    estimated_cost=70,
+                    description="餐饮服务;中餐厅，适合安排为午餐。",
+                    location=Location(longitude=113.577, latitude=22.293),
+                    rating=4.6,
+                    category="餐饮服务;中餐厅",
+                ),
+                Meal(
+                    id="real-dinner",
+                    type="dinner",
+                    name="珠海海鲜小馆",
+                    address="唐家湾镇",
+                    estimated_cost=105,
+                    description="餐饮服务;海鲜，适合安排为晚餐。",
+                    location=Location(longitude=113.596, latitude=22.358),
+                    rating=4.5,
+                    category="餐饮服务;海鲜",
+                ),
+            ]
+
+    planner = PlannerAgent(llm=None, amap=FakeMealAmap())
+
+    meals = planner._repair_meals(
+        [
+            {"type": "早餐", "suggestion": "珠海胡同早餐", "estimated_cost": 35},
+            {"type": "午餐", "suggestion": "珠海特色午餐", "estimated_cost": 70},
+            {"type": "晚餐", "suggestion": "珠海风味晚餐", "estimated_cost": 105},
+        ],
+        city="珠海",
+        budget_level="中等",
+        route_points=[{"longitude": 113.576561, "latitude": 22.292980}],
+    )
+
+    assert meals[0]["name"] == "珠海老字号早茶"
+    assert meals[0]["address"] == "情侣中路1号"
+    assert meals[0]["id"] == "real-breakfast"
+    assert meals[0]["location"] == {"longitude": 113.576, "latitude": 22.292}
 
 
 def test_planner_prompt_limits_source_lists_for_faster_llm_response():

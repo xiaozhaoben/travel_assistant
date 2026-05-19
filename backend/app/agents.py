@@ -282,8 +282,9 @@ class HotelAgent:
 class PlannerAgent:
     name = "PlannerAgent"
 
-    def __init__(self, llm: Any | None = None):
+    def __init__(self, llm: Any | None = None, amap: AmapMCPClient | None = None):
         self.llm = llm
+        self.amap = amap
         self.langchain_agent = _safe_create_agent(
             llm,
             [],
@@ -489,7 +490,8 @@ class PlannerAgent:
             day_hotel = self._repair_hotel(raw_hotel, fallback_hotel)
             raw_attractions = raw_day.get("attractions") or raw_day.get("activities") or raw_day.get("spots") or []
             repaired_attractions = self._repair_attractions(raw_attractions, attractions, source_attractions, index)
-            meals = self._repair_meals(raw_day.get("meals"), requirement.city)
+            route_locations = [item["location"] for item in repaired_attractions]
+            meals = self._repair_meals(raw_day.get("meals"), requirement.city, requirement.budget_level, requirement.food_preferences, route_locations)
             normalized_days.append(
                 {
                     "day_index": raw_day.get("day_index") or raw_day.get("day_number") or index + 1,
@@ -503,7 +505,7 @@ class PlannerAgent:
                     "hotel": day_hotel,
                     "attractions": repaired_attractions,
                     "meals": meals,
-                    "route_points": [item["location"] for item in repaired_attractions],
+                    "route_points": route_locations,
                     "estimated_transport_cost": raw_day.get("estimated_transport_cost") or raw_day.get("transport_cost") or 60,
                 }
             )
@@ -552,22 +554,27 @@ class PlannerAgent:
             repaired = [item.model_dump(mode="json") for item in attractions[day_index * 2 : day_index * 2 + 2]]
         return repaired or [item.model_dump(mode="json") for item in attractions[:1]]
 
-    def _repair_meals(self, raw_items, city: str) -> list[dict]:
-        defaults = self._meals(city, "中等")
+    def _repair_meals(self, raw_items, city: str, budget_level: str = "中等", food_preferences: str = "", route_points=None) -> list[dict]:
+        defaults = self._meals(city, budget_level, food_preferences, route_points or [])
         raw_list = self._ensure_list(raw_items, [])
         type_map = {"早餐": "breakfast", "午餐": "lunch", "晚餐": "dinner", "小吃": "snack"}
         meals = []
         for index, default in enumerate(defaults):
             raw = raw_list[index] if index < len(raw_list) and isinstance(raw_list[index], dict) else {}
             meal_type = type_map.get(raw.get("type"), raw.get("type") or default.type)
-            suggestion = raw.get("name") or raw.get("suggestion") or default.name
+            has_real_default = bool(default.id or default.location)
+            suggestion = default.name if has_real_default else raw.get("name") or raw.get("suggestion") or default.name
             meals.append(
                 {
+                    "id": raw.get("id") or default.id,
                     "type": meal_type,
                     "name": suggestion,
                     "address": raw.get("address") or default.address,
                     "estimated_cost": raw.get("estimated_cost") or default.estimated_cost,
-                    "description": raw.get("description") or suggestion,
+                    "description": default.description if has_real_default else raw.get("description") or suggestion,
+                    "location": raw.get("location") or (default.location.model_dump(mode="json") if default.location else None),
+                    "rating": raw.get("rating") if raw.get("rating") is not None else default.rating,
+                    "category": raw.get("category") or default.category,
                 }
             )
         return meals
@@ -695,7 +702,7 @@ class PlannerAgent:
             start = index * per_day
             selected = ordered_attractions[start : start + per_day] or ordered_attractions[:per_day]
             day_hotel = hotels[index % len(hotels)]
-            meals = self._meals(requirement.city, requirement.budget_level)
+            meals = self._meals(requirement.city, requirement.budget_level, requirement.food_preferences, [item.location for item in selected])
             variant_summary = {
                 "balanced": "控制步行和换乘强度",
                 "relaxed": "减少景点数量并保留休息时间",
@@ -740,13 +747,10 @@ class PlannerAgent:
     def _theme(self, preferences: List[str], index: int) -> str:
         return preferences[index % len(preferences)] if preferences else "经典必游"
 
-    def _meals(self, city: str, budget_level: str) -> List[Meal]:
-        base = {"低": 35, "中等": 70, "高": 150}.get(budget_level, 70)
-        return [
-            Meal(type="breakfast", name=f"{city}胡同早餐", address="酒店周边", estimated_cost=max(20, base - 35), description="豆浆、包子或当地早餐，节省出行时间。"),
-            Meal(type="lunch", name=f"{city}特色午餐", address="当日景点附近", estimated_cost=base, description="选择评分稳定、排队可控的本地餐厅。"),
-            Meal(type="dinner", name=f"{city}风味晚餐", address="夜游区域附近", estimated_cost=base + 35, description="安排在返程动线附近，避免夜间跨城折返。"),
-        ]
+    def _meals(self, city: str, budget_level: str, food_preferences: str = "", route_points=None) -> List[Meal]:
+        if self.amap is not None:
+            return self.amap.search_meals(city, budget_level, food_preferences=food_preferences, route_points=route_points or [])
+        return AmapMCPClient(api_key="").search_meals(city, budget_level, food_preferences=food_preferences, route_points=route_points or [])
 
 
 class TravelAgentOrchestrator:
@@ -763,11 +767,11 @@ class TravelAgentOrchestrator:
         )
         configured_llm = None if disable_llm else create_llm()
         agent_llm = llm if llm is not None else configured_llm
-        planner_llm = llm if llm is not None else None
+        planner_llm = agent_llm
         self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)
-        self.planner = PlannerAgent(llm=planner_llm)
+        self.planner = PlannerAgent(llm=planner_llm, amap=self.amap)
         self.research = DestinationResearchService()
 
     def plan(self, request: TripPlanRequest) -> TripPlanningResult:

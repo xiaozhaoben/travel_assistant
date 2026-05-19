@@ -201,6 +201,8 @@
               <a-descriptions :column="1" bordered size="small">
                 <a-descriptions-item v-for="meal in day.meals" :key="meal.type" :label="getMealLabel(meal.type)">
                   {{ meal.name }} <span v-if="meal.description">- {{ meal.description }}</span>
+                  <span v-if="meal.address">｜{{ meal.address }}</span>
+                  <span v-if="meal.rating">｜评分 {{ meal.rating }}</span>
                   <span v-if="meal.estimated_cost">（约¥{{ meal.estimated_cost }}）</span>
                 </a-descriptions-item>
               </a-descriptions>

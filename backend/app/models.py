@@ -62,6 +62,10 @@ class Meal(BaseModel):
     address: str
     estimated_cost: int
     description: str
+    id: Optional[str] = None
+    location: Optional[Location] = None
+    rating: Optional[float] = None
+    category: Optional[str] = None
 
 
 class Hotel(BaseModel):
