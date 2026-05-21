@@ -43,7 +43,7 @@ MCP server 使用 `AMAP_MAPS_API_KEY` 环境变量。当前配置兼容 `AMAP_AP
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 如果 8000 被占用，可以换端口，例如 `8010`。
@@ -68,7 +68,7 @@ npm run dev
 ```bash
 set VITE_BACKEND_URL=http://127.0.0.1:8010
 set VITE_API_BASE_URL=http://127.0.0.1:8010
-npm run dev -- --port 5174
+npm run dev
 ```
 
 本地开发通常使用 `VITE_BACKEND_URL` 让 Vite 代理 `/api` 请求；如果前端构建后由其他静态服务托管，则使用 `VITE_API_BASE_URL` 直接指定后端地址。

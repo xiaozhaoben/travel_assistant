@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Generic, List, Literal, Optional, TypeVar
+from typing import Any, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -148,6 +148,9 @@ class TripPlanningResult(BaseModel):
     options: List[TripPlanOption]
     research_context: List[ResearchSnippet] = Field(default_factory=list)
     clarifying_suggestions: List[str] = Field(default_factory=list)
+    report_id: Optional[str] = None
+    report_created_at: Optional[datetime] = None
+    report_updated_at: Optional[datetime] = None
 
     @property
     def selected_plan(self) -> TripPlan:
@@ -213,10 +216,39 @@ class TripPlanningResult(BaseModel):
 
 
 class PlanEditRequest(BaseModel):
+    report_id: Optional[str] = None
     plan: TripPlan
     research_context: List[ResearchSnippet] = Field(default_factory=list)
     operation: Literal["recalculate_only", "refill_day", "reorder_day"] = "recalculate_only"
     day_index: Optional[int] = None
+
+
+class TripReportRevision(BaseModel):
+    id: str
+    report_id: str
+    operation: str
+    plan: dict[str, Any]
+    research_context: list[dict[str, Any]] = Field(default_factory=list)
+    budget_total: int
+    created_at: datetime
+
+
+class TripReportSummary(BaseModel):
+    id: str
+    prompt: str
+    city: str
+    days_count: int
+    budget_total: int
+    generation_mode: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TripReportDetail(TripReportSummary):
+    request: dict[str, Any]
+    result: dict[str, Any]
+    selected_plan: dict[str, Any]
+    revisions: list[TripReportRevision] = Field(default_factory=list)
 
 
 T = TypeVar("T")

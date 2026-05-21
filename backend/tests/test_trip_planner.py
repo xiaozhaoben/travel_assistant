@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -120,6 +120,19 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.cors_origins == ["http://localhost:5173", "http://localhost:5174"]
     assert settings.amap_api_key == "amap-key"
     assert settings.has_llm_credentials is True
+
+
+def test_settings_builds_database_url_from_postgres_parts(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("POSTGRES_HOST", "db.example.test")
+    monkeypatch.setenv("POSTGRES_PORT", "15432")
+    monkeypatch.setenv("POSTGRES_DB", "travel")
+    monkeypatch.setenv("POSTGRES_USER", "travel")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+
+    settings = get_settings()
+
+    assert settings.database_url == "postgresql://travel:secret@db.example.test:15432/travel"
 
 
 def test_settings_support_provider_disable_flags(monkeypatch):
@@ -1521,6 +1534,87 @@ def test_api_health_plan_and_recalculate_endpoints():
     weather = client.get("/api/map/weather", params={"city": "北京", "days": 2})
     assert weather.status_code == 200
     assert len(weather.json()["data"]) == 2
+
+
+def test_api_plan_persists_report_and_returns_report_id():
+    class FakeReportStore:
+        def __init__(self):
+            self.saved = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def save_report(self, request, result):
+            self.saved.append({"request": request, "result": result})
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+            }
+
+    store = FakeReportStore()
+    main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    main_module.report_store = store
+    client = TestClient(app)
+
+    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["report_id"] == "11111111-1111-1111-1111-111111111111"
+    assert payload["report_created_at"] == "2026-05-19T08:00:00Z"
+    assert store.saved[0]["request"].prompt == "我想去北京玩 1 天，喜欢历史文化，预算中等"
+    assert store.saved[0]["result"].selected_option_id == "balanced"
+    main_module.report_store = None
+
+
+def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
+    class FakeReportStore:
+        def __init__(self):
+            self.updated = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def save_report(self, request, result):
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+            }
+
+        def update_report_plan(self, report_id, plan, operation, research_context):
+            self.updated.append(
+                {
+                    "report_id": report_id,
+                    "plan": plan,
+                    "operation": operation,
+                    "research_context": research_context,
+                }
+            )
+
+    store = FakeReportStore()
+    main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    main_module.report_store = store
+    client = TestClient(app)
+    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+    plan = response.json()["data"]["options"][0]["plan"]
+
+    recalc = client.post(
+        "/api/trip/recalculate",
+        json={
+            "report_id": "11111111-1111-1111-1111-111111111111",
+            "plan": plan,
+            "operation": "reorder_day",
+            "day_index": 1,
+        },
+    )
+
+    assert recalc.status_code == 200
+    assert store.updated[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
+    assert store.updated[0]["operation"] == "reorder_day"
+    assert store.updated[0]["plan"].budget.total == recalc.json()["data"]["budget"]["total"]
+    main_module.report_store = None
 
 
 def test_api_plan_get_returns_usage_hint():

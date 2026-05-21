@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .agents import TravelAgentOrchestrator
 from .config import get_settings
 from .logging_config import setup_logging
-from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest
+from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest, TripReportDetail, TripReportSummary
+from .report_store import create_report_store
 from .services import UnsplashMCPClient
 
 settings = get_settings()
@@ -23,6 +24,7 @@ app.add_middleware(
 )
 
 orchestrator = TravelAgentOrchestrator()
+report_store = create_report_store(settings.database_url)
 image_provider = (
     UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
     if settings.disable_external_api
@@ -52,6 +54,7 @@ def health():
             "unsplash_configured": bool(settings.unsplash_access_key),
         },
         "external_api_disabled": settings.disable_external_api,
+        "database": report_store.health() if report_store is not None else {"enabled": False, "ok": False},
     }
 
 
@@ -73,6 +76,18 @@ def plan_trip_usage():
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
 def plan_trip(request: TripPlanRequest):
     result = orchestrator.plan(request)
+    if report_store is not None:
+        try:
+            report = report_store.save_report(request, result)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"报告数据库写入失败: {exc}") from exc
+        result = result.model_copy(
+            update={
+                "report_id": report["id"],
+                "report_created_at": report["created_at"],
+                "report_updated_at": report["updated_at"],
+            }
+        )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
 
 
@@ -84,7 +99,45 @@ def recalculate_trip(request: PlanEditRequest):
         research_context=request.research_context,
         day_index=request.day_index,
     )
+    if request.report_id and report_store is not None:
+        try:
+            report_store.update_report_plan(
+                request.report_id,
+                plan,
+                operation=request.operation,
+                research_context=request.research_context,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"报告修订写入失败: {exc}") from exc
     return ApiResponse[TripPlan](success=True, message="行程已更新", data=plan)
+
+
+@app.get("/api/reports", response_model=ApiResponse[list[TripReportSummary]])
+def list_reports(limit: int = 50):
+    if report_store is None:
+        return ApiResponse[list[TripReportSummary]](success=True, message="数据库未启用", data=[])
+    try:
+        reports = report_store.list_reports(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
+    return ApiResponse[list[TripReportSummary]](
+        success=True,
+        message="报告列表获取成功",
+        data=reports,
+    )
+
+
+@app.get("/api/reports/{report_id}", response_model=ApiResponse[TripReportDetail])
+def get_report(report_id: str):
+    if report_store is None:
+        raise HTTPException(status_code=503, detail="数据库未启用")
+    try:
+        report = report_store.get_report(report_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return ApiResponse[TripReportDetail](success=True, message="报告详情获取成功", data=report)
 
 
 @app.get("/api/poi/photo")

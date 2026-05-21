@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
@@ -35,6 +36,7 @@ class Settings:
     web_search_mcp_tool: str
     disable_llm: bool
     disable_external_api: bool
+    database_url: str | None
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -85,6 +87,7 @@ def get_settings() -> Settings:
         web_search_mcp_tool=os.getenv("WEB_SEARCH_MCP_TOOL", "web_search"),
         disable_llm=_env_bool("DISABLE_LLM"),
         disable_external_api=_env_bool("DISABLE_EXTERNAL_API"),
+        database_url=_database_url_from_env(),
     )
 
 
@@ -93,3 +96,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _database_url_from_env() -> str | None:
+    explicit_url = os.getenv("DATABASE_URL")
+    if explicit_url:
+        return explicit_url
+
+    host = os.getenv("POSTGRES_HOST")
+    database = os.getenv("POSTGRES_DB")
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    if not all([host, database, user, password]):
+        return None
+
+    port = os.getenv("POSTGRES_PORT", "5432")
+    return f"postgresql://{quote_plus(user or '')}:{quote_plus(password or '')}@{host}:{port}/{quote_plus(database or '')}"

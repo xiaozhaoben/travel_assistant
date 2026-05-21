@@ -325,6 +325,7 @@ async function saveChanges() {
   saving.value = true
   try {
     tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      report_id: planningResult.value?.report_id,
       research_context: planningResult.value?.research_context || [],
     })
     syncSelectedOption()
@@ -373,6 +374,7 @@ async function smartAdjustDay(operation: 'refill_day' | 'reorder_day') {
   try {
     const activeDay = Number(activeDays.value[0] ?? 0) + 1
     tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      report_id: planningResult.value?.report_id,
       operation,
       day_index: activeDay,
       research_context: planningResult.value?.research_context || [],

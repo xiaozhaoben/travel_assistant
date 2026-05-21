@@ -102,6 +102,9 @@ export interface TripPlanningResult {
   options: TripPlanOption[]
   research_context: ResearchSnippet[]
   clarifying_suggestions: string[]
+  report_id?: string | null
+  report_created_at?: string | null
+  report_updated_at?: string | null
   city?: string
   days?: DayPlan[]
   weather_info?: WeatherInfo[]
@@ -144,4 +147,9 @@ export interface ServiceHealth {
   amap_configured: boolean
   unsplash_configured: boolean
   external_api_disabled: boolean
+  database?: {
+    enabled: boolean
+    ok: boolean
+    error?: string
+  }
 }
