@@ -1,6 +1,6 @@
 # 旅游规划助手
 
-Vue3 + FastAPI + LangChain 的旅游规划助手。用户输入一句自然语言需求，例如“我想去北京玩 3 天，喜欢历史文化，预算中等”，系统会生成包含景点、酒店、餐饮、天气、地图点位和预算的可编辑行程。
+Vue3 + FastAPI + LangChain 的旅游规划助手。用户输入一句自然语言需求，例如“我想去北京玩 3 天，喜欢历史文化，预算中等”，系统会生成包含景点、酒店、餐饮、天气、地图点位和预算的可编辑行程。首页还提供旅行智能问答：RSS 旅行资讯会由采集 Agent 入库到 PostgreSQL/pgvector，并作为问答 Agent 的 RAG 资料来源。
 
 ## 项目结构
 
@@ -82,11 +82,35 @@ set VITE_AMAP_SECURITY_JS_CODE=你的高德Web端安全密钥
 
 不配置时结果页会显示内置模拟地图，仍然支持删除景点、调整顺序并重新计算预算。
 
+## 旅行知识库与智能问答
+
+知识库复用当前项目的 PostgreSQL 配置，并要求数据库安装 `pgvector` 扩展。配置 `DATABASE_URL` 或 `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 后，首次调用资讯入库会自动创建 `travel_knowledge_documents` 表。
+
+RSS 源配置在 `backend/app/knowledge/news_agent.py` 的 `travel_feeds` 变量中：
+
+```python
+travel_feeds = [
+    "https://www.tuniu.com/rss",
+    "https://rsshub.app/mafengwo/note",
+    "https://rsshub.app/zhihu/collection/xxxxx",
+]
+```
+
+问答流程：
+
+1. `POST /api/news/ingest` 抓取 RSS，使用 `feedparser` 解析并清洗 HTML。
+2. 新闻内容切片后写入 PostgreSQL `vector(384)` 字段。
+3. `POST /api/qa/ask` 先向量召回，再按参考项目的 RAG prompt 风格生成回答。
+4. 如果未配置大模型，会返回基于召回资料的本地摘要；如果未配置数据库，会明确提示先配置知识库。
+
 ## API
 
 - `GET /api/health`：查看大模型、高德地图、Unsplash 配置状态。
 - `POST /api/trip/plan`：根据自然语言需求生成完整行程。
 - `POST /api/trip/recalculate`：删除景点或调整顺序后重新计算路线点和预算。
+- `POST /api/news/ingest`：使用旅行资讯采集 Agent 抓取 RSS 并写入 PostgreSQL 向量库。
+- `GET /api/news/status`：查看旅行知识库与默认 RSS 源配置。
+- `POST /api/qa/ask`：基于 PostgreSQL 向量库召回资料并回答旅行问题。
 - `GET /api/map/poi`：通过 `uvx amap-mcp-server` 的 `maps_text_search` / `maps_search_detail` 工具搜索 POI。
 - `GET /api/map/weather`：通过 `uvx amap-mcp-server` 的 `maps_weather` 工具查询天气。
 - `GET /api/poi/photo`：通过 Unsplash MCP 风格适配层获取景点图片。

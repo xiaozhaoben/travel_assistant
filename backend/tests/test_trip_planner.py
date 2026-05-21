@@ -1,5 +1,7 @@
 import json
 import logging
+import sys
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -7,7 +9,7 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.main import app
 from app.core.config import get_settings
-from app.domain.models import Attraction, Location, Meal, TravelRequirement, TripPlanRequest
+from app.domain.models import Attraction, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
 from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.workflows.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
@@ -86,6 +88,22 @@ class FakeWebSearchCaller:
         }
 
 
+class FakeTravelVectorStore:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+        self.saved = []
+
+    def add_text(self, **kwargs):
+        self.saved.append(kwargs)
+        return 1
+
+    def similarity_search(self, query, k=5):
+        return self.docs[:k]
+
+    def health(self):
+        return {"enabled": True, "ok": True, "pgvector_enabled": True, "table_ready": True}
+
+
 def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path):
     from app.researching.research import DestinationResearchService, WebSearchMCPClient
 
@@ -101,6 +119,59 @@ def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path
     assert snippets[0].title == "北京故宫预约攻略"
     assert snippets[0].source == "web"
     assert "预约" in snippets[0].keywords
+
+
+def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
+    from app.knowledge.news_agent import TravelNewsIngestionAgent
+
+    feedparser_stub = SimpleNamespace(
+        parse=lambda url: SimpleNamespace(
+            entries=[
+                {
+                    "title": "南京端午预约提醒",
+                    "description": "<p>热门景区建议提前预约，夜游夫子庙适合错峰。</p>",
+                    "summary": "地铁客流较大，建议预留换乘时间。",
+                    "link": "https://example.test/nanjing",
+                    "published": "Thu, 21 May 2026 09:00:00 +0800",
+                }
+            ]
+        )
+    )
+    monkeypatch.setitem(sys.modules, "feedparser", feedparser_stub)
+    store = FakeTravelVectorStore()
+
+    result = TravelNewsIngestionAgent(store).fetch_travel_feeds(["https://feeds.example.test/travel"])
+
+    assert result["total_seen"] == 1
+    assert result["total_added"] == 1
+    assert store.saved[0]["source_url"] == "https://example.test/nanjing"
+    assert store.saved[0]["title"] == "南京端午预约提醒"
+    assert "<p>" not in store.saved[0]["content"]
+    assert "提前预约" in store.saved[0]["content"]
+
+
+def test_travel_qa_agent_answers_from_retrieved_vector_documents():
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.knowledge.vector_store import KnowledgeDocument
+
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="南京端午预约提醒",
+        content="南京端午期间热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        summary="热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        source_url="https://example.test/nanjing",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=None)
+
+    result = agent.ask("端午去南京要注意什么？")
+
+    assert result.generation_mode == "fallback"
+    assert result.retrieved_count == 1
+    assert "提前预约" in result.answer
+    assert result.sources[0].title == "南京端午预约提醒"
 
 
 def test_settings_support_reference_env_names(monkeypatch):
@@ -1190,7 +1261,7 @@ def test_image_client_logs_each_provider_attempt_and_fallback(caplog):
 
     messages = [json.loads(record.message) for record in caplog.records if record.message.startswith("{")]
 
-    assert url.startswith("https://placehold.co/")
+    assert url == ""
     assert [message["event"] for message in messages] == [
         "image_search_attempt",
         "image_search_no_result",
@@ -1207,13 +1278,12 @@ def test_image_client_logs_each_provider_attempt_and_fallback(caplog):
     assert all(message["query"] == "珠海 唐家古镇" for message in messages)
 
 
-def test_unsplash_client_fallback_avoids_source_unsplash():
+def test_unsplash_client_fallback_avoids_network_placeholder():
     unsplash = UnsplashMCPClient(access_key="", http_client=FakeHttpClient([]))
 
     url = unsplash.image_for("Zhuhai Yuanming New Garden", use_api=False)
 
-    assert "source.unsplash.com" not in url
-    assert "placehold.co" in url
+    assert url == ""
 
 
 def test_orchestrator_generates_complete_plan_with_four_agent_outputs():
@@ -1544,6 +1614,47 @@ def test_api_health_plan_and_recalculate_endpoints():
     weather = client.get("/api/map/weather", params={"city": "北京", "days": 2})
     assert weather.status_code == 200
     assert len(weather.json()["data"]) == 2
+
+
+def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
+    class FakeQAAgent:
+        def ask(self, question, top_k=5):
+            return TravelQAResponse(
+                answer=f"回答：{question}",
+                sources=[
+                    TravelKnowledgeSource(
+                        title="南京端午预约提醒",
+                        url="https://example.test/nanjing",
+                        summary="热门景区建议提前预约。",
+                        source="rss",
+                        score=0.9,
+                    )
+                ],
+                retrieved_count=1,
+                generation_mode="fallback",
+            )
+
+    class FakeNewsAgent:
+        def fetch_travel_feeds(self, feed_urls):
+            return {
+                "total_seen": 2,
+                "total_added": 2,
+                "feeds": [{"url": feed_urls[0], "seen": 2, "added": 2}],
+                "errors": [],
+            }
+
+    monkeypatch.setattr(main_module, "qa_agent", FakeQAAgent())
+    monkeypatch.setattr(main_module, "news_agent", FakeNewsAgent())
+    client = TestClient(app)
+
+    qa_response = client.post("/api/qa/ask", json={"question": "端午去南京要注意什么？"})
+    assert qa_response.status_code == 200
+    assert qa_response.json()["data"]["answer"].startswith("回答")
+    assert qa_response.json()["data"]["sources"][0]["title"] == "南京端午预约提醒"
+
+    ingest_response = client.post("/api/news/ingest", json={"feed_urls": ["https://feeds.example.test/travel"]})
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["data"]["total_added"] == 2
 
 
 def test_api_plan_persists_report_and_returns_report_id():

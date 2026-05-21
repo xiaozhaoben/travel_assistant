@@ -7,8 +7,6 @@ import os
 import re
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List
-from urllib.parse import quote
-
 import httpx
 
 from app.core.config import get_settings
@@ -1071,10 +1069,8 @@ class UnsplashMCPClient:
                     self._log_image_event("image_search_success", query, provider=provider, url=url)
                     return url
                 self._log_image_event("image_search_no_result", query, provider=provider)
-        encoded = quote(query)
-        fallback_url = f"https://placehold.co/960x640/e8f1ff/1f2937?text={encoded}"
-        self._log_image_event("image_search_fallback", query, url=fallback_url)
-        return fallback_url
+        self._log_image_event("image_search_fallback", query, url="")
+        return ""
 
     def _provider_order(self):
         providers = []

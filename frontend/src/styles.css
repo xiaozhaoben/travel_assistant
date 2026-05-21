@@ -7,46 +7,12 @@ body {
   padding: 56px 20px;
   position: relative;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 8px;
   background:
-    linear-gradient(135deg, rgba(102, 126, 234, 0.92), rgba(118, 75, 162, 0.9)),
-    url("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1600&q=80");
+    linear-gradient(180deg, rgba(18, 31, 42, 0.5), rgba(18, 31, 42, 0.72)),
+    url("./assets/travel-qa-hero.png");
   background-size: cover;
   background-position: center;
-}
-
-.bg-decoration {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.circle {
-  position: absolute;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.circle-1 {
-  width: 260px;
-  height: 260px;
-  top: -80px;
-  left: -80px;
-}
-
-.circle-2 {
-  width: 180px;
-  height: 180px;
-  right: -40px;
-  top: 36%;
-}
-
-.circle-3 {
-  width: 140px;
-  height: 140px;
-  bottom: -40px;
-  left: 28%;
 }
 
 .page-header {
@@ -58,7 +24,7 @@ body {
 }
 
 .icon-wrapper {
-  font-size: 64px;
+  font-size: 48px;
   line-height: 1;
   margin-bottom: 12px;
 }
@@ -80,8 +46,8 @@ body {
   z-index: 1;
   max-width: 1320px;
   margin: 0 auto;
-  border-radius: 18px;
-  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.28);
+  border-radius: 8px;
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.26);
 }
 
 .service-panel {
@@ -91,9 +57,9 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  border: 1px solid #dbe7ff;
-  border-radius: 12px;
-  background: #f5f8ff;
+  border: 1px solid #d4e5e1;
+  border-radius: 8px;
+  background: #f4fbf8;
 }
 
 .service-title {
@@ -119,7 +85,7 @@ body {
   margin-bottom: 26px;
   padding: 24px;
   border: 1px solid #e8eaf0;
-  border-radius: 14px;
+  border-radius: 8px;
   background: linear-gradient(135deg, #f7f9fc, #fff);
 }
 
@@ -129,7 +95,11 @@ body {
   gap: 10px;
   margin-bottom: 20px;
   padding-bottom: 12px;
-  border-bottom: 2px solid #667eea;
+  border-bottom: 2px solid #1d8a8a;
+}
+
+.section-header.compact {
+  margin-bottom: 14px;
 }
 
 .section-icon {
@@ -149,8 +119,8 @@ body {
   justify-content: center;
   gap: 5px;
   color: #fff;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  border-radius: 8px;
+  background: linear-gradient(135deg, #1d8a8a, #ee6f57);
 }
 
 .days-display strong {
@@ -165,23 +135,105 @@ body {
 
 .submit-button {
   height: 56px;
-  border-radius: 28px;
+  border-radius: 8px;
   font-size: 18px;
   font-weight: 800;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  background: linear-gradient(135deg, #1d8a8a, #ee6f57);
 }
 
 .loading-container {
   margin-top: 24px;
   padding: 20px;
-  border-radius: 14px;
+  border-radius: 8px;
   background: #f7f9fc;
 }
 
 .loading-container p {
   margin: 12px 0 0;
-  color: #667eea;
+  color: #1d8a8a;
   text-align: center;
+  font-weight: 700;
+}
+
+.qa-console {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 18px;
+}
+
+.qa-input-panel,
+.qa-answer-panel {
+  min-height: 320px;
+  padding: 22px;
+  border: 1px solid #e2ebe9;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qa-answer-panel {
+  max-height: 520px;
+  overflow: auto;
+}
+
+.qa-floating-button {
+  position: fixed;
+  right: 28px;
+  top: 48%;
+  z-index: 20;
+  height: auto;
+  min-height: 112px;
+  width: 56px;
+  padding: 14px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px 0 0 8px;
+  white-space: normal;
+  line-height: 1.2;
+  font-weight: 800;
+  box-shadow: 0 14px 34px rgba(29, 138, 138, 0.36);
+  background: linear-gradient(180deg, #1d8a8a, #ee6f57);
+}
+
+.qa-floating-button span:not(.anticon) {
+  writing-mode: vertical-rl;
+  letter-spacing: 0;
+}
+
+.qa-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #1d2939;
+  font-weight: 900;
+}
+
+.qa-modal .ant-modal-content {
+  border-radius: 8px;
+}
+
+.qa-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.qa-answer-text {
+  white-space: pre-wrap;
+  line-height: 1.8;
+  color: #1f2933;
+}
+
+.ingest-summary {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1d6f6f;
   font-weight: 700;
 }
 
@@ -305,8 +357,8 @@ body {
   align-items: center;
   padding: 18px;
   color: #fff;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  border-radius: 8px;
+  background: linear-gradient(135deg, #1d8a8a, #ee6f57);
 }
 
 .budget-total strong {
@@ -425,7 +477,7 @@ body {
   color: #fff;
   font-weight: 900;
   border-radius: 999px;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  background: linear-gradient(135deg, #1d8a8a, #ee6f57);
 }
 
 .price-tag {
@@ -496,5 +548,24 @@ body {
 
   .service-tags {
     justify-content: flex-start;
+  }
+
+  .qa-console {
+    grid-template-columns: 1fr;
+  }
+
+  .qa-floating-button {
+    right: 14px;
+    top: auto;
+    bottom: 22px;
+    min-height: 48px;
+    width: auto;
+    padding: 0 16px;
+    flex-direction: row;
+    border-radius: 999px;
+  }
+
+  .qa-floating-button span:not(.anticon) {
+    writing-mode: horizontal-tb;
   }
 }

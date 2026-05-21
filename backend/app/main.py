@@ -5,8 +5,23 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import get_settings
 from .core.logging_config import setup_logging
-from .domain.models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest, TripReportDetail, TripReportSummary
+from .domain.models import (
+    ApiResponse,
+    PlanEditRequest,
+    TravelNewsIngestRequest,
+    TravelNewsIngestResult,
+    TravelQARequest,
+    TravelQAResponse,
+    TripPlan,
+    TripPlanningResult,
+    TripPlanRequest,
+    TripReportDetail,
+    TripReportSummary,
+)
 from .integrations.services import UnsplashMCPClient
+from .knowledge.news_agent import TravelNewsIngestionAgent, travel_feeds
+from .knowledge.qa_agent import TravelQuestionAnsweringAgent
+from .knowledge.vector_store import create_travel_vector_store
 from .storage.report_store import create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
@@ -25,6 +40,9 @@ app.add_middleware(
 
 orchestrator = TravelAgentOrchestrator()
 report_store = create_report_store(settings.database_url)
+travel_vector_store = create_travel_vector_store(settings.database_url)
+news_agent = TravelNewsIngestionAgent(travel_vector_store)
+qa_agent = TravelQuestionAnsweringAgent(travel_vector_store, llm=orchestrator.planner.llm)
 image_provider = (
     UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
     if settings.disable_external_api
@@ -55,6 +73,9 @@ def health():
         },
         "external_api_disabled": settings.disable_external_api,
         "database": report_store.health() if report_store is not None else {"enabled": False, "ok": False},
+        "travel_knowledge": travel_vector_store.health()
+        if travel_vector_store is not None
+        else {"enabled": False, "ok": False},
     }
 
 
@@ -89,6 +110,35 @@ def plan_trip(request: TripPlanRequest):
             }
         )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
+
+
+@app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])
+def ask_travel_question(request: TravelQARequest):
+    result = qa_agent.ask(request.question, top_k=request.top_k)
+    return ApiResponse[TravelQAResponse](success=True, message="智能问答完成", data=result)
+
+
+@app.post("/api/news/ingest", response_model=ApiResponse[TravelNewsIngestResult])
+def ingest_travel_news(request: TravelNewsIngestRequest):
+    feed_urls = request.feed_urls or travel_feeds
+    result = TravelNewsIngestResult.model_validate(news_agent.fetch_travel_feeds(feed_urls))
+    if result.errors and result.total_seen == 0:
+        raise HTTPException(status_code=503, detail="; ".join(result.errors))
+    return ApiResponse[TravelNewsIngestResult](success=True, message="旅行资讯入库完成", data=result)
+
+
+@app.get("/api/news/status")
+def travel_news_status():
+    return {
+        "success": True,
+        "message": "旅行知识库状态",
+        "data": {
+            "configured_feeds": travel_feeds,
+            "knowledge_store": travel_vector_store.health()
+            if travel_vector_store is not None
+            else {"enabled": False, "ok": False},
+        },
+    }
 
 
 @app.post("/api/trip/recalculate", response_model=ApiResponse[TripPlan])

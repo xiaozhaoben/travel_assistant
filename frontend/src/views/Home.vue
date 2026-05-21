@@ -1,15 +1,9 @@
 <template>
   <div class="home-container">
-    <div class="bg-decoration">
-      <div class="circle circle-1"></div>
-      <div class="circle circle-2"></div>
-      <div class="circle circle-3"></div>
-    </div>
-
     <div class="page-header">
-      <div class="icon-wrapper">✈️</div>
+      <div class="icon-wrapper"><CompassOutlined /></div>
       <h1 class="page-title">旅行规划工作台</h1>
-      <p class="page-subtitle">基于四个专业Agent协作生成景点、天气、酒店、餐饮和预算计划</p>
+      <p class="page-subtitle">规划行程、沉淀旅行资讯、回答目的地问题</p>
     </div>
 
     <a-card class="form-card" :bordered="false">
@@ -27,6 +21,9 @@
           </a-tag>
           <a-tag :color="serviceHealth?.unsplash_configured && !serviceHealth?.external_api_disabled ? 'green' : 'orange'">
             Unsplash：{{ serviceHealth?.unsplash_configured && !serviceHealth?.external_api_disabled ? '已配置' : '占位图片' }}
+          </a-tag>
+          <a-tag :color="serviceHealth?.travel_knowledge?.enabled ? 'green' : 'orange'">
+            知识库：{{ serviceHealth?.travel_knowledge?.enabled ? 'PostgreSQL' : '未配置' }}
           </a-tag>
         </div>
       </div>
@@ -182,6 +179,65 @@
         </div>
       </a-form>
     </a-card>
+
+    <a-button type="primary" class="qa-floating-button" @click="qaModalOpen = true">
+      <template #icon><MessageOutlined /></template>
+      <span>智能问答</span>
+    </a-button>
+
+    <a-modal v-model:open="qaModalOpen" width="920px" :footer="null" centered wrap-class-name="qa-modal">
+      <template #title>
+        <div class="qa-modal-title">
+          <MessageOutlined />
+          <span>旅行智能问答</span>
+        </div>
+      </template>
+      <div class="qa-console">
+        <div class="qa-input-panel">
+          <div class="section-header compact">
+            <span class="section-icon"><MessageOutlined /></span>
+            <span class="section-title">问目的地、预约、交通与避坑</span>
+          </div>
+          <a-textarea
+            v-model:value="qaQuestion"
+            :rows="5"
+            size="large"
+            placeholder="例如：端午去南京有哪些预约和错峰建议？"
+            @press-enter.ctrl="handleAskQuestion"
+          />
+          <div class="qa-actions">
+            <a-button type="primary" :loading="qaLoading" @click="handleAskQuestion">
+              <template #icon><SendOutlined /></template>
+              提问
+            </a-button>
+            <a-button :loading="newsIngesting" @click="handleIngestNews">
+              <template #icon><SyncOutlined /></template>
+              更新旅行资讯
+            </a-button>
+          </div>
+          <div v-if="ingestSummary" class="ingest-summary">
+            <DatabaseOutlined />
+            {{ ingestSummary }}
+          </div>
+        </div>
+        <div class="qa-answer-panel">
+          <a-empty v-if="!qaAnswer" description="旅行问答会显示在这里" />
+          <template v-else>
+            <div class="qa-answer-text">{{ qaAnswer.answer }}</div>
+            <a-divider orientation="left">参考资料</a-divider>
+            <a-empty v-if="!qaAnswer.sources.length" description="暂无参考资料" />
+            <a-list v-else :data-source="qaAnswer.sources" size="small">
+              <template #renderItem="{ item }">
+                <a-list-item>
+                  <a-list-item-meta :title="item.title" :description="item.summary" />
+                  <a-tag>{{ item.source }}</a-tag>
+                </a-list-item>
+              </template>
+            </a-list>
+          </template>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -189,21 +245,62 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
+import { CompassOutlined, DatabaseOutlined, MessageOutlined, SendOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import dayjs, { type Dayjs } from 'dayjs'
-import { generateTripPlan, healthCheck } from '@/services/api'
-import type { ServiceHealth, TripFormData } from '@/types'
+import { askTravelQuestion, generateTripPlan, healthCheck, ingestTravelNews } from '@/services/api'
+import type { ServiceHealth, TravelQAResponse, TripFormData } from '@/types'
 
 const router = useRouter()
 const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
 const serviceHealth = ref<ServiceHealth | null>(null)
+const qaModalOpen = ref(false)
+const qaQuestion = ref('端午去南京三天，想看历史文化和夜景，有哪些预约和错峰建议？')
+const qaAnswer = ref<TravelQAResponse | null>(null)
+const qaLoading = ref(false)
+const newsIngesting = ref(false)
+const ingestSummary = ref('')
 const serviceStatusText = computed(() => {
   if (!serviceHealth.value) return '正在连接后端服务...'
   if (serviceHealth.value.external_api_disabled) return '当前强制使用本地 fallback 数据，适合离线调试。'
   if (serviceHealth.value.llm.enabled) return '后端已读取大模型配置，规划时会优先调用 LangChain 大模型。'
   return '后端未检测到大模型 Key，会使用本地 fallback 生成可编辑行程。'
 })
+
+async function handleAskQuestion() {
+  const question = qaQuestion.value.trim()
+  if (question.length < 2) {
+    message.warning('请输入旅行相关问题')
+    return
+  }
+  qaLoading.value = true
+  try {
+    qaAnswer.value = await askTravelQuestion(question)
+  } catch (error: any) {
+    message.error(error.message || '智能问答失败')
+  } finally {
+    qaLoading.value = false
+  }
+}
+
+async function handleIngestNews() {
+  newsIngesting.value = true
+  ingestSummary.value = ''
+  try {
+    const result = await ingestTravelNews()
+    ingestSummary.value = `已读取 ${result.total_seen} 条，新增 ${result.total_added} 个知识片段`
+    if (result.errors.length) {
+      message.warning(`部分 RSS 源失败：${result.errors[0]}`)
+    } else {
+      message.success('旅行资讯已更新')
+    }
+  } catch (error: any) {
+    message.error(error.message || '旅行资讯入库失败')
+  } finally {
+    newsIngesting.value = false
+  }
+}
 
 const dateRange = reactive<{ start: Dayjs | null; end: Dayjs | null }>({
   start: dayjs().add(7, 'day'),

@@ -251,6 +251,44 @@ class TripReportDetail(TripReportSummary):
     revisions: list[TripReportRevision] = Field(default_factory=list)
 
 
+class TravelKnowledgeSource(BaseModel):
+    title: str
+    url: Optional[str] = None
+    summary: str
+    source: str
+    published_at: Optional[datetime] = None
+    score: float = 0.0
+
+
+class TravelQARequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=500)
+    top_k: int = Field(default=5, ge=1, le=12)
+
+
+class TravelQAResponse(BaseModel):
+    answer: str
+    sources: List[TravelKnowledgeSource] = Field(default_factory=list)
+    retrieved_count: int = 0
+    generation_mode: Literal["llm", "fallback"] = "fallback"
+
+
+class TravelNewsIngestRequest(BaseModel):
+    feed_urls: List[str] = Field(default_factory=list)
+
+
+class TravelFeedIngestStats(BaseModel):
+    url: str
+    seen: int = 0
+    added: int = 0
+
+
+class TravelNewsIngestResult(BaseModel):
+    total_seen: int = 0
+    total_added: int = 0
+    feeds: List[TravelFeedIngestStats] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
 T = TypeVar("T")
 
 

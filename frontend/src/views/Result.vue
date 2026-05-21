@@ -235,6 +235,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
+import travelHeroUrl from '@/assets/travel-qa-hero.png'
 import type { Attraction, TripPlanningResult, TripPlan } from '@/types'
 
 type MapMode = 'amap' | 'mock'
@@ -433,9 +434,7 @@ function isRetiredImageUrl(url?: string) {
 function getAttractionImage(item: Attraction, index: number) {
   if (item.image_url && !isRetiredImageUrl(item.image_url)) return item.image_url
   if (attractionPhotos.value[item.name]) return attractionPhotos.value[item.name]
-  const colors = ['667eea', 'f093fb', '4facfe', '43e97b', 'fa709a']
-  const color = colors[index % colors.length]
-  return `https://placehold.co/600x420/${color}/ffffff?text=${encodeURIComponent(item.name)}`
+  return travelHeroUrl
 }
 
 async function initAmap() {

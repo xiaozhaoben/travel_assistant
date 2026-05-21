@@ -4,6 +4,8 @@ import type {
   DayPlan,
   ResearchSnippet,
   ServiceHealth,
+  TravelNewsIngestResult,
+  TravelQAResponse,
   TripFormData,
   TripPlan,
   TripPlanningResult,
@@ -276,6 +278,27 @@ function denormalizePlan(plan: TripPlan): any {
 export async function healthCheck(): Promise<ServiceHealth> {
   const response = await apiClient.get('/api/health')
   return response.data
+}
+
+export async function askTravelQuestion(question: string, topK = 5): Promise<TravelQAResponse> {
+  const response = await apiClient.post('/api/qa/ask', {
+    question,
+    top_k: topK,
+  })
+  if (!response.data.success || !response.data.data) {
+    throw new Error(response.data.message || '智能问答失败')
+  }
+  return response.data.data
+}
+
+export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelNewsIngestResult> {
+  const response = await apiClient.post('/api/news/ingest', {
+    feed_urls: feedUrls,
+  })
+  if (!response.data.success || !response.data.data) {
+    throw new Error(response.data.message || '旅行资讯入库失败')
+  }
+  return response.data.data
 }
 
 export async function getAttractionPhoto(name: string): Promise<string> {

@@ -152,4 +152,40 @@ export interface ServiceHealth {
     ok: boolean
     error?: string
   }
+  travel_knowledge?: {
+    enabled: boolean
+    ok: boolean
+    pgvector_enabled?: boolean
+    table_ready?: boolean
+    error?: string
+  }
+}
+
+export interface TravelKnowledgeSource {
+  title: string
+  url?: string | null
+  summary: string
+  source: string
+  published_at?: string | null
+  score: number
+}
+
+export interface TravelQAResponse {
+  answer: string
+  sources: TravelKnowledgeSource[]
+  retrieved_count: number
+  generation_mode: 'llm' | 'fallback'
+}
+
+export interface TravelFeedIngestStats {
+  url: string
+  seen: number
+  added: number
+}
+
+export interface TravelNewsIngestResult {
+  total_seen: number
+  total_added: number
+  feeds: TravelFeedIngestStats[]
+  errors: string[]
 }
