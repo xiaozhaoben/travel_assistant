@@ -64,6 +64,8 @@ def health():
         "amap_configured": bool(settings.amap_api_key),
         "amap_transport": "mcp-stdio",
         "unsplash_configured": bool(settings.unsplash_access_key),
+        "planner_mode": settings.planner_mode,
+        "cache_enabled": settings.research_cache_enabled,
         "image_providers": {
             "wikimedia": True,
             "openverse": True,

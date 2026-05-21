@@ -355,6 +355,8 @@ onMounted(async () => {
       llm: { enabled: false, model: 'unknown', base_url_configured: false, disabled: true },
       amap_configured: false,
       unsplash_configured: false,
+      planner_mode: 'fast',
+      cache_enabled: false,
       external_api_disabled: true,
     }
   }

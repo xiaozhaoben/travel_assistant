@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shlex
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -91,15 +92,19 @@ class DestinationResearchService:
         web_client: WebSearchMCPClient | None = None,
         cache_path: Path | None = None,
     ):
+        settings = get_settings()
         self.web_client = web_client or WebSearchMCPClient()
         self.cache_path = cache_path or BACKEND_DIR / "runtime" / "research_cache.json"
+        self.cache_enabled = settings.research_cache_enabled
+        self.cache_ttl = timedelta(seconds=max(0, settings.research_cache_ttl_seconds))
+        self.cache_max_entries = max(1, settings.research_cache_max_entries)
 
     def research(self, city: str, preferences: Iterable[str], days: int) -> list[ResearchSnippet]:
         preference_list = [item for item in preferences if item]
         cache_key = self._cache_key(city, preference_list, days)
-        cached = self._load_cache().get(cache_key)
+        cached = self._get_cached(cache_key)
         if cached:
-            return [ResearchSnippet.model_validate(item) for item in cached]
+            return cached
 
         snippets = self._search_web(city, preference_list, days)
         if not snippets:
@@ -150,8 +155,27 @@ class DestinationResearchService:
         found = [word for word in candidates if word in text]
         return list(dict.fromkeys([*preferences, *found])) or preferences
 
-    def _load_cache(self) -> dict[str, list[dict[str, Any]]]:
-        if not self.cache_path.exists():
+    def _get_cached(self, key: str) -> list[ResearchSnippet] | None:
+        if not self.cache_enabled:
+            return None
+        entry = self._load_cache().get(key)
+        if not entry:
+            return None
+        if isinstance(entry, list):
+            return [ResearchSnippet.model_validate(item) for item in entry]
+        if not isinstance(entry, dict):
+            return None
+        cached_at = self._parse_cached_at(entry.get("cached_at"))
+        if cached_at and self.cache_ttl.total_seconds() > 0:
+            if datetime.now(timezone.utc) - cached_at > self.cache_ttl:
+                return None
+        items = entry.get("items")
+        if not isinstance(items, list):
+            return None
+        return [ResearchSnippet.model_validate(item) for item in items]
+
+    def _load_cache(self) -> dict[str, Any]:
+        if not self.cache_enabled or not self.cache_path.exists():
             return {}
         try:
             return json.loads(self.cache_path.read_text(encoding="utf-8"))
@@ -159,16 +183,44 @@ class DestinationResearchService:
             return {}
 
     def _save_cache(self, key: str, snippets: list[ResearchSnippet]) -> None:
+        if not self.cache_enabled:
+            return
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache = self._load_cache()
-            cache[key] = [snippet.model_dump(mode="json") for snippet in snippets]
-            self.cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            cache[key] = {
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "items": [snippet.model_dump(mode="json") for snippet in snippets],
+            }
+            cache = self._trim_cache(cache)
+            temp_path = self.cache_path.with_suffix(f"{self.cache_path.suffix}.tmp")
+            temp_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(self.cache_path)
         except Exception as exc:
             logger.debug("Research cache write skipped: %s", exc)
 
     def _cache_key(self, city: str, preferences: list[str], days: int) -> str:
         return "|".join([city, str(days), ",".join(sorted(preferences))])
+
+    def _trim_cache(self, cache: dict[str, Any]) -> dict[str, Any]:
+        if len(cache) <= self.cache_max_entries:
+            return cache
+        ordered = sorted(
+            cache.items(),
+            key=lambda item: self._parse_cached_at(item[1].get("cached_at") if isinstance(item[1], dict) else None)
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        return dict(ordered[: self.cache_max_entries])
+
+    def _parse_cached_at(self, value: Any) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
 
 
 def _parse_command(command: str) -> list[str]:

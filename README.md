@@ -25,12 +25,16 @@ LLM_API_KEY=你的大模型Key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_TIMEOUT=60
 LLM_ENABLE_THINKING=false
+PLANNER_MODE=fast
+RESEARCH_CACHE_ENABLED=true
+RESEARCH_CACHE_TTL_SECONDS=86400
 AMAP_API_KEY=你的高德Web服务Key
 UNSPLASH_ACCESS_KEY=你的Unsplash Access Key
 ```
 
 `PlannerAgent` 会通过 LangChain 的 OpenAI-compatible `ChatOpenAI` 调用大模型；如果没有配置 `LLM_API_KEY`，会自动使用本地 fallback 行程，保证开发环境仍可运行。
 DashScope/Qwen 模型默认建议保持 `LLM_ENABLE_THINKING=false`，这样更适合快速返回结构化 JSON 行程。
+默认 `PLANNER_MODE=fast` 会跳过最终 Planner 大模型整合以提升响应速度；如需更强的文本质量和路线解释，可设为 `quality`。
 
 高德地图后端调用走 MCP stdio，不再直接请求高德 REST API。后端会通过以下 MCP server 启动方式调用工具：
 
@@ -42,6 +46,8 @@ MCP server 使用 `AMAP_MAPS_API_KEY` 环境变量。当前配置兼容 `AMAP_AP
 
 ```bash
 cd backend
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
@@ -59,7 +65,7 @@ set DISABLE_EXTERNAL_API=true
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -126,11 +132,25 @@ travel_feeds = [
 - `event`：`input` 或 `output`。
 - `payload`：该 Agent 的输入或输出数据。
 
-## 验证
+## 编码与验证
+
+Windows PowerShell 如遇中文日志或 README 显示乱码，先执行：
+
+```powershell
+chcp 65001
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+```
+
+首次验证建议先安装依赖：
 
 ```bash
-pytest backend/tests/test_trip_planner.py -q
+python -m venv backend\.venv
+backend\.venv\Scripts\activate
+pip install -r backend\requirements.txt
+python -m pytest backend\tests\test_trip_planner.py -q
+
 cd frontend
+npm ci
 npm run build
 ```
 
