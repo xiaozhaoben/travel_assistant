@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_PATH = BACKEND_DIR / ".env"
 
 

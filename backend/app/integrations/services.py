@@ -11,8 +11,8 @@ from urllib.parse import quote
 
 import httpx
 
-from .config import get_settings
-from .models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
+from app.core.config import get_settings
+from app.domain.models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
 
 logger = logging.getLogger(__name__)
 

@@ -8,8 +8,8 @@ import shlex
 from pathlib import Path
 from typing import Any, Iterable
 
-from .config import BACKEND_DIR, get_settings
-from .models import ResearchSnippet
+from app.core.config import BACKEND_DIR, get_settings
+from app.domain.models import ResearchSnippet
 
 logger = logging.getLogger(__name__)
 

@@ -3,12 +3,12 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .agents import TravelAgentOrchestrator
-from .config import get_settings
-from .logging_config import setup_logging
-from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest, TripReportDetail, TripReportSummary
-from .report_store import create_report_store
-from .services import UnsplashMCPClient
+from .core.config import get_settings
+from .core.logging_config import setup_logging
+from .domain.models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest, TripReportDetail, TripReportSummary
+from .integrations.services import UnsplashMCPClient
+from .storage.report_store import create_report_store
+from .workflows.agents import TravelAgentOrchestrator
 
 settings = get_settings()
 setup_logging(settings.log_level)

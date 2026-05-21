@@ -5,12 +5,12 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.agent_prompts import AgentPrompts
-from app.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
-from app.config import get_settings
 from app.main import app
-from app.models import Attraction, Location, Meal, TravelRequirement, TripPlanRequest
-from app.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.core.config import get_settings
+from app.domain.models import Attraction, Location, Meal, TravelRequirement, TripPlanRequest
+from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.prompts.agent_prompts import AgentPrompts
+from app.workflows.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
 
 
 class FakeMessage:
@@ -87,7 +87,7 @@ class FakeWebSearchCaller:
 
 
 def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path):
-    from app.research import DestinationResearchService, WebSearchMCPClient
+    from app.researching.research import DestinationResearchService, WebSearchMCPClient
 
     caller = FakeWebSearchCaller()
     web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
@@ -120,6 +120,16 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.cors_origins == ["http://localhost:5173", "http://localhost:5174"]
     assert settings.amap_api_key == "amap-key"
     assert settings.has_llm_credentials is True
+
+
+def test_backend_paths_stay_at_backend_root_after_package_split():
+    from app.core.config import BACKEND_DIR, ENV_PATH
+    from app.researching.research import DestinationResearchService
+
+    assert BACKEND_DIR.name == "backend"
+    assert BACKEND_DIR.parent.name == "travel_assistant"
+    assert ENV_PATH == BACKEND_DIR / ".env"
+    assert DestinationResearchService(web_client=FakeWebSearchCaller()).cache_path == BACKEND_DIR / "runtime" / "research_cache.json"
 
 
 def test_settings_builds_database_url_from_postgres_parts(monkeypatch):
@@ -172,7 +182,7 @@ def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
 
-    from app.llm_service import create_llm
+    from app.core.llm_service import create_llm
 
     llm = create_llm()
 
@@ -183,7 +193,7 @@ def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
 def test_create_llm_disables_retries_for_fast_fallback(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
 
-    from app.llm_service import create_llm
+    from app.core.llm_service import create_llm
 
     llm = create_llm()
 
@@ -246,7 +256,7 @@ def test_local_fallback_recommends_real_guangzhou_attractions():
 
 
 def test_recommendation_service_prioritizes_real_attractions_over_generic_names():
-    from app.services import AttractionRecommendationService
+    from app.integrations.services import AttractionRecommendationService
 
     generic = Attraction(
         id="generic",
@@ -282,7 +292,7 @@ def test_recommendation_service_prioritizes_real_attractions_over_generic_names(
 
 
 def test_recommendation_service_filters_avoid_places_and_boosts_must_visit():
-    from app.services import AttractionRecommendationService
+    from app.integrations.services import AttractionRecommendationService
 
     chen = Attraction(
         id="chen",
@@ -337,7 +347,7 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
         calls.append({"model": model, "tools": tools or [], "system_prompt": system_prompt, "name": name})
         return object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
 
     TravelAgentOrchestrator(llm=FakeLLM("{}"), disable_external_api=True)
 
@@ -364,8 +374,8 @@ def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
         return object()
 
     monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setattr("app.agents.create_llm", lambda: configured_llm)
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_llm", lambda: configured_llm)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
 
     orchestrator = TravelAgentOrchestrator(disable_external_api=True)
 
@@ -381,7 +391,7 @@ def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
 
 def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
     runtime = FakeLangChainAgent(json.dumps({"queries": ["珠海唐家古镇", "珠海海滨公园"]}, ensure_ascii=False))
-    monkeypatch.setattr("app.agents.create_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
 
     class FakeAmap:
         def __init__(self):
@@ -445,7 +455,7 @@ def test_attraction_agent_filters_ai_generic_category_queries(monkeypatch):
             ensure_ascii=False,
         )
     )
-    monkeypatch.setattr("app.agents.create_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
     amap = FakeAmap()
     agent = AttractionSearchAgent(amap, UnsplashMCPClient(access_key=""), llm=FakeLLM("{}"))
     requirement = TravelRequirement(
@@ -1175,7 +1185,7 @@ def test_image_client_logs_each_provider_attempt_and_fallback(caplog):
     )
     images = UnsplashMCPClient(access_key="", http_client=client)
 
-    with caplog.at_level(logging.INFO, logger="app.services"):
+    with caplog.at_level(logging.INFO, logger="app.integrations.services"):
         url = images.image_for("珠海 唐家古镇")
 
     messages = [json.loads(record.message) for record in caplog.records if record.message.startswith("{")]
@@ -1259,7 +1269,7 @@ def test_orchestrator_logs_each_agent_input_and_output_with_timestamp(caplog):
 
 
 def test_planner_prompt_includes_research_context():
-    from app.models import ResearchSnippet
+    from app.domain.models import ResearchSnippet
 
     orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等")
@@ -1290,7 +1300,7 @@ def test_planner_agent_invokes_langchain_runtime_when_model_is_available(monkeyp
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         return runtime if name == "planner_agent" else object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
@@ -1310,7 +1320,7 @@ def test_planner_agent_falls_back_to_raw_llm_when_create_agent_fails(monkeypatch
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         raise RuntimeError("unsupported model")
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=llm, disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
@@ -1389,7 +1399,7 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         return runtime if name == "planner_agent" else object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))

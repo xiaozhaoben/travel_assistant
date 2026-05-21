@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - lets tests run without database extras
     dict_row = None
     Jsonb = None
 
-from .models import ResearchSnippet, TripPlan, TripPlanRequest, TripPlanningResult, TripReportDetail, TripReportSummary
+from app.domain.models import ResearchSnippet, TripPlan, TripPlanRequest, TripPlanningResult, TripReportDetail, TripReportSummary
 
 logger = logging.getLogger(__name__)
 

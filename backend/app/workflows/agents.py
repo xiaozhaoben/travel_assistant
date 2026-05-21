@@ -14,11 +14,10 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
     HumanMessage = None
     SystemMessage = None
 
-from .agent_prompts import AgentPrompts
-from .llm_service import create_llm
-from .config import get_settings
-from .logging_config import log_agent_event
-from .models import (
+from app.core.config import get_settings
+from app.core.llm_service import create_llm
+from app.core.logging_config import log_agent_event
+from app.domain.models import (
     Attraction,
     DayPlan,
     Hotel,
@@ -30,8 +29,9 @@ from .models import (
     TripPlanRequest,
     TravelRequirement,
 )
-from .research import DestinationResearchService
-from .services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.prompts.agent_prompts import AgentPrompts
+from app.researching.research import DestinationResearchService
 
 logger = logging.getLogger(__name__)
 
