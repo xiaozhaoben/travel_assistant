@@ -201,6 +201,8 @@
               <a-descriptions :column="1" bordered size="small">
                 <a-descriptions-item v-for="meal in day.meals" :key="meal.type" :label="getMealLabel(meal.type)">
                   {{ meal.name }} <span v-if="meal.description">- {{ meal.description }}</span>
+                  <span v-if="meal.address">｜{{ meal.address }}</span>
+                  <span v-if="meal.rating">｜评分 {{ meal.rating }}</span>
                   <span v-if="meal.estimated_cost">（约¥{{ meal.estimated_cost }}）</span>
                 </a-descriptions-item>
               </a-descriptions>
@@ -233,6 +235,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
+import travelHeroUrl from '@/assets/travel-qa-hero.png'
 import type { Attraction, TripPlanningResult, TripPlan } from '@/types'
 
 type MapMode = 'amap' | 'mock'
@@ -323,6 +326,7 @@ async function saveChanges() {
   saving.value = true
   try {
     tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      report_id: planningResult.value?.report_id,
       research_context: planningResult.value?.research_context || [],
     })
     syncSelectedOption()
@@ -371,6 +375,7 @@ async function smartAdjustDay(operation: 'refill_day' | 'reorder_day') {
   try {
     const activeDay = Number(activeDays.value[0] ?? 0) + 1
     tripPlan.value = await recalculateTripPlan(tripPlan.value, {
+      report_id: planningResult.value?.report_id,
       operation,
       day_index: activeDay,
       research_context: planningResult.value?.research_context || [],
@@ -429,9 +434,7 @@ function isRetiredImageUrl(url?: string) {
 function getAttractionImage(item: Attraction, index: number) {
   if (item.image_url && !isRetiredImageUrl(item.image_url)) return item.image_url
   if (attractionPhotos.value[item.name]) return attractionPhotos.value[item.name]
-  const colors = ['667eea', 'f093fb', '4facfe', '43e97b', 'fa709a']
-  const color = colors[index % colors.length]
-  return `https://placehold.co/600x420/${color}/ffffff?text=${encodeURIComponent(item.name)}`
+  return travelHeroUrl
 }
 
 async function initAmap() {

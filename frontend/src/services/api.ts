@@ -4,6 +4,8 @@ import type {
   DayPlan,
   ResearchSnippet,
   ServiceHealth,
+  TravelNewsIngestResult,
+  TravelQAResponse,
   TripFormData,
   TripPlan,
   TripPlanningResult,
@@ -14,7 +16,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 120000,
+  timeout: 300000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -122,6 +124,9 @@ function normalizePlanningResult(raw: any, formData: TripFormData): TripPlanning
   const fallbackPlan = raw.days ? normalizePlan(raw, formData) : options[0]?.plan
   return {
     selected_option_id: raw.selected_option_id || options[0]?.id || 'balanced',
+    report_id: raw.report_id || null,
+    report_created_at: raw.report_created_at || null,
+    report_updated_at: raw.report_updated_at || null,
     options:
       options.length > 0
         ? options
@@ -174,10 +179,16 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
 
 export async function recalculateTripPlan(
   plan: TripPlan,
-  options: { operation?: 'recalculate_only' | 'refill_day' | 'reorder_day'; day_index?: number; research_context?: ResearchSnippet[] } = {},
+  options: {
+    operation?: 'recalculate_only' | 'refill_day' | 'reorder_day'
+    day_index?: number
+    research_context?: ResearchSnippet[]
+    report_id?: string | null
+  } = {},
 ): Promise<TripPlan> {
   const payload = denormalizePlan(plan)
   const response = await apiClient.post('/api/trip/recalculate', {
+    report_id: options.report_id || undefined,
     plan: payload,
     operation: options.operation || 'recalculate_only',
     day_index: options.day_index,
@@ -267,6 +278,27 @@ function denormalizePlan(plan: TripPlan): any {
 export async function healthCheck(): Promise<ServiceHealth> {
   const response = await apiClient.get('/api/health')
   return response.data
+}
+
+export async function askTravelQuestion(question: string, topK = 5): Promise<TravelQAResponse> {
+  const response = await apiClient.post('/api/qa/ask', {
+    question,
+    top_k: topK,
+  })
+  if (!response.data.success || !response.data.data) {
+    throw new Error(response.data.message || '智能问答失败')
+  }
+  return response.data.data
+}
+
+export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelNewsIngestResult> {
+  const response = await apiClient.post('/api/news/ingest', {
+    feed_urls: feedUrls,
+  })
+  if (!response.data.success || !response.data.data) {
+    throw new Error(response.data.message || '旅行资讯入库失败')
+  }
+  return response.data.data
 }
 
 export async function getAttractionPhoto(name: string): Promise<string> {

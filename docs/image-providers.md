@@ -7,7 +7,7 @@
 3. Pexels
 4. Pixabay
 5. Unsplash
-6. `placehold.co` 占位图
+6. 无结果时返回空字符串，由前端使用本地生成图片兜底，避免额外网络占位图
 
 当配置了 Pexels 或 Pixabay Key 时，会优先尝试 Wikimedia Commons 和 Openverse 这类开放授权来源，再进入图库来源；如果没有任何图片 API Key，也会尝试 Wikimedia Commons 和 Openverse。
 

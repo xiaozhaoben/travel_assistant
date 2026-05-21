@@ -1,16 +1,18 @@
 import json
 import logging
-from datetime import date, timedelta
+import sys
+from types import SimpleNamespace
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.agent_prompts import AgentPrompts
-from app.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
-from app.config import get_settings
 from app.main import app
-from app.models import Attraction, Location, TravelRequirement, TripPlanRequest
-from app.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.core.config import get_settings
+from app.domain.models import Attraction, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
+from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.prompts.agent_prompts import AgentPrompts
+from app.workflows.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
 
 
 class FakeMessage:
@@ -86,8 +88,24 @@ class FakeWebSearchCaller:
         }
 
 
+class FakeTravelVectorStore:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+        self.saved = []
+
+    def add_text(self, **kwargs):
+        self.saved.append(kwargs)
+        return 1
+
+    def similarity_search(self, query, k=5):
+        return self.docs[:k]
+
+    def health(self):
+        return {"enabled": True, "ok": True, "pgvector_enabled": True, "table_ready": True}
+
+
 def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path):
-    from app.research import DestinationResearchService, WebSearchMCPClient
+    from app.researching.research import DestinationResearchService, WebSearchMCPClient
 
     caller = FakeWebSearchCaller()
     web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
@@ -101,6 +119,59 @@ def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path
     assert snippets[0].title == "北京故宫预约攻略"
     assert snippets[0].source == "web"
     assert "预约" in snippets[0].keywords
+
+
+def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
+    from app.knowledge.news_agent import TravelNewsIngestionAgent
+
+    feedparser_stub = SimpleNamespace(
+        parse=lambda url: SimpleNamespace(
+            entries=[
+                {
+                    "title": "南京端午预约提醒",
+                    "description": "<p>热门景区建议提前预约，夜游夫子庙适合错峰。</p>",
+                    "summary": "地铁客流较大，建议预留换乘时间。",
+                    "link": "https://example.test/nanjing",
+                    "published": "Thu, 21 May 2026 09:00:00 +0800",
+                }
+            ]
+        )
+    )
+    monkeypatch.setitem(sys.modules, "feedparser", feedparser_stub)
+    store = FakeTravelVectorStore()
+
+    result = TravelNewsIngestionAgent(store).fetch_travel_feeds(["https://feeds.example.test/travel"])
+
+    assert result["total_seen"] == 1
+    assert result["total_added"] == 1
+    assert store.saved[0]["source_url"] == "https://example.test/nanjing"
+    assert store.saved[0]["title"] == "南京端午预约提醒"
+    assert "<p>" not in store.saved[0]["content"]
+    assert "提前预约" in store.saved[0]["content"]
+
+
+def test_travel_qa_agent_answers_from_retrieved_vector_documents():
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.knowledge.vector_store import KnowledgeDocument
+
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="南京端午预约提醒",
+        content="南京端午期间热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        summary="热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        source_url="https://example.test/nanjing",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=None)
+
+    result = agent.ask("端午去南京要注意什么？")
+
+    assert result.generation_mode == "fallback"
+    assert result.retrieved_count == 1
+    assert "提前预约" in result.answer
+    assert result.sources[0].title == "南京端午预约提醒"
 
 
 def test_settings_support_reference_env_names(monkeypatch):
@@ -120,6 +191,29 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.cors_origins == ["http://localhost:5173", "http://localhost:5174"]
     assert settings.amap_api_key == "amap-key"
     assert settings.has_llm_credentials is True
+
+
+def test_backend_paths_stay_at_backend_root_after_package_split():
+    from app.core.config import BACKEND_DIR, ENV_PATH
+    from app.researching.research import DestinationResearchService
+
+    assert BACKEND_DIR.name == "backend"
+    assert BACKEND_DIR.parent.name == "travel_assistant"
+    assert ENV_PATH == BACKEND_DIR / ".env"
+    assert DestinationResearchService(web_client=FakeWebSearchCaller()).cache_path == BACKEND_DIR / "runtime" / "research_cache.json"
+
+
+def test_settings_builds_database_url_from_postgres_parts(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("POSTGRES_HOST", "db.example.test")
+    monkeypatch.setenv("POSTGRES_PORT", "15432")
+    monkeypatch.setenv("POSTGRES_DB", "travel")
+    monkeypatch.setenv("POSTGRES_USER", "travel")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
+
+    settings = get_settings()
+
+    assert settings.database_url == "postgresql://travel:secret@db.example.test:15432/travel"
 
 
 def test_settings_support_provider_disable_flags(monkeypatch):
@@ -159,7 +253,7 @@ def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
 
-    from app.llm_service import create_llm
+    from app.core.llm_service import create_llm
 
     llm = create_llm()
 
@@ -170,7 +264,7 @@ def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
 def test_create_llm_disables_retries_for_fast_fallback(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
 
-    from app.llm_service import create_llm
+    from app.core.llm_service import create_llm
 
     llm = create_llm()
 
@@ -233,7 +327,7 @@ def test_local_fallback_recommends_real_guangzhou_attractions():
 
 
 def test_recommendation_service_prioritizes_real_attractions_over_generic_names():
-    from app.services import AttractionRecommendationService
+    from app.integrations.services import AttractionRecommendationService
 
     generic = Attraction(
         id="generic",
@@ -269,7 +363,7 @@ def test_recommendation_service_prioritizes_real_attractions_over_generic_names(
 
 
 def test_recommendation_service_filters_avoid_places_and_boosts_must_visit():
-    from app.services import AttractionRecommendationService
+    from app.integrations.services import AttractionRecommendationService
 
     chen = Attraction(
         id="chen",
@@ -324,7 +418,7 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
         calls.append({"model": model, "tools": tools or [], "system_prompt": system_prompt, "name": name})
         return object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
 
     TravelAgentOrchestrator(llm=FakeLLM("{}"), disable_external_api=True)
 
@@ -342,27 +436,33 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
     ]
 
 
-def test_orchestrator_skips_configured_planner_llm_to_keep_reports_responsive(monkeypatch):
+def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
     calls = []
+    configured_llm = object()
 
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
-        calls.append(name)
+        calls.append({"name": name, "model": model})
         return object()
 
     monkeypatch.setenv("LLM_API_KEY", "test-key")
-    monkeypatch.setattr("app.agents.create_llm", lambda: object())
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_llm", lambda: configured_llm)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
 
     orchestrator = TravelAgentOrchestrator(disable_external_api=True)
 
-    assert orchestrator.planner.llm is None
-    assert "planner_agent" not in calls
-    assert "attraction_search_agent" in calls
+    assert orchestrator.planner.llm is configured_llm
+    assert [call["name"] for call in calls] == [
+        "attraction_search_agent",
+        "weather_query_agent",
+        "hotel_agent",
+        "planner_agent",
+    ]
+    assert all(call["model"] is configured_llm for call in calls)
 
 
 def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
     runtime = FakeLangChainAgent(json.dumps({"queries": ["珠海唐家古镇", "珠海海滨公园"]}, ensure_ascii=False))
-    monkeypatch.setattr("app.agents.create_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
 
     class FakeAmap:
         def __init__(self):
@@ -426,7 +526,7 @@ def test_attraction_agent_filters_ai_generic_category_queries(monkeypatch):
             ensure_ascii=False,
         )
     )
-    monkeypatch.setattr("app.agents.create_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
     amap = FakeAmap()
     agent = AttractionSearchAgent(amap, UnsplashMCPClient(access_key=""), llm=FakeLLM("{}"))
     requirement = TravelRequirement(
@@ -870,6 +970,116 @@ def test_amap_client_filters_non_attraction_and_out_of_city_pois():
     assert "接霞庄" not in names
 
 
+def test_amap_client_uses_mcp_for_restaurant_meals_near_day_route():
+    caller = FakeMCPCaller(
+        [
+            {
+                "pois": [
+                    {
+                        "id": "breakfast-1",
+                        "name": "珠海老字号早茶",
+                        "address": "情侣中路1号",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.5760,22.2920",
+                        "biz_ext": {"rating": "4.7"},
+                    }
+                ],
+            },
+            {
+                "pois": [
+                    {
+                        "id": "lunch-1",
+                        "name": "海湾素食馆",
+                        "address": "海虹路88号",
+                        "type": "餐饮服务;中餐厅;素食",
+                        "location": "113.5770,22.2930",
+                        "biz_ext": {"rating": "4.8"},
+                    }
+                ],
+            },
+            {
+                "pois": [
+                    {
+                        "id": "dinner-1",
+                        "name": "珠海本地海鲜小馆",
+                        "address": "唐家湾镇",
+                        "type": "餐饮服务;中餐厅;海鲜",
+                        "location": "113.5960,22.3580",
+                        "biz_ext": {"rating": "4.6"},
+                    }
+                ],
+            },
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
+
+    meals = amap.search_meals(
+        city="珠海",
+        budget_level="中等",
+        food_preferences="素食",
+        route_points=[Location(longitude=113.576561, latitude=22.292980)],
+    )
+
+    assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
+    assert meals[0].name == "珠海老字号早茶"
+    assert meals[0].id == "breakfast-1"
+    assert meals[0].category == "餐饮服务;中餐厅;广东菜"
+    assert meals[0].rating == 4.7
+    assert meals[0].location.longitude == 113.5760
+    assert meals[1].name == "海湾素食馆"
+    assert "素食" in caller.calls[1]["arguments"]["keywords"]
+    assert all(call["tool_name"] == "maps_text_search" for call in caller.calls)
+
+
+def test_amap_client_falls_back_to_template_meals_without_mcp():
+    amap = AmapMCPClient(api_key="")
+
+    meals = amap.search_meals("珠海", "中等", food_preferences="素食")
+
+    assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
+    assert meals[0].name == "珠海胡同早餐"
+    assert meals[1].estimated_cost == 70
+    assert meals[0].location is None
+
+
+def test_amap_client_prefers_restaurants_near_day_route_over_slightly_higher_rating():
+    caller = FakeMCPCaller(
+        [
+            {
+                "pois": [
+                    {
+                        "id": "far-breakfast",
+                        "name": "远处高分早茶",
+                        "address": "远处商圈",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.9000,22.7000",
+                        "biz_ext": {"rating": "4.9"},
+                    },
+                    {
+                        "id": "near-breakfast",
+                        "name": "路线附近早茶",
+                        "address": "海虹路88号",
+                        "type": "餐饮服务;中餐厅;广东菜",
+                        "location": "113.5768,22.2931",
+                        "biz_ext": {"rating": "4.4"},
+                    },
+                ]
+            },
+            {"pois": []},
+            {"pois": []},
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
+
+    meals = amap.search_meals(
+        "珠海",
+        "中等",
+        route_points=[Location(longitude=113.576561, latitude=22.292980)],
+    )
+
+    assert meals[0].name == "路线附近早茶"
+
+
 def test_amap_client_uses_mcp_for_weather():
     caller = FakeMCPCaller(
         [
@@ -1046,12 +1256,12 @@ def test_image_client_logs_each_provider_attempt_and_fallback(caplog):
     )
     images = UnsplashMCPClient(access_key="", http_client=client)
 
-    with caplog.at_level(logging.INFO, logger="app.services"):
+    with caplog.at_level(logging.INFO, logger="app.integrations.services"):
         url = images.image_for("珠海 唐家古镇")
 
     messages = [json.loads(record.message) for record in caplog.records if record.message.startswith("{")]
 
-    assert url.startswith("https://placehold.co/")
+    assert url == ""
     assert [message["event"] for message in messages] == [
         "image_search_attempt",
         "image_search_no_result",
@@ -1068,13 +1278,12 @@ def test_image_client_logs_each_provider_attempt_and_fallback(caplog):
     assert all(message["query"] == "珠海 唐家古镇" for message in messages)
 
 
-def test_unsplash_client_fallback_avoids_source_unsplash():
+def test_unsplash_client_fallback_avoids_network_placeholder():
     unsplash = UnsplashMCPClient(access_key="", http_client=FakeHttpClient([]))
 
     url = unsplash.image_for("Zhuhai Yuanming New Garden", use_api=False)
 
-    assert "source.unsplash.com" not in url
-    assert "placehold.co" in url
+    assert url == ""
 
 
 def test_orchestrator_generates_complete_plan_with_four_agent_outputs():
@@ -1130,7 +1339,7 @@ def test_orchestrator_logs_each_agent_input_and_output_with_timestamp(caplog):
 
 
 def test_planner_prompt_includes_research_context():
-    from app.models import ResearchSnippet
+    from app.domain.models import ResearchSnippet
 
     orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等")
@@ -1161,7 +1370,7 @@ def test_planner_agent_invokes_langchain_runtime_when_model_is_available(monkeyp
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         return runtime if name == "planner_agent" else object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
@@ -1181,7 +1390,7 @@ def test_planner_agent_falls_back_to_raw_llm_when_create_agent_fails(monkeypatch
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         raise RuntimeError("unsupported model")
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=llm, disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
@@ -1260,7 +1469,7 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
         return runtime if name == "planner_agent" else object()
 
-    monkeypatch.setattr("app.agents.create_agent", fake_create_agent)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
     orchestrator = TravelAgentOrchestrator(llm=object(), disable_external_api=True)
 
     plan = orchestrator.plan(TripPlanRequest(prompt="我想去北京玩 1 天，喜欢历史文化，预算中等"))
@@ -1273,6 +1482,64 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     assert plan.days[0].meals[0].type == "breakfast"
     assert plan.budget.total > 0
     assert plan.overall_suggestions == ["热门景点提前预约。"]
+
+
+def test_planner_agent_prefers_real_amap_meals_over_generic_llm_meal_text():
+    class FakeMealAmap:
+        def search_meals(self, city, budget_level, food_preferences="", route_points=None):
+            return [
+                Meal(
+                    id="real-breakfast",
+                    type="breakfast",
+                    name="珠海老字号早茶",
+                    address="情侣中路1号",
+                    estimated_cost=35,
+                    description="餐饮服务;早茶，距离当日路线约0.5公里，适合安排为早餐。",
+                    location=Location(longitude=113.576, latitude=22.292),
+                    rating=4.7,
+                    category="餐饮服务;中餐厅;广东菜",
+                ),
+                Meal(
+                    id="real-lunch",
+                    type="lunch",
+                    name="珠海本地菜馆",
+                    address="海虹路88号",
+                    estimated_cost=70,
+                    description="餐饮服务;中餐厅，适合安排为午餐。",
+                    location=Location(longitude=113.577, latitude=22.293),
+                    rating=4.6,
+                    category="餐饮服务;中餐厅",
+                ),
+                Meal(
+                    id="real-dinner",
+                    type="dinner",
+                    name="珠海海鲜小馆",
+                    address="唐家湾镇",
+                    estimated_cost=105,
+                    description="餐饮服务;海鲜，适合安排为晚餐。",
+                    location=Location(longitude=113.596, latitude=22.358),
+                    rating=4.5,
+                    category="餐饮服务;海鲜",
+                ),
+            ]
+
+    planner = PlannerAgent(llm=None, amap=FakeMealAmap())
+
+    meals = planner._repair_meals(
+        [
+            {"type": "早餐", "suggestion": "珠海胡同早餐", "estimated_cost": 35},
+            {"type": "午餐", "suggestion": "珠海特色午餐", "estimated_cost": 70},
+            {"type": "晚餐", "suggestion": "珠海风味晚餐", "estimated_cost": 105},
+        ],
+        city="珠海",
+        budget_level="中等",
+        route_points=[{"longitude": 113.576561, "latitude": 22.292980}],
+    )
+
+    assert meals[0]["name"] == "珠海老字号早茶"
+    assert meals[0]["address"] == "情侣中路1号"
+    assert meals[0]["id"] == "real-breakfast"
+    assert meals[0]["location"] == {"longitude": 113.576, "latitude": 22.292}
 
 
 def test_planner_prompt_limits_source_lists_for_faster_llm_response():
@@ -1347,6 +1614,128 @@ def test_api_health_plan_and_recalculate_endpoints():
     weather = client.get("/api/map/weather", params={"city": "北京", "days": 2})
     assert weather.status_code == 200
     assert len(weather.json()["data"]) == 2
+
+
+def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
+    class FakeQAAgent:
+        def ask(self, question, top_k=5):
+            return TravelQAResponse(
+                answer=f"回答：{question}",
+                sources=[
+                    TravelKnowledgeSource(
+                        title="南京端午预约提醒",
+                        url="https://example.test/nanjing",
+                        summary="热门景区建议提前预约。",
+                        source="rss",
+                        score=0.9,
+                    )
+                ],
+                retrieved_count=1,
+                generation_mode="fallback",
+            )
+
+    class FakeNewsAgent:
+        def fetch_travel_feeds(self, feed_urls):
+            return {
+                "total_seen": 2,
+                "total_added": 2,
+                "feeds": [{"url": feed_urls[0], "seen": 2, "added": 2}],
+                "errors": [],
+            }
+
+    monkeypatch.setattr(main_module, "qa_agent", FakeQAAgent())
+    monkeypatch.setattr(main_module, "news_agent", FakeNewsAgent())
+    client = TestClient(app)
+
+    qa_response = client.post("/api/qa/ask", json={"question": "端午去南京要注意什么？"})
+    assert qa_response.status_code == 200
+    assert qa_response.json()["data"]["answer"].startswith("回答")
+    assert qa_response.json()["data"]["sources"][0]["title"] == "南京端午预约提醒"
+
+    ingest_response = client.post("/api/news/ingest", json={"feed_urls": ["https://feeds.example.test/travel"]})
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["data"]["total_added"] == 2
+
+
+def test_api_plan_persists_report_and_returns_report_id():
+    class FakeReportStore:
+        def __init__(self):
+            self.saved = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def save_report(self, request, result):
+            self.saved.append({"request": request, "result": result})
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+            }
+
+    store = FakeReportStore()
+    main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    main_module.report_store = store
+    client = TestClient(app)
+
+    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["report_id"] == "11111111-1111-1111-1111-111111111111"
+    assert payload["report_created_at"] == "2026-05-19T08:00:00Z"
+    assert store.saved[0]["request"].prompt == "我想去北京玩 1 天，喜欢历史文化，预算中等"
+    assert store.saved[0]["result"].selected_option_id == "balanced"
+    main_module.report_store = None
+
+
+def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
+    class FakeReportStore:
+        def __init__(self):
+            self.updated = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def save_report(self, request, result):
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
+            }
+
+        def update_report_plan(self, report_id, plan, operation, research_context):
+            self.updated.append(
+                {
+                    "report_id": report_id,
+                    "plan": plan,
+                    "operation": operation,
+                    "research_context": research_context,
+                }
+            )
+
+    store = FakeReportStore()
+    main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    main_module.report_store = store
+    client = TestClient(app)
+    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+    plan = response.json()["data"]["options"][0]["plan"]
+
+    recalc = client.post(
+        "/api/trip/recalculate",
+        json={
+            "report_id": "11111111-1111-1111-1111-111111111111",
+            "plan": plan,
+            "operation": "reorder_day",
+            "day_index": 1,
+        },
+    )
+
+    assert recalc.status_code == 200
+    assert store.updated[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
+    assert store.updated[0]["operation"] == "reorder_day"
+    assert store.updated[0]["plan"].budget.total == recalc.json()["data"]["budget"]["total"]
+    main_module.report_store = None
 
 
 def test_api_plan_get_returns_usage_hint():

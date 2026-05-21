@@ -16,12 +16,15 @@ export interface Attraction {
 }
 
 export interface Meal {
+  id?: string
   type: 'breakfast' | 'lunch' | 'dinner' | 'snack'
   name: string
   address?: string
   location?: Location
   description?: string
   estimated_cost?: number
+  rating?: number
+  category?: string
 }
 
 export interface Hotel {
@@ -99,6 +102,9 @@ export interface TripPlanningResult {
   options: TripPlanOption[]
   research_context: ResearchSnippet[]
   clarifying_suggestions: string[]
+  report_id?: string | null
+  report_created_at?: string | null
+  report_updated_at?: string | null
   city?: string
   days?: DayPlan[]
   weather_info?: WeatherInfo[]
@@ -141,4 +147,45 @@ export interface ServiceHealth {
   amap_configured: boolean
   unsplash_configured: boolean
   external_api_disabled: boolean
+  database?: {
+    enabled: boolean
+    ok: boolean
+    error?: string
+  }
+  travel_knowledge?: {
+    enabled: boolean
+    ok: boolean
+    pgvector_enabled?: boolean
+    table_ready?: boolean
+    error?: string
+  }
+}
+
+export interface TravelKnowledgeSource {
+  title: string
+  url?: string | null
+  summary: string
+  source: string
+  published_at?: string | null
+  score: number
+}
+
+export interface TravelQAResponse {
+  answer: string
+  sources: TravelKnowledgeSource[]
+  retrieved_count: number
+  generation_mode: 'llm' | 'fallback'
+}
+
+export interface TravelFeedIngestStats {
+  url: string
+  seen: number
+  added: number
+}
+
+export interface TravelNewsIngestResult {
+  total_seen: number
+  total_added: number
+  feeds: TravelFeedIngestStats[]
+  errors: string[]
 }

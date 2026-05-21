@@ -1,13 +1,29 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .agents import TravelAgentOrchestrator
-from .config import get_settings
-from .logging_config import setup_logging
-from .models import ApiResponse, PlanEditRequest, TripPlan, TripPlanningResult, TripPlanRequest
-from .services import UnsplashMCPClient
+from .core.config import get_settings
+from .core.logging_config import setup_logging
+from .domain.models import (
+    ApiResponse,
+    PlanEditRequest,
+    TravelNewsIngestRequest,
+    TravelNewsIngestResult,
+    TravelQARequest,
+    TravelQAResponse,
+    TripPlan,
+    TripPlanningResult,
+    TripPlanRequest,
+    TripReportDetail,
+    TripReportSummary,
+)
+from .integrations.services import UnsplashMCPClient
+from .knowledge.news_agent import TravelNewsIngestionAgent, travel_feeds
+from .knowledge.qa_agent import TravelQuestionAnsweringAgent
+from .knowledge.vector_store import create_travel_vector_store
+from .storage.report_store import create_report_store
+from .workflows.agents import TravelAgentOrchestrator
 
 settings = get_settings()
 setup_logging(settings.log_level)
@@ -23,6 +39,10 @@ app.add_middleware(
 )
 
 orchestrator = TravelAgentOrchestrator()
+report_store = create_report_store(settings.database_url)
+travel_vector_store = create_travel_vector_store(settings.database_url)
+news_agent = TravelNewsIngestionAgent(travel_vector_store)
+qa_agent = TravelQuestionAnsweringAgent(travel_vector_store, llm=orchestrator.planner.llm)
 image_provider = (
     UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
     if settings.disable_external_api
@@ -52,6 +72,10 @@ def health():
             "unsplash_configured": bool(settings.unsplash_access_key),
         },
         "external_api_disabled": settings.disable_external_api,
+        "database": report_store.health() if report_store is not None else {"enabled": False, "ok": False},
+        "travel_knowledge": travel_vector_store.health()
+        if travel_vector_store is not None
+        else {"enabled": False, "ok": False},
     }
 
 
@@ -73,7 +97,48 @@ def plan_trip_usage():
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
 def plan_trip(request: TripPlanRequest):
     result = orchestrator.plan(request)
+    if report_store is not None:
+        try:
+            report = report_store.save_report(request, result)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"报告数据库写入失败: {exc}") from exc
+        result = result.model_copy(
+            update={
+                "report_id": report["id"],
+                "report_created_at": report["created_at"],
+                "report_updated_at": report["updated_at"],
+            }
+        )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
+
+
+@app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])
+def ask_travel_question(request: TravelQARequest):
+    result = qa_agent.ask(request.question, top_k=request.top_k)
+    return ApiResponse[TravelQAResponse](success=True, message="智能问答完成", data=result)
+
+
+@app.post("/api/news/ingest", response_model=ApiResponse[TravelNewsIngestResult])
+def ingest_travel_news(request: TravelNewsIngestRequest):
+    feed_urls = request.feed_urls or travel_feeds
+    result = TravelNewsIngestResult.model_validate(news_agent.fetch_travel_feeds(feed_urls))
+    if result.errors and result.total_seen == 0:
+        raise HTTPException(status_code=503, detail="; ".join(result.errors))
+    return ApiResponse[TravelNewsIngestResult](success=True, message="旅行资讯入库完成", data=result)
+
+
+@app.get("/api/news/status")
+def travel_news_status():
+    return {
+        "success": True,
+        "message": "旅行知识库状态",
+        "data": {
+            "configured_feeds": travel_feeds,
+            "knowledge_store": travel_vector_store.health()
+            if travel_vector_store is not None
+            else {"enabled": False, "ok": False},
+        },
+    }
 
 
 @app.post("/api/trip/recalculate", response_model=ApiResponse[TripPlan])
@@ -84,7 +149,45 @@ def recalculate_trip(request: PlanEditRequest):
         research_context=request.research_context,
         day_index=request.day_index,
     )
+    if request.report_id and report_store is not None:
+        try:
+            report_store.update_report_plan(
+                request.report_id,
+                plan,
+                operation=request.operation,
+                research_context=request.research_context,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"报告修订写入失败: {exc}") from exc
     return ApiResponse[TripPlan](success=True, message="行程已更新", data=plan)
+
+
+@app.get("/api/reports", response_model=ApiResponse[list[TripReportSummary]])
+def list_reports(limit: int = 50):
+    if report_store is None:
+        return ApiResponse[list[TripReportSummary]](success=True, message="数据库未启用", data=[])
+    try:
+        reports = report_store.list_reports(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
+    return ApiResponse[list[TripReportSummary]](
+        success=True,
+        message="报告列表获取成功",
+        data=reports,
+    )
+
+
+@app.get("/api/reports/{report_id}", response_model=ApiResponse[TripReportDetail])
+def get_report(report_id: str):
+    if report_store is None:
+        raise HTTPException(status_code=503, detail="数据库未启用")
+    try:
+        report = report_store.get_report(report_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return ApiResponse[TripReportDetail](success=True, message="报告详情获取成功", data=report)
 
 
 @app.get("/api/poi/photo")
