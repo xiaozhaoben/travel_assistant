@@ -180,6 +180,46 @@
       </a-form>
     </a-card>
 
+    <a-card class="recent-card" :bordered="false">
+      <template #title>
+        <div class="recent-title">
+          <HistoryOutlined />
+          <span>最近生成</span>
+        </div>
+      </template>
+      <template #extra>
+        <a-button type="link" :loading="recentLoading" @click="loadRecentReports">刷新</a-button>
+      </template>
+      <a-empty v-if="!recentLoading && recentReports.length === 0" description="暂无生成记录" />
+      <a-list v-else :data-source="recentReports" :loading="recentLoading" item-layout="horizontal">
+        <template #renderItem="{ item }">
+          <a-list-item class="recent-item">
+            <template #actions>
+              <a-button type="primary" size="small" :loading="openingReportId === item.id" @click="openRecentReport(item.id)">
+                <template #icon><EyeOutlined /></template>
+                查看
+              </a-button>
+            </template>
+            <a-list-item-meta>
+              <template #title>
+                <div class="recent-report-title">
+                  <span>{{ item.city }} {{ item.days_count }} 天</span>
+                  <a-tag :color="item.generation_mode === 'llm' ? 'green' : 'orange'">{{ item.generation_mode }}</a-tag>
+                </div>
+              </template>
+              <template #description>
+                <div class="recent-report-meta">
+                  <span>预算 ¥{{ item.budget_total }}</span>
+                  <span>{{ formatReportTime(item.updated_at) }}</span>
+                  <span class="recent-prompt">{{ item.prompt }}</span>
+                </div>
+              </template>
+            </a-list-item-meta>
+          </a-list-item>
+        </template>
+      </a-list>
+    </a-card>
+
     <a-button type="primary" class="qa-floating-button" @click="qaModalOpen = true">
       <template #icon><MessageOutlined /></template>
       <span>智能问答</span>
@@ -245,10 +285,25 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { CompassOutlined, DatabaseOutlined, MessageOutlined, SendOutlined, SyncOutlined } from '@ant-design/icons-vue'
+import {
+  CompassOutlined,
+  DatabaseOutlined,
+  EyeOutlined,
+  HistoryOutlined,
+  MessageOutlined,
+  SendOutlined,
+  SyncOutlined,
+} from '@ant-design/icons-vue'
 import dayjs, { type Dayjs } from 'dayjs'
-import { askTravelQuestion, generateTripPlan, healthCheck, ingestTravelNews } from '@/services/api'
-import type { ServiceHealth, TravelQAResponse, TripFormData } from '@/types'
+import {
+  askTravelQuestion,
+  generateTripPlan,
+  getTripReportResult,
+  healthCheck,
+  ingestTravelNews,
+  listRecentReports,
+} from '@/services/api'
+import type { ServiceHealth, TravelQAResponse, TripFormData, TripReportSummary } from '@/types'
 
 const router = useRouter()
 const loading = ref(false)
@@ -261,6 +316,9 @@ const qaAnswer = ref<TravelQAResponse | null>(null)
 const qaLoading = ref(false)
 const newsIngesting = ref(false)
 const ingestSummary = ref('')
+const recentReports = ref<TripReportSummary[]>([])
+const recentLoading = ref(false)
+const openingReportId = ref('')
 const serviceStatusText = computed(() => {
   if (!serviceHealth.value) return '正在连接后端服务...'
   if (serviceHealth.value.external_api_disabled) return '当前强制使用本地 fallback 数据，适合离线调试。'
@@ -300,6 +358,36 @@ async function handleIngestNews() {
   } finally {
     newsIngesting.value = false
   }
+}
+
+async function loadRecentReports() {
+  recentLoading.value = true
+  try {
+    recentReports.value = await listRecentReports(8)
+  } catch (error: any) {
+    message.warning(error.message || '最近生成记录获取失败')
+  } finally {
+    recentLoading.value = false
+  }
+}
+
+async function openRecentReport(reportId: string) {
+  openingReportId.value = reportId
+  try {
+    const result = await getTripReportResult(reportId)
+    const selected = result.options.find((option) => option.id === result.selected_option_id)
+    sessionStorage.setItem('tripPlanningResult', JSON.stringify(result))
+    sessionStorage.setItem('tripPlan', JSON.stringify(selected?.plan || result.options[0]?.plan))
+    await router.push('/result')
+  } catch (error: any) {
+    message.error(error.message || '报告详情获取失败')
+  } finally {
+    openingReportId.value = ''
+  }
+}
+
+function formatReportTime(value: string): string {
+  return dayjs(value).format('MM-DD HH:mm')
 }
 
 const dateRange = reactive<{ start: Dayjs | null; end: Dayjs | null }>({
@@ -358,6 +446,7 @@ onMounted(async () => {
       external_api_disabled: true,
     }
   }
+  await loadRecentReports()
 })
 
 async function handleSubmit() {
@@ -390,6 +479,7 @@ async function handleSubmit() {
       sessionStorage.setItem('tripPlanningResult', JSON.stringify(response.data))
       sessionStorage.setItem('tripPlan', JSON.stringify(selected?.plan || response.data.options[0]?.plan))
       message.success('旅行计划生成成功')
+      void loadRecentReports()
       window.setTimeout(() => router.push('/result'), 400)
     } else {
       message.error(response.message || '生成失败')

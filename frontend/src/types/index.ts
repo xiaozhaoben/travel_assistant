@@ -135,6 +135,24 @@ export interface TripPlanResponse {
   data?: TripPlanningResult
 }
 
+export interface TripReportSummary {
+  id: string
+  prompt: string
+  city: string
+  days_count: number
+  budget_total: number
+  generation_mode: 'llm' | 'fallback'
+  created_at: string
+  updated_at: string
+}
+
+export interface TripReportDetail extends TripReportSummary {
+  request: Record<string, unknown>
+  result: TripPlanningResult
+  selected_plan: Record<string, unknown>
+  revisions: unknown[]
+}
+
 export interface ServiceHealth {
   status: string
   service: string

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,6 +28,7 @@ from .knowledge.vector_store import create_travel_vector_store
 from .storage.report_store import create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 setup_logging(settings.log_level)
 
@@ -48,6 +52,7 @@ image_provider = (
     if settings.disable_external_api
     else UnsplashMCPClient()
 )
+plan_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trip-plan")
 
 
 @app.get("/api/health")
@@ -96,7 +101,13 @@ def plan_trip_usage():
 
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
 def plan_trip(request: TripPlanRequest):
-    result = orchestrator.plan(request)
+    try:
+        result = _run_plan_with_timeout(request, timeout_seconds=settings.llm_timeout)
+    except TimeoutError as exc:
+        result = _find_historical_plan(request)
+        if result is None:
+            raise HTTPException(status_code=504, detail="行程规划超时，且没有找到可复用的历史方案") from exc
+        return ApiResponse[TripPlanningResult](success=True, message="行程规划超时，已返回最近历史方案", data=result)
     if report_store is not None:
         try:
             report = report_store.save_report(request, result)
@@ -110,6 +121,32 @@ def plan_trip(request: TripPlanRequest):
             }
         )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
+
+
+def _run_plan_with_timeout(request: TripPlanRequest, timeout_seconds: float) -> TripPlanningResult:
+    future = plan_executor.submit(orchestrator.plan, request)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError("trip planning timed out") from exc
+
+
+def _find_historical_plan(request: TripPlanRequest) -> TripPlanningResult | None:
+    if report_store is None or not hasattr(report_store, "find_latest_matching_result"):
+        return None
+    try:
+        requirement = orchestrator.parser.parse(request.prompt)
+        if request.days is not None:
+            requirement = requirement.model_copy(update={"days": request.days})
+        elif request.start_date is not None and request.end_date is not None:
+            requirement = requirement.model_copy(
+                update={"days": max(1, min((request.end_date - request.start_date).days + 1, 30))}
+            )
+        return report_store.find_latest_matching_result(request, requirement.city, requirement.days)
+    except Exception as exc:
+        logger.warning("Failed to query historical trip plan after timeout: %s", exc)
+        return None
 
 
 @app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])

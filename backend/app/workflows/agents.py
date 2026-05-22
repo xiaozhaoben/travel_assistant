@@ -28,10 +28,17 @@ from app.domain.models import (
     TripPlanningResult,
     TripPlanRequest,
     TravelRequirement,
+    WeatherInfo,
 )
 from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.researching.research import DestinationResearchService
+from app.tools import (
+    create_attraction_search_tool,
+    create_hotel_search_tool,
+    create_meal_search_tool,
+    create_weather_query_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +58,77 @@ def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, 
         return None
 
 
+def _message_value(message: Any, key: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
+def _parse_json_payload(content: Any) -> Any:
+    text = str(content or "").strip()
+    if not text:
+        return None
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif text.startswith("```"):
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+        if not match:
+            return None
+        return json.loads(match.group(1))
+
+
+def _extract_tool_items(response: Any, key: str, tool_name: str) -> list[dict[str, Any]]:
+    if not isinstance(response, dict) or not response.get("messages"):
+        return []
+    for message in reversed(response["messages"]):
+        role = _message_value(message, "role")
+        message_type = _message_value(message, "type")
+        name = _message_value(message, "name")
+        if role != "tool" and message_type != "tool" and name != tool_name:
+            continue
+        data = _parse_json_payload(_message_value(message, "content"))
+        raw_items = data.get(key) if isinstance(data, dict) else data
+        if isinstance(raw_items, list):
+            return [item for item in raw_items if isinstance(item, dict)]
+    return []
+
+
 class AttractionSearchAgent:
     name = "AttractionSearchAgent"
 
-    def __init__(self, amap: AmapMCPClient, unsplash: UnsplashMCPClient, llm: Any | None = None):
+    def __init__(
+        self,
+        amap: AmapMCPClient,
+        unsplash: UnsplashMCPClient,
+        llm: Any | None = None,
+        use_langchain_runtime: bool = True,
+    ):
         self.amap = amap
         self.unsplash = unsplash
         self.llm = llm
+        self.use_langchain_runtime = use_langchain_runtime
+        self.tools = [create_attraction_search_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.ATTRACTION_SEARCH,
             "attraction_search_agent",
         )
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
+        if self.use_langchain_runtime and self.langchain_agent is not None:
+            agent_attractions = self._try_agent_attractions(requirement)
+            if agent_attractions:
+                return [
+                    attraction.model_copy(
+                        update={"image_url": attraction.image_url or self.unsplash.image_for(f"{requirement.city} {attraction.name}")}
+                    )
+                    for attraction in agent_attractions
+                ]
         search_queries = self._build_search_queries(requirement)
         search_options: dict[str, Any] = {
             "limit": requirement.days * 3,
@@ -81,6 +144,24 @@ class AttractionSearchAgent:
             for attraction in attractions
         ]
 
+    def _try_agent_attractions(self, requirement: TravelRequirement) -> List[Attraction]:
+        prompt = (
+            "请根据下面的旅行需求调用 search_attractions 工具获取真实景点。"
+            "关键词应由你根据城市、偏好、必去/避开地点动态选择，避免泛分类词。"
+            "工具返回后，只输出 JSON：{\"attractions\":[...]}，不要 Markdown。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            data = self._extract_json(self._extract_agent_content(response))
+            raw_items = data.get("attractions", data if isinstance(data, list) else [])
+            if not isinstance(raw_items, list):
+                return []
+            return [Attraction.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("AttractionSearchAgent tool-driven search failed, using fallback search: %s", exc)
+            return []
+
     def _build_search_queries(self, requirement: TravelRequirement) -> List[str]:
         ai_queries = self._try_ai_search_queries(requirement)
         if ai_queries:
@@ -88,16 +169,12 @@ class AttractionSearchAgent:
         return self._fallback_search_queries(requirement)
 
     def _try_ai_search_queries(self, requirement: TravelRequirement) -> List[str]:
-        if self.langchain_agent is None and self.llm is None:
+        if self.llm is None:
             return []
         prompt = self._build_query_prompt(requirement)
         try:
-            if self.langchain_agent is not None:
-                response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
-                content = self._extract_agent_content(response)
-            else:
-                response = self.llm.invoke(prompt)
-                content = str(getattr(response, "content", response))
+            response = self.llm.invoke(prompt)
+            content = str(getattr(response, "content", response))
             data = self._extract_json(str(content))
             queries = data.get("queries") if isinstance(data, dict) else None
             return self._normalize_search_queries(queries, requirement.city)
@@ -109,9 +186,12 @@ class AttractionSearchAgent:
         payload = requirement.model_dump(mode="json")
         return (
             "请为高德地图 maps_text_search 生成 8-12 个中文 POI 搜索关键词。"
+            "你必须完整阅读 user_request.prompt、偏好、交通方式、同行人群、旅行节奏、必去/避开地点和额外要求；"
+            "额外要求中的兴趣点必须转成可搜索的 POI 关键词，例如泡温泉应覆盖“温泉”“温泉度假村”和你知道的代表性温泉 POI。"
             "优先输出你判断真实存在、可独立游览、可在地图中直接搜到的具体地点名称，例如陈家祠、沙面岛、南越王博物院、越秀公园这类 POI。"
             "不要输出模板词或泛分类词，例如“广州历史街区”“广州特色街区”“广州城市公园”“广州城市地标”“广州历史文化景点”。"
             "可以根据城市和偏好自由发挥，覆盖不同片区、不同类型和不同强度，但每个关键词都应尽量指向一个真实景点、街区、场馆或景区。"
+            "当多个需求并存时，先给额外要求和强意图各保留至少 2 个关键词，再补充经典与主题景点。"
             "不要只围绕一个大景区生成入口、检票处、服务中心、讲解处、馆内小景点。"
             "如果不确定具体名称，宁可输出更知名的真实地标，不要编造“xx历史街区”这种固定形式。"
             "只返回 JSON：{\"queries\":[\"...\"]}。\n"
@@ -250,44 +330,102 @@ class AttractionSearchAgent:
 class WeatherQueryAgent:
     name = "WeatherQueryAgent"
 
-    def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
+    def __init__(self, amap: AmapMCPClient, llm: Any | None = None, use_langchain_runtime: bool = True):
         self.amap = amap
+        self.use_langchain_runtime = use_langchain_runtime
+        self.tools = [create_weather_query_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.WEATHER_QUERY,
             "weather_query_agent",
         )
 
     def run(self, requirement: TravelRequirement):
+        if self.use_langchain_runtime and self.langchain_agent is not None:
+            agent_weather = self._try_agent_weather(requirement)
+            if agent_weather:
+                return agent_weather
         return self.amap.get_weather(requirement.city, requirement.start_date, requirement.days)
+
+    def _try_agent_weather(self, requirement: TravelRequirement) -> List[WeatherInfo]:
+        prompt = (
+            "请调用 query_weather 工具查询旅行期间天气。"
+            "工具返回后，只输出 JSON：{\"weather\":[...]}，不要 Markdown。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            content = AttractionSearchAgent._extract_agent_content(self, response)
+            data = AttractionSearchAgent._extract_json(self, content)
+            raw_items = data.get("weather", data if isinstance(data, list) else [])
+            if not isinstance(raw_items, list):
+                return []
+            return [WeatherInfo.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("WeatherQueryAgent tool-driven query failed, using fallback weather: %s", exc)
+            return []
 
 
 class HotelAgent:
     name = "HotelAgent"
 
-    def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
+    def __init__(self, amap: AmapMCPClient, llm: Any | None = None, use_langchain_runtime: bool = True):
         self.amap = amap
+        self.use_langchain_runtime = use_langchain_runtime
+        self.tools = [create_hotel_search_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.HOTEL,
             "hotel_agent",
         )
 
     def run(self, requirement: TravelRequirement) -> List[Hotel]:
+        if self.use_langchain_runtime and self.langchain_agent is not None:
+            agent_hotels = self._try_agent_hotels(requirement)
+            if agent_hotels:
+                return agent_hotels
         return self.amap.search_hotels(requirement.city, requirement.budget_level, limit=3)
+
+    def _try_agent_hotels(self, requirement: TravelRequirement) -> List[Hotel]:
+        prompt = (
+            "请调用 search_hotels 工具筛选住宿。"
+            "工具返回后，只输出 JSON：{\"hotels\":[...]}，不要 Markdown。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            tool_items = _extract_tool_items(response, "hotels", "search_hotels")
+            if tool_items:
+                return [Hotel.model_validate(item) for item in tool_items]
+            content = AttractionSearchAgent._extract_agent_content(self, response)
+            data = AttractionSearchAgent._extract_json(self, content)
+            raw_items = data.get("hotels", data if isinstance(data, list) else [])
+            if not isinstance(raw_items, list):
+                return []
+            return [Hotel.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("HotelAgent tool-driven search failed, using fallback hotels: %s", exc)
+            return []
 
 
 class PlannerAgent:
     name = "PlannerAgent"
 
-    def __init__(self, llm: Any | None = None, amap: AmapMCPClient | None = None):
+    def __init__(
+        self,
+        llm: Any | None = None,
+        amap: AmapMCPClient | None = None,
+        use_langchain_runtime: bool = True,
+    ):
         self.llm = llm
         self.amap = amap
+        self.use_langchain_runtime = use_langchain_runtime
+        self.tools = [create_meal_search_tool(amap)] if amap is not None else []
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.PLANNER,
             "planner_agent",
         )
@@ -324,9 +462,10 @@ class PlannerAgent:
                 ]
             else:
                 messages = prompt
-            if self.langchain_agent is not None:
+            if self.use_langchain_runtime and self.langchain_agent is not None:
                 response = self.langchain_agent.invoke(
-                    {"messages": [{"role": "user", "content": prompt}]}
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={"recursion_limit": 4},
                 )
                 content = self._extract_agent_content(response)
             elif self.llm is not None:
@@ -388,12 +527,16 @@ class PlannerAgent:
             ],
             "research_context": [item.model_dump(mode="json") for item in research_context[:6]],
         }
+        tool_limit_instruction = (
+            "If search_meals is needed, use at most one tool round; "
+            "after tool results return, immediately produce the final JSON.\n"
+        )
         return (
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
             "options 必须包含 balanced、relaxed、deep_dive 三套方案；每项包含 id,title,style,suitable_for,highlights,tradeoffs,plan。"
             "plan 字段必须匹配 TripPlan：city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。"
             "请把 research_context 中的预约、交通、避坑、餐饮信息写入建议或每日摘要；不要 Markdown，不要额外解释。\n"
-            f"{json.dumps(payload, ensure_ascii=False)}"
+            f"{tool_limit_instruction}{json.dumps(payload, ensure_ascii=False)}"
         )
 
     def _normalize_llm_result(
@@ -824,8 +967,29 @@ class TravelAgentOrchestrator:
             },
         )
         result = self.planner.run(requirement, attractions, weather, hotels, research_context)
-        log_agent_event(self.planner.name, "output", {"result": result})
+        log_agent_event(self.planner.name, "output", {"result_summary": self._summarize_result(result)})
         return result
+
+    def _summarize_result(self, result: TripPlanningResult) -> dict[str, Any]:
+        return {
+            "selected_option_id": result.selected_option_id,
+            "city": result.city,
+            "days_count": result.days_count,
+            "generation_mode": result.generation_mode,
+            "options": [
+                {
+                    "id": option.id,
+                    "title": option.title,
+                    "style": option.style,
+                    "plan_generation_mode": option.plan.generation_mode,
+                }
+                for option in result.options
+            ],
+            "budget_total": result.budget.total,
+            "attractions_count": sum(len(day.attractions) for day in result.days),
+            "meals_count": sum(len(day.meals) for day in result.days),
+            "research_context_count": len(result.research_context),
+        }
 
     def recalculate(
         self,

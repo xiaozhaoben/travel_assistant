@@ -175,6 +175,9 @@ class AttractionRecommendationService:
         "地标",
         "街区",
         "街",
+        "温泉",
+        "度假区",
+        "度假村",
     }
     preference_terms = {
         "历史文化": {"历史", "文化", "博物", "故居", "古镇", "古村", "遗址", "牌坊", "祠", "街区"},
@@ -183,7 +186,7 @@ class AttractionRecommendationService:
         "亲子": {"亲子", "儿童", "乐园", "公园", "博物"},
         "艺术": {"艺术", "美术", "展览", "博物"},
         "购物": {"购物", "商业", "步行街"},
-        "休闲": {"休闲", "公园", "街区", "海滨"},
+        "休闲": {"休闲", "公园", "街区", "海滨", "温泉", "度假"},
         "经典必游": {"地标", "风景名胜", "旅游景点", "博物", "公园"},
     }
 
@@ -235,7 +238,7 @@ class AttractionRecommendationService:
         if any(term in text for term in self.quality_terms):
             score += 10
         for preference in preferences:
-            terms = self.preference_terms.get(str(preference), {str(preference)})
+            terms = self._terms_for_preference(str(preference), city)
             if any(term and term in text for term in terms):
                 score += 12
         if any(place and place in attraction.name for place in must_visit):
@@ -246,6 +249,14 @@ class AttractionRecommendationService:
         if self._looks_like_sub_poi(attraction.name):
             score -= 12
         return score
+
+    def _terms_for_preference(self, preference: str, city: str) -> set[str]:
+        terms = set(self.preference_terms.get(preference, {preference}))
+        if city and preference.startswith(city):
+            suffix = preference[len(city) :].strip()
+            if suffix and any(term in suffix for term in ("温泉", "度假")):
+                terms.add(suffix)
+        return terms
 
     def _generic_penalty(self, name: str, city: str) -> float:
         suffix = name.replace(city, "", 1).strip() if city and name.startswith(city) else name.strip()
@@ -314,7 +325,7 @@ class AmapMCPClient:
         ranking_preferences: Iterable[str] | None = None,
     ) -> List[Attraction]:
         query_list = self._normalize_poi_queries(city, keywords)
-        rank_preferences = list(ranking_preferences or query_list)
+        rank_preferences = self._merge_ranking_preferences(ranking_preferences, query_list)
         if self.mcp_caller:
             pois = self._search_pois_from_mcp(city, query_list, limit)
             if len(pois) >= limit:
@@ -355,6 +366,14 @@ class AmapMCPClient:
         combined = ranked_pois + [item for item in ranked_fallback if item.name not in {poi.name for poi in ranked_pois}]
         return combined[:limit]
 
+    def _merge_ranking_preferences(self, ranking_preferences: Iterable[str] | None, query_list: Iterable[str]) -> list[str]:
+        merged: list[str] = []
+        for item in list(ranking_preferences or []) + list(query_list):
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+        return merged
+
     def search_hotels(self, city: str, budget_level: str, limit: int = 3) -> List[Hotel]:
         if self.mcp_caller:
             hotels = self._search_hotels_from_mcp(city, budget_level, limit)
@@ -383,11 +402,12 @@ class AmapMCPClient:
         city: str,
         budget_level: str,
         food_preferences: str = "",
-        route_points: Iterable[Location] | None = None,
+        route_points: Iterable[Location | dict[str, Any]] | None = None,
     ) -> List[Meal]:
         defaults = self._fallback_meals(city, budget_level)
+        normalized_route_points = self._normalize_route_points(route_points or [])
         if self.mcp_caller:
-            meals = self._search_meals_from_mcp(city, budget_level, food_preferences, list(route_points or []))
+            meals = self._search_meals_from_mcp(city, budget_level, food_preferences, normalized_route_points)
             if meals:
                 by_type = {meal.type: meal for meal in meals}
                 return [by_type.get(default.type, default) for default in defaults]
@@ -634,6 +654,24 @@ class AmapMCPClient:
             return (distance, rating_score)
         return (0.0, rating_score)
 
+    def _normalize_route_points(self, route_points: Iterable[Location | dict[str, Any]]) -> List[Location]:
+        normalized: list[Location] = []
+        for point in route_points:
+            location = self._coerce_location(point)
+            if location is not None:
+                normalized.append(location)
+        return normalized
+
+    def _coerce_location(self, value: Location | dict[str, Any] | None) -> Location | None:
+        if isinstance(value, Location):
+            return value
+        if isinstance(value, dict):
+            try:
+                return Location(longitude=float(value["longitude"]), latitude=float(value["latitude"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+        return None
+
     def _estimate_ticket_price(self, category: str, index: int) -> int:
         if any(keyword in category for keyword in ["博物馆", "科教文化"]):
             return 30
@@ -702,7 +740,23 @@ class AmapMCPClient:
             return False
         if self._looks_like_sub_poi(name):
             return False
-        allowed_terms = ["风景名胜", "旅游景点", "博物馆", "展览馆", "文化", "古镇", "古村", "故居", "牌坊", "公园", "街"]
+        allowed_terms = [
+            "风景名胜",
+            "旅游景点",
+            "博物馆",
+            "展览馆",
+            "文化",
+            "古镇",
+            "古村",
+            "故居",
+            "牌坊",
+            "公园",
+            "街",
+            "温泉",
+            "度假区",
+            "度假村",
+            "休闲场所",
+        ]
         return any(term in searchable_text for term in allowed_terms)
 
     def _is_relevant_restaurant_poi(self, poi: dict, city: str) -> bool:

@@ -235,6 +235,33 @@ class PostgresReportStore:
             }
         )
 
+    def find_latest_matching_result(self, request: TripPlanRequest, city: str, days: int) -> TripPlanningResult | None:
+        self._ensure_schema_once()
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    """
+                    SELECT id::text, result_payload, created_at, updated_at
+                    FROM trip_reports
+                    WHERE city = %s
+                      AND days_count = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (city, days),
+                ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        result = TripPlanningResult.model_validate(payload["result_payload"])
+        return result.model_copy(
+            update={
+                "report_id": payload["id"],
+                "report_created_at": payload["created_at"],
+                "report_updated_at": payload["updated_at"],
+            }
+        )
+
 
 def create_report_store(database_url: str | None) -> PostgresReportStore | None:
     if not database_url:
