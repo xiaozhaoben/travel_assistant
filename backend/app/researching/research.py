@@ -7,10 +7,12 @@ import re
 import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Iterable
 
 from app.core.config import BACKEND_DIR, get_settings
 from app.domain.models import ResearchSnippet
+from app.storage.plan_log import elapsed_ms, record_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,27 @@ class WebSearchMCPClient:
 
     def search(self, query: str) -> list[dict[str, Any]]:
         if self.mcp_caller:
-            return self._normalize_result(self.mcp_caller.call_tool(self.tool_name, {"query": query}))
+            start = perf_counter()
+            try:
+                raw = self.mcp_caller.call_tool(self.tool_name, {"query": query})
+                results = self._normalize_result(raw)
+                record_api_call(
+                    component="web_search_mcp",
+                    operation=self.tool_name,
+                    request_payload={"query": query},
+                    response_payload={"results": results},
+                    duration_ms=elapsed_ms(start),
+                )
+                return results
+            except Exception as exc:
+                record_api_call(
+                    component="web_search_mcp",
+                    operation=self.tool_name,
+                    request_payload={"query": query},
+                    error=str(exc),
+                    duration_ms=elapsed_ms(start),
+                )
+                raise
         if not self.command:
             return []
         return self._call_stdio(query)
@@ -64,9 +86,25 @@ class WebSearchMCPClient:
                     )
                     return self._normalize_result(text)
 
+        start = perf_counter()
         try:
-            return anyio.run(_call)
+            results = anyio.run(_call)
+            record_api_call(
+                component="web_search_mcp",
+                operation=self.tool_name,
+                request_payload={"query": query, "command": command},
+                response_payload={"results": results},
+                duration_ms=elapsed_ms(start),
+            )
+            return results
         except Exception as exc:
+            record_api_call(
+                component="web_search_mcp",
+                operation=self.tool_name,
+                request_payload={"query": query, "command": command},
+                error=str(exc),
+                duration_ms=elapsed_ms(start),
+            )
             logger.warning("Web search MCP failed, using local research fallback: %s", exc)
             return []
 

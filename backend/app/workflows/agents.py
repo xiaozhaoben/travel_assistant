@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import timedelta
 from typing import Any, List
 
@@ -32,6 +33,7 @@ from app.domain.models import (
 from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.researching.research import DestinationResearchService
+from app.storage.plan_log import elapsed_ms, record_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,101 @@ def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, 
     except Exception as exc:
         logger.warning("LangChain create_agent failed for %s: %s", name, exc)
         return None
+
+
+def _extract_message_content(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if text:
+                    parts.append(str(text))
+            elif block:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(content)
+
+
+def _extract_agent_content(response: Any) -> str:
+    if isinstance(response, tuple) and response:
+        return _extract_agent_content(response[0])
+    if isinstance(response, dict):
+        if response.get("messages"):
+            return _extract_message_content(response["messages"][-1])
+        for value in response.values():
+            if isinstance(value, dict) and value.get("messages"):
+                return _extract_message_content(value["messages"][-1])
+    return _extract_message_content(response)
+
+
+def _extract_stream_content(chunk: Any) -> str:
+    if isinstance(chunk, tuple) and chunk:
+        return _extract_stream_content(chunk[0])
+    if isinstance(chunk, dict):
+        if chunk.get("messages"):
+            return _extract_message_content(chunk["messages"][-1])
+        for value in chunk.values():
+            if isinstance(value, dict) and value.get("messages"):
+                return _extract_message_content(value["messages"][-1])
+        return ""
+    return _extract_message_content(chunk)
+
+
+def _stream_agent_content(agent: Any, state: dict[str, Any], agent_name: str) -> str:
+    start = time.perf_counter()
+    first_chunk_seconds: float | None = None
+    final_chunk: Any = None
+    streamed_parts: list[str] = []
+    logger.info("%s LLM stream start", agent_name)
+    try:
+        try:
+            chunks = agent.stream(state, stream_mode="messages")
+        except TypeError:
+            chunks = agent.stream(state)
+        for chunk in chunks:
+            final_chunk = chunk
+            elapsed = time.perf_counter() - start
+            if first_chunk_seconds is None:
+                first_chunk_seconds = elapsed
+                logger.info("%s LLM stream first_chunk seconds=%.2f", agent_name, elapsed)
+            content = _extract_stream_content(chunk)
+            if content:
+                streamed_parts.append(content)
+    except Exception:
+        elapsed = time.perf_counter() - start
+        record_llm_call(
+            component=agent_name,
+            operation="stream",
+            request_payload=state,
+            error="LLM stream failed",
+            duration_ms=int(elapsed * 1000),
+        )
+        logger.info(
+            "%s LLM stream failed first_chunk_seconds=%s total_seconds=%.2f",
+            agent_name,
+            f"{first_chunk_seconds:.2f}" if first_chunk_seconds is not None else "none",
+            elapsed,
+        )
+        raise
+    elapsed = time.perf_counter() - start
+    content = "".join(streamed_parts) if streamed_parts else _extract_agent_content(final_chunk)
+    record_llm_call(
+        component=agent_name,
+        operation="stream",
+        request_payload=state,
+        response_payload={"content": content},
+        duration_ms=elapsed_ms(start),
+    )
+    logger.info(
+        "%s LLM stream complete first_chunk_seconds=%s total_seconds=%.2f content_chars=%s",
+        agent_name,
+        f"{first_chunk_seconds:.2f}" if first_chunk_seconds is not None else "none",
+        elapsed,
+        len(content),
+    )
+    return content
 
 
 class AttractionSearchAgent:
@@ -93,11 +190,22 @@ class AttractionSearchAgent:
         prompt = self._build_query_prompt(requirement)
         try:
             if self.langchain_agent is not None:
-                response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
-                content = self._extract_agent_content(response)
+                content = _stream_agent_content(
+                    self.langchain_agent,
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    self.name,
+                )
             else:
+                start = time.perf_counter()
                 response = self.llm.invoke(prompt)
                 content = str(getattr(response, "content", response))
+                record_llm_call(
+                    component=self.name,
+                    operation="invoke",
+                    request_payload={"prompt": prompt},
+                    response_payload={"content": content},
+                    duration_ms=elapsed_ms(start),
+                )
             data = self._extract_json(str(content))
             queries = data.get("queries") if isinstance(data, dict) else None
             return self._normalize_search_queries(queries, requirement.city)
@@ -117,12 +225,6 @@ class AttractionSearchAgent:
             "只返回 JSON：{\"queries\":[\"...\"]}。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
-
-    def _extract_agent_content(self, response: Any) -> str:
-        if isinstance(response, dict) and response.get("messages"):
-            message = response["messages"][-1]
-            return str(getattr(message, "content", message))
-        return str(getattr(response, "content", response))
 
     def _extract_json(self, content: str) -> dict:
         if "```json" in content:
@@ -282,9 +384,20 @@ class HotelAgent:
 class PlannerAgent:
     name = "PlannerAgent"
 
-    def __init__(self, llm: Any | None = None, amap: AmapMCPClient | None = None):
+    def __init__(
+        self,
+        llm: Any | None = None,
+        amap: AmapMCPClient | None = None,
+        image_provider: UnsplashMCPClient | None = None,
+    ):
         self.llm = llm
         self.amap = amap
+        self.image_provider = image_provider or UnsplashMCPClient(
+            access_key="",
+            pexels_api_key="",
+            pixabay_api_key="",
+            enable_open_sources=False,
+        )
         self.langchain_agent = _safe_create_agent(
             llm,
             [],
@@ -325,13 +438,22 @@ class PlannerAgent:
             else:
                 messages = prompt
             if self.langchain_agent is not None:
-                response = self.langchain_agent.invoke(
-                    {"messages": [{"role": "user", "content": prompt}]}
+                content = _stream_agent_content(
+                    self.langchain_agent,
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    self.name,
                 )
-                content = self._extract_agent_content(response)
             elif self.llm is not None:
+                start = time.perf_counter()
                 response = self.llm.invoke(messages)
                 content = getattr(response, "content", response)
+                record_llm_call(
+                    component=self.name,
+                    operation="invoke",
+                    request_payload={"messages": messages},
+                    response_payload={"content": content},
+                    duration_ms=elapsed_ms(start),
+                )
             else:
                 return None
             data = self._extract_json(str(content))
@@ -339,12 +461,6 @@ class PlannerAgent:
         except Exception as exc:
             logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
             return None
-
-    def _extract_agent_content(self, response: Any) -> str:
-        if isinstance(response, dict) and response.get("messages"):
-            message = response["messages"][-1]
-            return str(getattr(message, "content", message))
-        return str(getattr(response, "content", response))
 
     def _build_prompt(
         self,
@@ -392,6 +508,8 @@ class PlannerAgent:
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
             "options 必须包含 balanced、relaxed、deep_dive 三套方案；每项包含 id,title,style,suitable_for,highlights,tradeoffs,plan。"
             "plan 字段必须匹配 TripPlan：city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。"
+            "如果用户需求中出现资料列表外但真实存在的目的地，请由你判断并放入对应 day.attractions，提供 name,category,address,location,visit_duration_minutes,description,ticket_price；"
+            "每日 summary 中提到的游览地点必须同步出现在该日 attractions，不要只写在文字描述里。"
             "请把 research_context 中的预约、交通、避坑、餐饮信息写入建议或每日摘要；不要 Markdown，不要额外解释。\n"
             f"{json.dumps(payload, ensure_ascii=False)}"
         )
@@ -477,7 +595,7 @@ class PlannerAgent:
             HotelAgent.name,
             self.name,
         ]
-        normalized["weather"] = normalized.get("weather") or [item.model_dump(mode="json") for item in weather]
+        normalized["weather"] = self._repair_weather(normalized.get("weather"), weather, requirement.days)
 
         source_attractions = {item.id: item for item in attractions}
         source_attractions.update({item.name: item for item in attractions})
@@ -489,7 +607,7 @@ class PlannerAgent:
             raw_hotel = raw_day.get("hotel")
             day_hotel = self._repair_hotel(raw_hotel, fallback_hotel)
             raw_attractions = raw_day.get("attractions") or raw_day.get("activities") or raw_day.get("spots") or []
-            repaired_attractions = self._repair_attractions(raw_attractions, attractions, source_attractions, index)
+            repaired_attractions = self._repair_attractions(raw_attractions, attractions, source_attractions, index, requirement.city)
             route_locations = [item["location"] for item in repaired_attractions]
             meals = self._repair_meals(raw_day.get("meals"), requirement.city, requirement.budget_level, requirement.food_preferences, route_locations)
             normalized_days.append(
@@ -501,7 +619,7 @@ class PlannerAgent:
                     or raw_day.get("description")
                     or raw_day.get("suggestion")
                     or f"第 {index + 1} 天围绕{self._theme(requirement.preferences, index)}展开。",
-                    "transportation": raw_day.get("transportation") or raw_day.get("transport") or "公共交通 + 步行",
+                    "transportation": self._repair_transportation(raw_day.get("transportation") or raw_day.get("transport")),
                     "hotel": day_hotel,
                     "attractions": repaired_attractions,
                     "meals": meals,
@@ -510,11 +628,8 @@ class PlannerAgent:
                 }
             )
         normalized["days"] = normalized_days
-        normalized["map_center"] = normalized.get("map_center") or normalized_days[0]["route_points"][0]
-        budget = normalized.get("budget")
-        if not isinstance(budget, dict) or budget.get("total", 0) <= 0:
-            budget = self._budget_from_day_dicts(normalized_days)
-        normalized["budget"] = budget
+        normalized["map_center"] = self._repair_location(normalized.get("map_center")) or normalized_days[0]["route_points"][0]
+        normalized["budget"] = self._budget_from_day_dicts(normalized_days)
         return normalized
 
     def _repair_hotel(self, raw_hotel, fallback_hotel: Hotel) -> dict:
@@ -526,7 +641,7 @@ class PlannerAgent:
                 hotel[key] = raw_hotel[key]
         return hotel
 
-    def _repair_attractions(self, raw_items, attractions: List[Attraction], source_attractions: dict, day_index: int) -> list[dict]:
+    def _repair_attractions(self, raw_items, attractions: List[Attraction], source_attractions: dict, day_index: int, city: str) -> list[dict]:
         raw_list = self._ensure_list(raw_items, [])
         repaired = []
         for offset, raw_item in enumerate(raw_list[:3]):
@@ -538,9 +653,11 @@ class PlannerAgent:
             source = source_attractions.get(key) if key else None
             if source is None and key:
                 source = next((item for item in attractions if key in item.name or item.name in key), None)
-            if source is None and attractions:
-                source = attractions[min(day_index * 2 + offset, len(attractions) - 1)]
+            fallback_source = attractions[min(day_index * 2 + offset, len(attractions) - 1)] if attractions else None
             if source is None:
+                item = self._repair_llm_attraction(raw_item, fallback_source, day_index, offset, city)
+                if item is not None:
+                    repaired.append(item)
                 continue
             item = source.model_dump(mode="json")
             if raw_item.get("description"):
@@ -553,6 +670,46 @@ class PlannerAgent:
         if not repaired:
             repaired = [item.model_dump(mode="json") for item in attractions[day_index * 2 : day_index * 2 + 2]]
         return repaired or [item.model_dump(mode="json") for item in attractions[:1]]
+
+    def _repair_llm_attraction(self, raw_item: dict, fallback_source: Attraction | None, day_index: int, offset: int, city: str) -> dict | None:
+        name = raw_item.get("name") or raw_item.get("title") or raw_item.get("poi") or raw_item.get("destination")
+        if not name:
+            return None
+        fallback = fallback_source.model_dump(mode="json") if fallback_source is not None else {}
+        location = self._repair_location(raw_item.get("location") or raw_item.get("coordinates"))
+        if location is None and raw_item.get("longitude") is not None and raw_item.get("latitude") is not None:
+            location = self._repair_location({"longitude": raw_item.get("longitude"), "latitude": raw_item.get("latitude")})
+        fallback_location = fallback.get("location") or self._city_center_location(city)
+        return {
+            "id": raw_item.get("id") or f"llm-{day_index + 1}-{offset + 1}",
+            "name": str(name),
+            "category": raw_item.get("category") or raw_item.get("type") or fallback.get("category") or "模型推荐",
+            "address": raw_item.get("address") or fallback.get("address") or f"{city}市内",
+            "location": location or fallback_location,
+            "visit_duration_minutes": self._coerce_int(
+                raw_item.get("visit_duration_minutes") or raw_item.get("duration_minutes") or raw_item.get("duration"),
+                fallback.get("visit_duration_minutes", 120),
+            ),
+            "description": raw_item.get("description") or raw_item.get("summary") or raw_item.get("reason") or fallback.get("description") or f"{name}由大模型根据用户需求推荐。",
+            "ticket_price": self._coerce_int(raw_item.get("ticket_price") or raw_item.get("price") or raw_item.get("cost"), fallback.get("ticket_price", 0)),
+            "image_url": self._image_for_attraction(city, str(name)),
+            "rating": raw_item.get("rating"),
+        }
+
+    def _image_for_attraction(self, city: str, name: str) -> str | None:
+        if self.image_provider is None:
+            return None
+        query = f"{city} {name}".strip()
+        try:
+            return self.image_provider.image_for(query) or None
+        except Exception as exc:
+            logger.warning("Attraction image search failed for %s: %s", query, exc)
+            return None
+
+    def _city_center_location(self, city: str) -> dict:
+        if self.amap is not None:
+            return self.amap.city_center(city).model_dump(mode="json")
+        return AmapMCPClient(api_key="").city_center(city).model_dump(mode="json")
 
     def _repair_meals(self, raw_items, city: str, budget_level: str = "中等", food_preferences: str = "", route_points=None) -> list[dict]:
         defaults = self._meals(city, budget_level, food_preferences, route_points or [])
@@ -578,6 +735,73 @@ class PlannerAgent:
                 }
             )
         return meals
+
+    def _repair_weather(self, raw_items, fallback_weather, days_count: int) -> list[dict]:
+        raw_list = self._ensure_list(raw_items, [])
+        fallback_list = [item.model_dump(mode="json") for item in fallback_weather]
+        repaired = []
+        for index in range(days_count):
+            fallback = fallback_list[index] if index < len(fallback_list) else fallback_list[-1] if fallback_list else {}
+            raw = raw_list[index] if index < len(raw_list) and isinstance(raw_list[index], dict) else {}
+            day_weather = raw.get("day_weather") or raw.get("weather") or raw.get("condition") or fallback.get("day_weather") or "多云"
+            suggestion = (
+                raw.get("suggestion")
+                or raw.get("travel_suggestion")
+                or raw.get("advice")
+                or raw.get("tips")
+                or fallback.get("suggestion")
+                or "根据天气调整室内外景点顺序。"
+            )
+            repaired.append(
+                {
+                    "date": raw.get("date") or fallback.get("date"),
+                    "day_weather": day_weather,
+                    "night_weather": raw.get("night_weather") or raw.get("night") or fallback.get("night_weather") or day_weather,
+                    "day_temp": self._coerce_int(raw.get("day_temp") or raw.get("high_temp") or raw.get("temperature"), fallback.get("day_temp", 25)),
+                    "night_temp": self._coerce_int(raw.get("night_temp") or raw.get("low_temp"), fallback.get("night_temp", 15)),
+                    "wind": raw.get("wind") or fallback.get("wind") or "微风",
+                    "suggestion": suggestion,
+                }
+            )
+        return repaired
+
+    def _coerce_int(self, value, fallback: int) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            match = re.search(r"-?\d+", value)
+            if match:
+                return int(match.group(0))
+        return fallback
+
+    def _repair_transportation(self, raw_transportation) -> str:
+        if isinstance(raw_transportation, str) and raw_transportation.strip():
+            return raw_transportation
+        if isinstance(raw_transportation, dict):
+            parts = [
+                raw_transportation.get("mode"),
+                raw_transportation.get("description"),
+                raw_transportation.get("route"),
+                raw_transportation.get("duration"),
+            ]
+            text = "，".join(str(part) for part in parts if part)
+            return text or "公共交通 + 步行"
+        if isinstance(raw_transportation, list):
+            text = "，".join(str(item) for item in raw_transportation if item)
+            return text or "公共交通 + 步行"
+        return "公共交通 + 步行"
+
+    def _repair_location(self, raw_location) -> dict | None:
+        if isinstance(raw_location, dict):
+            longitude = raw_location.get("longitude") or raw_location.get("lng") or raw_location.get("lon")
+            latitude = raw_location.get("latitude") or raw_location.get("lat")
+            if longitude is not None and latitude is not None:
+                return {"longitude": longitude, "latitude": latitude}
+        if isinstance(raw_location, (list, tuple)) and len(raw_location) >= 2:
+            return {"longitude": raw_location[0], "latitude": raw_location[1]}
+        return None
 
     def _budget_from_day_dicts(self, days: list[dict]) -> dict:
         total_attractions = sum(item.get("ticket_price", 0) for day in days for item in day["attractions"])
@@ -771,7 +995,7 @@ class TravelAgentOrchestrator:
         self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)
-        self.planner = PlannerAgent(llm=planner_llm, amap=self.amap)
+        self.planner = PlannerAgent(llm=planner_llm, amap=self.amap, image_provider=self.unsplash)
         self.research = DestinationResearchService()
 
     def plan(self, request: TripPlanRequest) -> TripPlanningResult:

@@ -5,12 +5,15 @@ import logging
 import math
 import os
 import re
+import shutil
 from datetime import date, timedelta
+from time import perf_counter
 from typing import Any, Dict, Iterable, List
 import httpx
 
 from app.core.config import get_settings
 from app.domain.models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
+from app.storage.plan_log import elapsed_ms, record_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +103,15 @@ class AmapStdioMCPToolCaller:
         from mcp.client.stdio import stdio_client
 
         async def _call() -> str:
+            command = self._resolve_uvx_command()
+            env = {**os.environ, "AMAP_MAPS_API_KEY": self.api_key}
+            command_dir = os.path.dirname(command) if os.path.isabs(command) else ""
+            if command_dir:
+                env["PATH"] = f"{command_dir}{os.pathsep}{env.get('PATH', '')}"
             server = StdioServerParameters(
-                command=self.command[0],
+                command=command,
                 args=self.command[1:],
-                env={"AMAP_MAPS_API_KEY": self.api_key},
+                env=env,
             )
             async with stdio_client(server) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
@@ -116,6 +124,20 @@ class AmapStdioMCPToolCaller:
                     )
 
         return anyio.run(_call)
+
+    def _resolve_uvx_command(self) -> str:
+        found = shutil.which(self.command[0])
+        if found:
+            return found
+        local_app_data = os.getenv("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        candidates = [
+            os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "uvx.exe"),
+            os.path.join(local_app_data, "Programs", "@comfyorgcomfyui-electron", "resources", "uv", "win", "uvx.exe"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return self.command[0]
 
 
 class AttractionRecommendationService:
@@ -298,11 +320,18 @@ class AmapMCPClient:
     MCP 不可用或没有 API Key 时回退到本地稳定数据，保证开发和测试可运行。
     """
 
-    def __init__(self, api_key: str | None = None, mcp_caller=None, recommendation_service: AttractionRecommendationService | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        mcp_caller=None,
+        recommendation_service: AttractionRecommendationService | None = None,
+        http_client=None,
+    ):
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.amap_api_key or os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY")
         self.mcp_caller = mcp_caller or (AmapStdioMCPToolCaller(self.api_key) if self.api_key else None)
         self.recommendation_service = recommendation_service or AttractionRecommendationService()
+        self.http_client = http_client or httpx.Client()
 
     def search_pois(
         self,
@@ -385,13 +414,48 @@ class AmapMCPClient:
         food_preferences: str = "",
         route_points: Iterable[Location] | None = None,
     ) -> List[Meal]:
-        defaults = self._fallback_meals(city, budget_level)
+        route_point_list = self._normalize_route_points(route_points or [])
+        defaults = self._fallback_meals(city, budget_level, route_point_list)
+        use_http_first = self.api_key and (
+            self.mcp_caller is None or isinstance(self.mcp_caller, AmapStdioMCPToolCaller)
+        )
+        if use_http_first:
+            meals = self._search_meals_from_http(city, budget_level, food_preferences, route_point_list)
+            if meals:
+                by_type = {meal.type: meal for meal in meals}
+                return [by_type.get(default.type, default) for default in defaults]
         if self.mcp_caller:
-            meals = self._search_meals_from_mcp(city, budget_level, food_preferences, list(route_points or []))
+            meals = self._search_meals_from_mcp(city, budget_level, food_preferences, route_point_list)
+            if meals:
+                by_type = {meal.type: meal for meal in meals}
+                return [by_type.get(default.type, default) for default in defaults]
+        if self.api_key and not use_http_first:
+            meals = self._search_meals_from_http(city, budget_level, food_preferences, route_point_list)
             if meals:
                 by_type = {meal.type: meal for meal in meals}
                 return [by_type.get(default.type, default) for default in defaults]
         return defaults
+
+    def _normalize_route_points(self, route_points: Iterable[Location | dict | str]) -> List[Location]:
+        normalized: list[Location] = []
+        for point in route_points:
+            if isinstance(point, Location):
+                normalized.append(point)
+                continue
+            if isinstance(point, dict):
+                longitude = point.get("longitude") or point.get("lng") or point.get("lon")
+                latitude = point.get("latitude") or point.get("lat")
+                if longitude is not None and latitude is not None:
+                    try:
+                        normalized.append(Location(longitude=float(longitude), latitude=float(latitude)))
+                    except (TypeError, ValueError):
+                        pass
+                continue
+            if isinstance(point, str):
+                location = self._parse_location(point)
+                if location:
+                    normalized.append(location)
+        return normalized
 
     def get_weather(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         if self.mcp_caller:
@@ -464,36 +528,55 @@ class AmapMCPClient:
                 unique_queries.append(query)
         return unique_queries or [f"{city}景点"]
 
+    def _hotel_queries(self, city: str, budget_level: str) -> List[str]:
+        query_map = {
+            "低": [f"{city}经济型酒店", f"{city}快捷酒店", f"{city}宾馆"],
+            "中等": [f"{city}舒适型酒店", f"{city}酒店", f"{city}商务酒店"],
+            "高": [f"{city}高端酒店", f"{city}五星级酒店", f"{city}度假酒店"],
+        }
+        queries = query_map.get(budget_level, [f"{city}酒店", "酒店"])
+        queries = queries + [f"{city}酒店", "酒店"]
+        deduped: list[str] = []
+        for query in queries:
+            if query and query not in deduped:
+                deduped.append(query)
+        return deduped
+
     def _search_hotels_from_mcp(self, city: str, budget_level: str, limit: int) -> List[Hotel]:
         try:
-            data = self._call_mcp_json(
-                "maps_text_search",
-                {"keywords": f"{budget_level} 酒店", "city": city},
-            )
             price = {"低": 280, "中等": 520, "高": 1100}.get(budget_level, 520)
             hotels = []
-            for index, poi in enumerate(data.get("pois", [])[:limit]):
-                detail = {}
-                poi_id = poi.get("id")
-                if poi_id and not poi.get("location"):
-                    detail = self._call_mcp_json("maps_search_detail", {"id": poi_id})
-                merged = {**poi, **detail}
-                location = self._parse_location(merged.get("location"))
-                if not location:
-                    continue
-                rating = self._parse_rating(merged.get("rating")) or 4.6
-                hotels.append(
-                    Hotel(
-                        id=merged.get("id") or f"hotel-{index}",
-                        name=merged.get("name") or f"{city}酒店",
-                        address=merged.get("address") or f"{city}核心游览区附近",
-                        location=location,
-                        type=f"{budget_level}型酒店",
-                        rating=rating,
-                        nightly_price=price + index * 80,
-                        description=merged.get("type") or "交通便利，适合多日行程中作为稳定落脚点。",
+            seen: set[str] = set()
+            for query in self._hotel_queries(city, budget_level):
+                data = self._call_mcp_json("maps_text_search", {"keywords": query, "city": city})
+                for poi in data.get("pois", [])[: max(limit * 3, 5)]:
+                    poi_key = poi.get("id") or poi.get("name")
+                    if poi_key in seen:
+                        continue
+                    seen.add(poi_key)
+                    detail = {}
+                    poi_id = poi.get("id")
+                    if poi_id and not poi.get("location"):
+                        detail = self._call_mcp_json("maps_search_detail", {"id": poi_id})
+                    merged = {**poi, **detail}
+                    location = self._parse_location(merged.get("location"))
+                    if not location:
+                        continue
+                    rating = self._parse_rating(merged.get("rating")) or 4.6
+                    hotels.append(
+                        Hotel(
+                            id=merged.get("id") or f"hotel-{len(hotels)}",
+                            name=merged.get("name") or f"{city}酒店",
+                            address=merged.get("address") or f"{city}核心游览区附近",
+                            location=location,
+                            type=f"{budget_level}型酒店",
+                            rating=rating,
+                            nightly_price=price + len(hotels) * 80,
+                            description=merged.get("type") or "交通便利，适合多日行程中作为稳定落脚点。",
+                        )
                     )
-                )
+                    if len(hotels) >= limit:
+                        return hotels
             return hotels
         except Exception as exc:
             logger.warning("高德 MCP 酒店搜索失败，使用本地酒店数据: %s", exc)
@@ -526,6 +609,70 @@ class AmapMCPClient:
             logger.warning("高德 MCP 餐饮搜索失败，使用本地餐饮数据: %s", exc)
             return []
 
+    def _search_meals_from_http(self, city: str, budget_level: str, food_preferences: str, route_points: List[Location]) -> List[Meal]:
+        try:
+            meals = []
+            for meal_type, label in (("breakfast", "\u65e9\u9910"), ("lunch", "\u5348\u9910"), ("dinner", "\u665a\u9910")):
+                query = self._meal_query(city, label, food_preferences)
+                data = self._amap_place_text(query, city)
+                candidates = []
+                for poi in data.get("pois", [])[:3]:
+                    merged = dict(poi)
+                    if not merged.get("city") and merged.get("cityname"):
+                        merged["city"] = merged.get("cityname")
+                    if not self._is_relevant_restaurant_poi(merged, city):
+                        continue
+                    location = self._parse_location(merged.get("location"))
+                    if not location:
+                        continue
+                    candidates.append(self._poi_to_meal(merged, meal_type, budget_level, location, route_points))
+                if candidates:
+                    candidates.sort(key=lambda item: self._meal_sort_key(item, route_points))
+                    meals.append(candidates[0])
+            return meals
+        except Exception as exc:
+            logger.warning("高德 HTTP 餐饮搜索失败，使用本地餐饮数据: %s", exc)
+            return []
+
+    def _amap_place_text(self, keywords: str, city: str) -> dict:
+        start = perf_counter()
+        params = {
+            "key": self.api_key,
+            "keywords": keywords,
+            "city": city,
+            "citylimit": "true",
+            "offset": 10,
+            "extensions": "all",
+            "output": "json",
+        }
+        try:
+            response = self.http_client.get(
+                "https://restapi.amap.com/v3/place/text",
+                params=params,
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if str(data.get("status")) != "1":
+                raise RuntimeError(data.get("info") or "Amap place text search failed")
+            record_api_call(
+                component="amap_http",
+                operation="place_text",
+                request_payload={"url": "https://restapi.amap.com/v3/place/text", "params": params},
+                response_payload=data,
+                duration_ms=elapsed_ms(start),
+            )
+            return data
+        except Exception as exc:
+            record_api_call(
+                component="amap_http",
+                operation="place_text",
+                request_payload={"url": "https://restapi.amap.com/v3/place/text", "params": params},
+                error=str(exc),
+                duration_ms=elapsed_ms(start),
+            )
+            raise
+
     def _get_weather_from_mcp(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         try:
             data = self._call_mcp_json("maps_weather", {"city": self._weather_city_code(city)})
@@ -551,12 +698,32 @@ class AmapMCPClient:
     def _call_mcp_json(self, tool_name: str, arguments: dict[str, Any]) -> dict:
         if not self.mcp_caller:
             return {}
-        result = self.mcp_caller.call_tool(tool_name, arguments)
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, str):
-            return self._extract_json_object(result)
-        return {}
+        start = perf_counter()
+        try:
+            result = self.mcp_caller.call_tool(tool_name, arguments)
+            if isinstance(result, dict):
+                data = result
+            elif isinstance(result, str):
+                data = self._extract_json_object(result)
+            else:
+                data = {}
+            record_api_call(
+                component="amap_mcp",
+                operation=tool_name,
+                request_payload=arguments,
+                response_payload=data,
+                duration_ms=elapsed_ms(start),
+            )
+            return data
+        except Exception as exc:
+            record_api_call(
+                component="amap_mcp",
+                operation=tool_name,
+                request_payload=arguments,
+                error=str(exc),
+                duration_ms=elapsed_ms(start),
+            )
+            raise
 
     def _extract_json_object(self, text: str) -> dict:
         try:
@@ -602,12 +769,59 @@ class AmapMCPClient:
             category=category,
         )
 
-    def _fallback_meals(self, city: str, budget_level: str) -> List[Meal]:
+    def _fallback_meals(self, city: str, budget_level: str, route_points: List[Location] | None = None) -> List[Meal]:
+        local_meals = self._local_meals(city, budget_level)
+        if local_meals:
+            selected = []
+            for meal_type in ("breakfast", "lunch", "dinner"):
+                candidates = [meal for meal in local_meals if meal.type == meal_type]
+                if candidates:
+                    candidates.sort(key=lambda item: self._meal_sort_key(item, route_points or []))
+                    selected.append(candidates[0])
+            if selected:
+                return selected
         base = {"低": 35, "中等": 70, "高": 150}.get(budget_level, 70)
         return [
             Meal(type="breakfast", name=f"{city}胡同早餐", address="酒店周边", estimated_cost=max(20, base - 35), description="豆浆、包子或当地早餐，节省出行时间。"),
             Meal(type="lunch", name=f"{city}特色午餐", address="当日景点附近", estimated_cost=base, description="选择评分稳定、排队可控的本地餐厅。"),
             Meal(type="dinner", name=f"{city}风味晚餐", address="夜游区域附近", estimated_cost=base + 35, description="安排在返程动线附近，避免夜间跨城折返。"),
+        ]
+
+    def _local_meals(self, city: str, budget_level: str) -> List[Meal]:
+        base = {"低": 35, "中等": 70, "高": 150}.get(budget_level, 70)
+        if city != "珠海":
+            return []
+        return [
+            Meal(
+                id="local-zhuhai-breakfast-xinhaili",
+                type="breakfast",
+                name="新海利海鲜餐厅",
+                address="珠海市香洲区",
+                estimated_cost=max(35, base),
+                description="珠海老牌早茶和海鲜餐厅，适合安排广式早茶。",
+                rating=4.5,
+                category="餐饮服务;早茶;海鲜",
+            ),
+            Meal(
+                id="local-zhuhai-lunch-yijian",
+                type="lunch",
+                name="益健美食大广场",
+                address="珠海市香洲区",
+                estimated_cost=base,
+                description="本地综合型粤菜餐厅，适合午餐和多人同行。",
+                rating=4.4,
+                category="餐饮服务;中餐厅;粤菜",
+            ),
+            Meal(
+                id="local-zhuhai-dinner-jinyuexuan",
+                type="dinner",
+                name="金悦轩海鲜酒家",
+                address="珠海市香洲区情侣路沿线",
+                estimated_cost=max(base + 35, 120),
+                description="以海鲜和广式点心为特色，适合晚餐或景观用餐。",
+                rating=4.6,
+                category="餐饮服务;中餐厅;海鲜",
+            ),
         ]
 
     def _meal_query(self, city: str, label: str, food_preferences: str) -> str:
@@ -1185,9 +1399,28 @@ class UnsplashMCPClient:
             return None
 
     def _get_json(self, url: str, params: dict, headers: dict | None = None) -> dict:
-        response = self.http_client.get(url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        start = perf_counter()
+        try:
+            response = self.http_client.get(url, params=params, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            record_api_call(
+                component="image_http",
+                operation="get_json",
+                request_payload={"url": url, "params": params, "headers": headers or {}},
+                response_payload=data,
+                duration_ms=elapsed_ms(start),
+            )
+            return data
+        except Exception as exc:
+            record_api_call(
+                component="image_http",
+                operation="get_json",
+                request_payload={"url": url, "params": params, "headers": headers or {}},
+                error=str(exc),
+                duration_ms=elapsed_ms(start),
+            )
+            raise
 
     def _log_image_event(
         self,

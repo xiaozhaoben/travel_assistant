@@ -10,8 +10,9 @@ import app.main as main_module
 from app.main import app
 from app.core.config import get_settings
 from app.domain.models import Attraction, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
-from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
+from app.integrations.services import AmapMCPClient, AmapStdioMCPToolCaller, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
+from app.storage.plan_log import PlanLogRecorder
 from app.workflows.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
 
 
@@ -38,6 +39,10 @@ class FakeLangChainAgent:
     def invoke(self, state):
         self.calls.append(state)
         return {"messages": [FakeMessage(self.content)]}
+
+    def stream(self, state, **kwargs):
+        self.calls.append(state)
+        yield (FakeMessage(self.content), {"kwargs": kwargs})
 
 
 class FakeHttpResponse:
@@ -309,7 +314,6 @@ def test_local_fallback_recommends_real_zhuhai_attractions():
     assert "梅溪牌坊旅游区" in names
     assert all("珠海城市公园" != name for name in names)
     assert all("珠海观景地" != name for name in names)
-
 
 
 def test_local_fallback_recommends_real_guangzhou_attractions():
@@ -613,6 +617,80 @@ def test_amap_client_uses_mcp_for_poi_search_and_detail():
     assert pois[0].name == "测试景点"
     assert pois[0].location.longitude == 116.40
     assert pois[0].ticket_price > 0
+
+
+def test_amap_client_uses_city_hotel_keywords_for_hotel_search():
+    caller = FakeMCPCaller(
+        [
+            {"pois": []},
+            {
+                "pois": [
+                    {
+                        "id": "H0001",
+                        "name": "珠海中海铂尔曼酒店",
+                        "type": "住宿服务;宾馆酒店;五星级宾馆",
+                        "address": "九洲大道西2029号",
+                        "location": "113.541746,22.237681",
+                        "rating": "4.7",
+                    }
+                ]
+            },
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller)
+
+    hotels = amap.search_hotels("珠海", "中等", limit=1)
+
+    assert hotels[0].name == "珠海中海铂尔曼酒店"
+    assert caller.calls[0]["arguments"]["keywords"] == "珠海舒适型酒店"
+    assert caller.calls[1]["arguments"]["keywords"] == "珠海酒店"
+
+
+def test_plan_log_recorder_captures_api_calls_and_redacts_keys():
+    http = FakeHttpClient([{"status": "1", "pois": []}])
+    amap = AmapMCPClient(api_key="secret-amap-key", mcp_caller=None, http_client=http)
+
+    with PlanLogRecorder() as logs:
+        amap._amap_place_text("北京早餐", "北京")
+
+    assert len(logs.entries) == 1
+    entry = logs.entries[0]
+    assert entry.event_type == "api_call"
+    assert entry.component == "amap_http"
+    assert entry.operation == "place_text"
+    assert entry.request_payload["params"]["key"] == "***REDACTED***"
+    assert entry.response_payload == {"status": "1", "pois": []}
+
+
+def test_plan_log_recorder_captures_llm_input_and_output(monkeypatch):
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unsupported model")))
+
+    class EmptyAmap:
+        def search_pois(self, city, keywords, limit=9, **kwargs):
+            return []
+
+    agent = AttractionSearchAgent(
+        EmptyAmap(),
+        UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False),
+        llm=FakeLLM(json.dumps({"queries": ["北京故宫博物院"]}, ensure_ascii=False)),
+    )
+    requirement = TravelRequirement(
+        prompt="我想去北京玩 1 天，喜欢历史文化",
+        city="北京",
+        days=1,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+
+    with PlanLogRecorder() as logs:
+        agent.run(requirement)
+
+    llm_logs = [entry for entry in logs.entries if entry.event_type == "llm_call"]
+    assert llm_logs
+    assert llm_logs[0].component == "AttractionSearchAgent"
+    assert "北京" in llm_logs[0].request_payload["prompt"]
+    assert "北京故宫博物院" in llm_logs[0].response_payload["content"]
 
 
 def test_amap_client_skips_detail_when_text_search_has_location():
@@ -1031,15 +1109,102 @@ def test_amap_client_uses_mcp_for_restaurant_meals_near_day_route():
     assert all(call["tool_name"] == "maps_text_search" for call in caller.calls)
 
 
-def test_amap_client_falls_back_to_template_meals_without_mcp():
+def test_amap_client_falls_back_to_local_city_meals_without_mcp():
     amap = AmapMCPClient(api_key="")
 
     meals = amap.search_meals("珠海", "中等", food_preferences="素食")
 
     assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
-    assert meals[0].name == "珠海胡同早餐"
+    assert meals[0].name == "新海利海鲜餐厅"
     assert meals[1].estimated_cost == 70
+    assert meals[0].id == "local-zhuhai-breakfast-xinhaili"
+
+
+def test_amap_client_falls_back_to_template_meals_for_unknown_city_without_mcp():
+    amap = AmapMCPClient(api_key="")
+
+    meals = amap.search_meals("北京", "中等", food_preferences="素食")
+
+    assert [meal.type for meal in meals] == ["breakfast", "lunch", "dinner"]
+    assert meals[0].name == "北京胡同早餐"
     assert meals[0].location is None
+
+
+def test_amap_client_uses_http_restaurant_search_when_mcp_unavailable():
+    class MissingMCPCaller:
+        def call_tool(self, tool_name, arguments):
+            raise FileNotFoundError("uvx")
+
+    client = FakeHttpClient(
+        [
+            {
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "http-breakfast",
+                        "name": "\u73e0\u6d77\u8001\u5b57\u53f7\u65e9\u8336",
+                        "address": "\u60c5\u4fa3\u4e2d\u8def1\u53f7",
+                        "type": "\u9910\u996e\u670d\u52a1;\u4e2d\u9910\u5385;\u5e7f\u4e1c\u83dc",
+                        "location": "113.5760,22.2920",
+                        "cityname": "\u73e0\u6d77\u5e02",
+                        "biz_ext": {"rating": "4.7"},
+                    }
+                ],
+            },
+            {
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "http-lunch",
+                        "name": "\u73e0\u6d77\u6d77\u9c9c\u996d\u5e97",
+                        "address": "\u6d77\u8679\u8def8\u53f7",
+                        "type": "\u9910\u996e\u670d\u52a1;\u4e2d\u9910\u5385;\u6d77\u9c9c",
+                        "location": "113.5770,22.2930",
+                        "cityname": "\u73e0\u6d77\u5e02",
+                    }
+                ],
+            },
+            {
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "http-dinner",
+                        "name": "\u5510\u5bb6\u6e7e\u98ce\u5473\u9910\u5385",
+                        "address": "\u5510\u5bb6\u6e7e\u9547",
+                        "type": "\u9910\u996e\u670d\u52a1;\u4e2d\u9910\u5385;\u672c\u5730\u83dc",
+                        "location": "113.5960,22.3580",
+                        "cityname": "\u73e0\u6d77\u5e02",
+                    }
+                ],
+            },
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=MissingMCPCaller(), http_client=client)
+
+    meals = amap.search_meals(
+        "\u73e0\u6d77",
+        "\u4e2d\u7b49",
+        route_points=[{"longitude": 113.576561, "latitude": 22.292980}],
+    )
+
+    assert [meal.id for meal in meals] == ["http-breakfast", "http-lunch", "http-dinner"]
+    assert meals[0].name == "\u73e0\u6d77\u8001\u5b57\u53f7\u65e9\u8336"
+    assert meals[0].location.longitude == 113.5760
+    assert all(call["url"] == "https://restapi.amap.com/v3/place/text" for call in client.calls)
+    assert client.calls[0]["params"]["keywords"] == "\u73e0\u6d77\u65e9\u9910"
+
+
+def test_amap_stdio_mcp_caller_finds_winget_uvx_when_path_is_stale(monkeypatch):
+    expected = r"C:\Users\Administrator\AppData\Local\Microsoft\WinGet\Links\uvx.exe"
+    monkeypatch.setattr("app.integrations.services.shutil.which", lambda command: None)
+    monkeypatch.setattr("app.integrations.services.os.getenv", lambda key, default=None: r"C:\Users\Administrator\AppData\Local" if key == "LOCALAPPDATA" else default)
+    monkeypatch.setattr("app.integrations.services.os.path.exists", lambda path: path == expected)
+
+    caller = AmapMCPClient(api_key="", mcp_caller=None)
+    resolver = AmapStdioMCPToolCaller("key")
+
+    assert resolver._resolve_uvx_command() == expected
+    assert caller.mcp_caller is None
 
 
 def test_amap_client_prefers_restaurants_near_day_route_over_slightly_higher_rating():
@@ -1433,12 +1598,23 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
         "days_count": 1,
         "preferences": ["历史文化"],
         "budget_level": "中等",
+        "map_center": [116.397, 39.916],
+        "weather": [
+            {
+                "date": start.isoformat(),
+                "day_weather": "晴",
+                "night_weather": "多云",
+                "day_temp": "25℃",
+                "night_temp": 15,
+                "wind": "东北风1-3级",
+            }
+        ],
         "days": [
             {
                 "day_number": 1,
                 "date": start.isoformat(),
                 "theme": "历史文化",
-                "transport": "地铁 + 步行",
+                "transport": {"mode": "地铁 + 步行", "cost_estimate": 20},
                 "hotel": {"id": "hotel-0", "name": "模型精选酒店"},
                 "activities": [
                     {
@@ -1459,7 +1635,7 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
             "total_hotels": 0,
             "total_meals": 0,
             "total_transportation": 0,
-            "total": 0,
+            "total": 999,
         },
         "overall_suggestions": "热门景点提前预约。",
         "agent_trace": "plan_generated_v1.0",
@@ -1478,10 +1654,126 @@ def test_planner_agent_repairs_common_llm_schema_variants(monkeypatch):
     assert plan.generation_mode == "llm"
     assert plan.days[0].day_index == 1
     assert plan.days[0].hotel.name
+    assert plan.days[0].transportation == "地铁 + 步行"
     assert plan.days[0].attractions[0].address
     assert plan.days[0].meals[0].type == "breakfast"
-    assert plan.budget.total > 0
+    assert plan.weather[0].suggestion
+    assert plan.weather[0].day_temp == 25
+    assert plan.map_center.longitude == 116.397
+    assert plan.budget.total_attractions > 0
+    assert plan.budget.total_hotels > 0
+    assert plan.budget.total_meals > 0
+    assert plan.budget.total_transportation > 0
+    assert plan.budget.total == (
+        plan.budget.total_attractions
+        + plan.budget.total_hotels
+        + plan.budget.total_meals
+        + plan.budget.total_transportation
+    )
+    assert plan.budget.total != 999
     assert plan.overall_suggestions == ["热门景点提前预约。"]
+
+
+def test_planner_agent_preserves_llm_recommended_attraction_outside_source_pool(monkeypatch):
+    start = date.today() + timedelta(days=7)
+    amap = AmapMCPClient(api_key="")
+    attractions = amap._fallback_attractions_for_city("珠海")
+    weather = amap.get_weather("珠海", start, 2)
+    hotels = amap.search_hotels("珠海", "中等", limit=3)
+    llm_payload = {
+        "city": "珠海",
+        "days_count": 2,
+        "preferences": ["历史文化"],
+        "budget_level": "中等",
+        "days": [
+            {
+                "day_index": 1,
+                "date": start.isoformat(),
+                "summary": "上午游览圆明新园，感受岭南园林。",
+                "attractions": [{"name": "圆明新园"}],
+            },
+            {
+                "day_index": 2,
+                "date": (start + timedelta(days=1)).isoformat(),
+                "summary": "上午漫步唐家古镇，下午前往斗门御温泉，享受温泉放松。",
+                "attractions": [
+                    {"name": "唐家古镇"},
+                    {
+                        "name": "斗门御温泉",
+                        "category": "休闲温泉",
+                        "address": "珠海市斗门区斗门镇",
+                        "location": {"longitude": 113.21015, "latitude": 22.23098},
+                        "visit_duration_minutes": 180,
+                        "description": "由大模型根据用户想泡温泉的需求推荐，适合半日放松。",
+                        "ticket_price": 198,
+                    },
+                ],
+            },
+        ],
+        "weather": [item.model_dump(mode="json") for item in weather],
+        "budget": {"total": 0},
+        "map_center": {"longitude": 113.576, "latitude": 22.275},
+        "overall_suggestions": ["第二天预留温泉放松时间。"],
+    }
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        raise RuntimeError("unsupported model")
+
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
+    planner = PlannerAgent(llm=FakeLLM(json.dumps(llm_payload, ensure_ascii=False)))
+    requirement = TravelRequirement(
+        prompt="我想去珠海玩 2 天，喜欢历史文化，预算中等，第二天想去泡温泉",
+        city="珠海",
+        days=2,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=start,
+    )
+
+    result = planner.run(requirement, attractions, weather, hotels)
+    second_day_names = [item.name for item in result.selected_plan.days[1].attractions]
+
+    assert result.generation_mode == "llm"
+    assert "斗门御温泉" in second_day_names
+
+
+def test_planner_agent_searches_image_for_llm_attraction_name():
+    class FakeImageProvider:
+        def __init__(self):
+            self.queries = []
+
+        def image_for(self, query):
+            self.queries.append(query)
+            return "https://example.test/yu-hot-spring.jpg"
+
+    images = FakeImageProvider()
+    planner = PlannerAgent(llm=None, image_provider=images)
+    fallback = Attraction(
+        id="fallback",
+        name="\u4f1a\u540c\u53e4\u6751\u65c5\u6e38\u533a",
+        category="\u5386\u53f2\u6587\u5316",
+        address="\u73e0\u6d77\u5e02\u9999\u6d32\u533a",
+        location=Location(longitude=113.5, latitude=22.3),
+        visit_duration_minutes=120,
+        description="\u4fdd\u5b58\u8f83\u5b8c\u6574\u7684\u5cad\u5357\u6751\u843d\u3002",
+        ticket_price=0,
+        image_url="https://example.test/wrong-fallback.jpg",
+    )
+
+    repaired = planner._repair_llm_attraction(
+        {
+            "name": "\u73e0\u6d77\u5fa1\u6e29\u6cc9",
+            "address": "\u73e0\u6d77\u5e02\u6597\u95e8\u533a\u6597\u95e8\u9547\u5fa1\u6e29\u6cc9\u5ea6\u5047\u6751",
+            "location": {"longitude": 113.2456, "latitude": 22.1982},
+            "ticket_price": 168,
+        },
+        fallback,
+        day_index=1,
+        offset=1,
+        city="\u73e0\u6d77",
+    )
+
+    assert images.queries == ["\u73e0\u6d77 \u73e0\u6d77\u5fa1\u6e29\u6cc9"]
+    assert repaired["image_url"] == "https://example.test/yu-hot-spring.jpg"
 
 
 def test_planner_agent_prefers_real_amap_meals_over_generic_llm_meal_text():
@@ -1661,6 +1953,7 @@ def test_api_plan_persists_report_and_returns_report_id():
     class FakeReportStore:
         def __init__(self):
             self.saved = []
+            self.saved_logs = []
 
         def health(self):
             return {"enabled": True, "ok": True}
@@ -1672,6 +1965,9 @@ def test_api_plan_persists_report_and_returns_report_id():
                 "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
                 "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
             }
+
+        def save_plan_logs(self, report_id, logs):
+            self.saved_logs.append({"report_id": report_id, "logs": logs})
 
     store = FakeReportStore()
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
@@ -1686,6 +1982,7 @@ def test_api_plan_persists_report_and_returns_report_id():
     assert payload["report_created_at"] == "2026-05-19T08:00:00Z"
     assert store.saved[0]["request"].prompt == "我想去北京玩 1 天，喜欢历史文化，预算中等"
     assert store.saved[0]["result"].selected_option_id == "balanced"
+    assert store.saved_logs[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
     main_module.report_store = None
 
 

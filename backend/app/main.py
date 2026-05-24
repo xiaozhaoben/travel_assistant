@@ -22,6 +22,7 @@ from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, travel_feeds
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.vector_store import create_travel_vector_store
+from .storage.plan_log import PlanLogRecorder
 from .storage.report_store import create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
@@ -98,10 +99,13 @@ def plan_trip_usage():
 
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
 def plan_trip(request: TripPlanRequest):
-    result = orchestrator.plan(request)
+    with PlanLogRecorder() as plan_logs:
+        result = orchestrator.plan(request)
     if report_store is not None:
         try:
             report = report_store.save_report(request, result)
+            if hasattr(report_store, "save_plan_logs"):
+                report_store.save_plan_logs(report["id"], plan_logs.entries)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"报告数据库写入失败: {exc}") from exc
         result = result.model_copy(

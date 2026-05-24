@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - lets tests run without database extras
     Jsonb = None
 
 from app.domain.models import ResearchSnippet, TripPlan, TripPlanRequest, TripPlanningResult, TripReportDetail, TripReportSummary
+from app.storage.plan_log import PlanLogEntry
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,25 @@ CREATE TABLE IF NOT EXISTS trip_report_revisions (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS plan_execution_logs (
+    id uuid PRIMARY KEY,
+    report_id uuid NOT NULL REFERENCES trip_reports(id) ON DELETE CASCADE,
+    sequence integer NOT NULL,
+    event_type text NOT NULL,
+    component text NOT NULL,
+    operation text NOT NULL,
+    request_payload jsonb NOT NULL,
+    response_payload jsonb,
+    error text,
+    duration_ms integer,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_trip_reports_created_at ON trip_reports (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trip_reports_city ON trip_reports (city);
 CREATE INDEX IF NOT EXISTS idx_trip_report_revisions_report_id ON trip_report_revisions (report_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_report_id ON plan_execution_logs (report_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_event_type ON plan_execution_logs (event_type, created_at DESC);
 """
 
 
@@ -161,6 +178,39 @@ class PostgresReportStore:
                         Jsonb(research_payload),
                         plan.budget.total,
                     ),
+                )
+
+    def save_plan_logs(self, report_id: str, logs: list[PlanLogEntry]) -> None:
+        if not logs:
+            return
+        self._ensure_schema_once()
+        rows = [
+            (
+                str(uuid4()),
+                report_id,
+                log.sequence,
+                log.event_type,
+                log.component,
+                log.operation,
+                Jsonb(log.request_payload),
+                Jsonb(log.response_payload) if log.response_payload is not None else None,
+                log.error,
+                log.duration_ms,
+                log.created_at,
+            )
+            for log in logs
+        ]
+        with psycopg.connect(self.database_url) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO plan_execution_logs (
+                        id, report_id, sequence, event_type, component, operation,
+                        request_payload, response_payload, error, duration_ms, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))
+                    """,
+                    rows,
                 )
 
     def list_reports(self, limit: int = 50) -> list[TripReportSummary]:
