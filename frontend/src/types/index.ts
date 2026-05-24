@@ -204,6 +204,10 @@ export interface ServiceHealth {
     table_ready?: boolean
     error?: string
   }
+  web_search?: {
+    enabled: boolean
+    tool: string
+  }
 }
 
 export interface TravelKnowledgeSource {

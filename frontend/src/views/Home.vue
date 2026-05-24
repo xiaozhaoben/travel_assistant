@@ -25,6 +25,9 @@
           <a-tag :color="serviceHealth?.travel_knowledge?.enabled ? 'green' : 'orange'">
             知识库：{{ serviceHealth?.travel_knowledge?.enabled ? 'PostgreSQL' : '未配置' }}
           </a-tag>
+          <a-tag :color="serviceHealth?.web_search?.enabled ? 'green' : 'orange'">
+            实时搜索：{{ serviceHealth?.web_search?.enabled ? serviceHealth.web_search.tool : '未配置' }}
+          </a-tag>
         </div>
       </div>
 
@@ -230,16 +233,16 @@
           <a-empty v-if="!qaAnswer" description="旅行问答会显示在这里" />
           <template v-else>
             <div class="qa-answer-text">{{ qaAnswer.answer }}</div>
-            <a-divider orientation="left">参考资料</a-divider>
-            <a-empty v-if="!qaAnswer.sources.length" description="暂无参考资料" />
-            <a-list v-else :data-source="qaAnswer.sources" size="small">
-              <template #renderItem="{ item }">
-                <a-list-item>
-                  <a-list-item-meta :title="item.title" :description="item.summary" />
-                  <a-tag>{{ item.source }}</a-tag>
-                </a-list-item>
-              </template>
-            </a-list>
+<!--            <a-divider orientation="left">参考资料</a-divider>-->
+<!--            <a-empty v-if="!qaAnswer.sources.length" description="暂无参考资料" />-->
+<!--            <a-list v-else :data-source="qaAnswer.sources" size="small">-->
+<!--              <template #renderItem="{ item }">-->
+<!--                <a-list-item>-->
+<!--                  <a-list-item-meta :title="item.title" :description="item.summary" />-->
+<!--                  <a-tag>{{ item.source }}</a-tag>-->
+<!--                </a-list-item>-->
+<!--              </template>-->
+<!--            </a-list>-->
           </template>
         </div>
       </div>
@@ -302,7 +305,13 @@ async function handleIngestNews() {
   ingestSummary.value = ''
   try {
     const result = await ingestTravelNews()
-    ingestSummary.value = `已读取 ${result.total_seen} 条，新增 ${result.total_added} 个知识片段`
+    if (result.total_seen > 0 && result.total_added === 0) {
+      ingestSummary.value = `已读取 ${result.total_seen} 条，未新增知识片段，内容可能已在库中`
+    } else if (result.total_seen === 0) {
+      ingestSummary.value = '本次没有读取到可用 RSS 条目'
+    } else {
+      ingestSummary.value = `已读取 ${result.total_seen} 条，新增 ${result.total_added} 个知识片段`
+    }
     if (result.errors.length) {
       message.warning(`部分 RSS 源失败：${result.errors[0]}`)
     } else {
@@ -371,6 +380,7 @@ onMounted(async () => {
       planner_mode: 'fast',
       cache_enabled: false,
       external_api_disabled: true,
+      web_search: { enabled: false, tool: 'web_search' },
     }
   }
 })

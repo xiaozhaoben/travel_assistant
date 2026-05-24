@@ -29,6 +29,10 @@ PLANNER_MODE=fast
 RESEARCH_CACHE_ENABLED=true
 RESEARCH_CACHE_TTL_SECONDS=86400
 AMAP_API_KEY=你的高德Web服务Key
+WEB_SEARCH_MCP_COMMAND=["npx","-y","tavily-mcp"]
+WEB_SEARCH_MCP_TOOL=web_search
+EMBEDDING_MODEL_ID=tongyi-embedding-vision-plus-2026-03-06
+EMBEDDING_DIMENSIONS=512
 UNSPLASH_ACCESS_KEY=你的Unsplash Access Key
 ```
 
@@ -92,21 +96,27 @@ set VITE_AMAP_SECURITY_JS_CODE=你的高德Web端安全密钥
 
 知识库复用当前项目的 PostgreSQL 配置，并要求数据库安装 `pgvector` 扩展。配置 `DATABASE_URL` 或 `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 后，首次调用资讯入库会自动创建 `travel_knowledge_documents` 表。
 
-RSS 源配置在 `backend/app/knowledge/news_agent.py` 的 `travel_feeds` 变量中：
+智能问答优先使用实时搜索 MCP 处理预约、开放时间、闭馆、限流、节假日和交通公告类问题。可配置：
 
-```python
-travel_feeds = [
-    "https://www.tuniu.com/rss",
-    "https://rsshub.app/mafengwo/note",
-    "https://rsshub.app/zhihu/collection/xxxxx",
-]
+```env
+WEB_SEARCH_MCP_COMMAND=["npx","-y","tavily-mcp"]
+WEB_SEARCH_MCP_TOOL=web_search
 ```
+
+RSS 源只作为长期知识库补充，可通过 `TRAVEL_FEEDS` 配置，多个 URL 用英文逗号分隔：
+
+```env
+RSSHUB_BASE_URL=https://rsshub.rssforever.com
+TRAVEL_FEEDS=
+```
+
+当 `TRAVEL_FEEDS` 为空时，会使用内置推荐源：马蜂窝热门/最新游记、iMuseum 北京/上海展览、国博/中国美术馆资讯、12306 动态、国航公告、广州/福州地铁公告、活动行探索。`rsshub.app` 不可访问时，可把 `RSSHUB_BASE_URL` 改成自建 RSSHub 或其他可用公共实例。
 
 问答流程：
 
 1. `POST /api/news/ingest` 抓取 RSS，使用 `feedparser` 解析并清洗 HTML。
-2. 新闻内容切片后写入 PostgreSQL `vector(384)` 字段。
-3. `POST /api/qa/ask` 先向量召回，再按参考项目的 RAG prompt 风格生成回答。
+2. 新闻内容使用 LangChain `RecursiveCharacterTextSplitter` 按中文标点切片，再调用百炼 `tongyi-embedding-vision-plus-2026-03-06` 写入 PostgreSQL `vector(512)` 字段。
+3. `POST /api/qa/ask` 对时效问题先走 Web Search MCP，再合并向量召回资料。
 4. 如果未配置大模型，会返回基于召回资料的本地摘要；如果未配置数据库，会明确提示先配置知识库。
 
 ## API
@@ -165,3 +175,39 @@ npm run build
 - Unsplash：https://unsplash.com/developers
 - Google Places Photos：https://developers.google.com/maps/documentation/places/web-service/photos
 - Foursquare Places：https://location.foursquare.com/developer/
+
+## Docker 与部署
+
+本地同时启动前后端：
+
+```bash
+copy backend\.env.example backend\.env
+docker compose up --build
+```
+
+- 后端：http://localhost:8010
+- 前端：http://localhost:8080
+
+后端单独部署到服务器：
+
+```bash
+docker build -t travel-assistant-backend ./backend
+docker run -d --name travel-assistant-backend --env-file backend/.env -p 8000:8000 travel-assistant-backend
+```
+
+服务器上的 `backend/.env` 需要把 `HOST=0.0.0.0`，并在 `CORS_ORIGINS` 里加入 GitHub Pages 前端地址，例如 `https://你的用户名.github.io/travel_assistant`。如果后端要给 GitHub Pages 调用，建议放在 HTTPS 域名后面。
+
+前端也可以用 Docker 预览静态产物：
+
+```bash
+docker build -t travel-assistant-frontend ./frontend --build-arg VITE_API_BASE_URL=https://你的后端域名
+docker run -d --name travel-assistant-frontend -p 8080:80 travel-assistant-frontend
+```
+
+GitHub Pages 部署使用 `.github/workflows/deploy-frontend-pages.yml`。在仓库的 `Settings -> Variables -> Actions` 配置：
+
+- `VITE_API_BASE_URL`：服务器后端地址，例如 `https://api.example.com`
+- `VITE_BASE_PATH`：项目 Pages 默认可不填；自定义域名时设为 `/`
+- `VITE_AMAP_WEB_JS_KEY` / `VITE_AMAP_SECURITY_JS_CODE`：需要真实高德 JS 地图时填写
+
+推送到 `main` 或 `master` 后会自动构建 `frontend` 并发布到 GitHub Pages。

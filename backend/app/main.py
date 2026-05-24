@@ -19,7 +19,7 @@ from .domain.models import (
     TripReportSummary,
 )
 from .integrations.services import UnsplashMCPClient
-from .knowledge.news_agent import TravelNewsIngestionAgent, travel_feeds
+from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.vector_store import create_travel_vector_store
 from .storage.plan_log import PlanLogRecorder
@@ -79,6 +79,10 @@ def health():
         "travel_knowledge": travel_vector_store.health()
         if travel_vector_store is not None
         else {"enabled": False, "ok": False},
+        "web_search": {
+            "enabled": bool(settings.web_search_mcp_command),
+            "tool": settings.web_search_mcp_tool,
+        },
     }
 
 
@@ -126,7 +130,7 @@ def ask_travel_question(request: TravelQARequest):
 
 @app.post("/api/news/ingest", response_model=ApiResponse[TravelNewsIngestResult])
 def ingest_travel_news(request: TravelNewsIngestRequest):
-    feed_urls = request.feed_urls or travel_feeds
+    feed_urls = request.feed_urls or configured_travel_feeds()
     result = TravelNewsIngestResult.model_validate(news_agent.fetch_travel_feeds(feed_urls))
     if result.errors and result.total_seen == 0:
         raise HTTPException(status_code=503, detail="; ".join(result.errors))
@@ -139,7 +143,7 @@ def travel_news_status():
         "success": True,
         "message": "旅行知识库状态",
         "data": {
-            "configured_feeds": travel_feeds,
+            "configured_feeds": configured_travel_feeds(),
             "knowledge_store": travel_vector_store.health()
             if travel_vector_store is not None
             else {"enabled": False, "ok": False},

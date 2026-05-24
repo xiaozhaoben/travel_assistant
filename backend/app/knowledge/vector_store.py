@@ -7,8 +7,16 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from http import HTTPStatus
 from typing import Any, Iterable
 from uuid import uuid4
+
+from app.core.config import get_settings
+
+try:  # pragma: no cover - optional until LangChain text splitters are installed
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except Exception:  # pragma: no cover
+    RecursiveCharacterTextSplitter = None
 
 try:  # pragma: no cover - optional until PostgreSQL extras are installed
     import psycopg
@@ -21,7 +29,8 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_DIMENSIONS = 384
+EMBEDDING_DIMENSIONS = get_settings().embedding_dimensions
+DEFAULT_TEXT_SEPARATORS = ["\n\n", "\n", ".", "!", "?", "。", "！", "？", "，", "、", " ", ""]
 
 
 SCHEMA_SQL = f"""
@@ -93,18 +102,100 @@ class HashingEmbeddingService:
         return grams
 
 
+class DashScopeMultimodalEmbeddingService:
+    """DashScope/Bailian embedding adapter for the configured Tongyi embedding model."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        dimensions: int = EMBEDDING_DIMENSIONS,
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.dimensions = dimensions
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed_text(text)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed_text(text) for text in texts]
+
+    def _embed_text(self, text: str) -> list[float]:
+        import dashscope
+
+        text = normalize_text(text)
+        if not text:
+            return [0.0] * self.dimensions
+
+        response = dashscope.MultiModalEmbedding.call(
+            model=self.model,
+            input=[{"text": text}],
+            api_key=self.api_key,
+            dimension=self.dimensions,
+        )
+        if response.status_code != HTTPStatus.OK:
+            raise RuntimeError(
+                f"DashScope embedding failed: status={response.status_code}, code={response.code}, message={response.message}"
+            )
+        embeddings = response.output.get("embeddings") if response.output else None
+        if not embeddings:
+            raise RuntimeError("DashScope embedding response did not include embeddings.")
+        vector = [float(value) for value in embeddings[0]["embedding"]]
+        if len(vector) != self.dimensions:
+            raise RuntimeError(f"Embedding dimension mismatch: expected {self.dimensions}, got {len(vector)}")
+        return vector
+
+
+def create_embedding_service():
+    settings = get_settings()
+    if settings.embedding_provider.lower() == "dashscope" and settings.embedding_api_key:
+        return DashScopeMultimodalEmbeddingService(
+            model=settings.embedding_model_id,
+            api_key=settings.embedding_api_key,
+            dimensions=settings.embedding_dimensions,
+        )
+    return HashingEmbeddingService(settings.embedding_dimensions)
+
+
 class PostgresTravelVectorStore:
-    def __init__(self, database_url: str, embeddings: HashingEmbeddingService | None = None):
+    def __init__(self, database_url: str, embeddings: Any | None = None):
         if psycopg is None or dict_row is None or Jsonb is None:
             raise RuntimeError("Travel vector store requires psycopg. Run: pip install -r backend/requirements.txt")
         self.database_url = database_url
-        self.embeddings = embeddings or HashingEmbeddingService()
+        self.embeddings = embeddings or create_embedding_service()
+        self.embedding_dimensions = int(getattr(self.embeddings, "dimensions", EMBEDDING_DIMENSIONS))
         self._schema_ready = False
 
     def ensure_schema(self) -> None:
         with psycopg.connect(self.database_url) as conn:
             conn.execute(SCHEMA_SQL)
+            self._ensure_embedding_column_dimension(conn)
         self._schema_ready = True
+
+    def _ensure_embedding_column_dimension(self, conn) -> None:
+        with conn.cursor(row_factory=dict_row) as cur:
+            row = cur.execute(
+                """
+                SELECT atttypmod AS typmod
+                FROM pg_attribute
+                WHERE attrelid = 'travel_knowledge_documents'::regclass
+                  AND attname = 'embedding'
+                  AND NOT attisdropped
+                """
+            ).fetchone()
+            current_dimensions = int(row["typmod"]) if row and row["typmod"] and row["typmod"] > 0 else None
+            if current_dimensions == self.embedding_dimensions:
+                return
+            logger.warning(
+                "Travel knowledge embedding dimension changed from %s to %s; clearing old embeddings.",
+                current_dimensions,
+                self.embedding_dimensions,
+            )
+            cur.execute("TRUNCATE TABLE travel_knowledge_documents")
+            cur.execute(
+                f"ALTER TABLE travel_knowledge_documents ALTER COLUMN embedding TYPE vector({self.embedding_dimensions})"
+            )
 
     def _ensure_schema_once(self) -> None:
         if not self._schema_ready:
@@ -121,7 +212,19 @@ class PostgresTravelVectorStore:
                             to_regclass('travel_knowledge_documents') IS NOT NULL AS table_ready
                         """
                     ).fetchone()
-            return {"enabled": True, "ok": True, **dict(row or {})}
+                    result = {"enabled": True, "ok": True, **dict(row or {})}
+                    if result.get("table_ready"):
+                        stats = cur.execute(
+                            """
+                            SELECT
+                                count(*) AS document_count,
+                                max(created_at) AS latest_document_created_at,
+                                max(published_at) AS latest_published_at
+                            FROM travel_knowledge_documents
+                            """
+                        ).fetchone()
+                        result.update(dict(stats or {}))
+            return result
         except Exception as exc:
             logger.warning("Travel vector store health check failed: %s", exc)
             return {"enabled": True, "ok": False, "error": str(exc)}
@@ -209,6 +312,14 @@ def normalize_text(value: str) -> str:
 def split_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[str]:
     if not text:
         return []
+    if RecursiveCharacterTextSplitter is not None:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=overlap,
+            separators=DEFAULT_TEXT_SEPARATORS,
+            length_function=len,
+        )
+        return [chunk for chunk in splitter.split_text(text) if chunk.strip()]
     if len(text) <= chunk_size:
         return [text]
     chunks: list[str] = []

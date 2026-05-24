@@ -1,21 +1,53 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+
+from app.core.config import ENV_PATH
 from app.knowledge.vector_store import PostgresTravelVectorStore, normalize_text
 
 logger = logging.getLogger(__name__)
+load_dotenv(ENV_PATH, override=False)
 
 
-travel_feeds = [
-    "https://www.tuniu.com/rss",
-    "https://rsshub.app/mafengwo/note",
-    "https://rsshub.app/zhihu/collection/xxxxx",
+DEFAULT_RSSHUB_BASE_URL = "https://rsshub.rssforever.com"
+DEFAULT_FEED_TIMEOUT_SECONDS = 20.0
+DEFAULT_MAX_ENTRIES_PER_FEED = 5
+
+DEFAULT_RSSHUB_ROUTES = [
+    "https://www.yantian.gov.cn/rss/index.html",
+    "http://www.tianqiao.gov.cn/rss",
+    "http://www.people.com.cn/rss/politics.xml",
+    "http://guizeco.com/index.shtml"
 ]
+
+
+def configured_travel_feeds() -> list[str]:
+    raw = os.getenv("TRAVEL_FEEDS", "")
+    if raw.strip():
+        return [feed_url(item.strip()) for item in raw.split(",") if item.strip()]
+    return [feed_url(route) for route in DEFAULT_RSSHUB_ROUTES]
+
+
+def rsshub_url(route: str) -> str:
+    base_url = os.getenv("RSSHUB_BASE_URL", DEFAULT_RSSHUB_BASE_URL).strip().rstrip("/")
+    return f"{base_url}/{route.lstrip('/')}"
+
+
+def feed_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        return value
+    return rsshub_url(value)
+
+
+travel_feeds = configured_travel_feeds()
 
 
 class TravelNewsIngestionAgent:
@@ -33,7 +65,7 @@ class TravelNewsIngestionAgent:
                 "errors": ["PostgreSQL vector store is not configured."],
             }
 
-        urls = [url for url in (feed_urls or travel_feeds) if url]
+        urls = [url for url in (feed_urls or travel_feeds) if is_usable_feed_url(url)]
         logger.info("开始获取RSS数据...")
         total_seen = 0
         total_added = 0
@@ -53,8 +85,18 @@ class TravelNewsIngestionAgent:
         for feed_url in urls:
             logger.info("正在处理: %s", feed_url)
             try:
-                feed = feedparser.parse(feed_url)
-                entries = list(getattr(feed, "entries", []) or [])
+                feed = parse_feed(feedparser, feed_url)
+                all_entries = list(getattr(feed, "entries", []) or [])
+                entries = all_entries[:max_entries_per_feed()]
+                if len(all_entries) > len(entries):
+                    logger.info(
+                        "RSS条目过多，仅处理前 %s 条: %s total=%s",
+                        len(entries),
+                        feed_url,
+                        len(all_entries),
+                    )
+                if not all_entries and getattr(feed, "bozo", False):
+                    errors.append(f"{feed_url}: {getattr(feed, 'bozo_exception', 'RSS parsed 0 entries')}")
                 added_for_feed = 0
                 for entry in entries:
                     total_seen += 1
@@ -71,6 +113,7 @@ class TravelNewsIngestionAgent:
                     )
                 total_added += added_for_feed
                 feed_results.append({"url": feed_url, "seen": len(entries), "added": added_for_feed})
+                logger.info("RSS处理完成: %s seen=%s added=%s", feed_url, len(entries), added_for_feed)
             except Exception as exc:
                 logger.warning("RSS处理失败 %s: %s", feed_url, exc)
                 errors.append(f"{feed_url}: {exc}")
@@ -82,6 +125,37 @@ class TravelNewsIngestionAgent:
             "feeds": feed_results,
             "errors": errors,
         }
+
+
+def parse_feed(feedparser: Any, feed_url: str) -> Any:
+    import httpx
+
+    timeout_seconds = feed_timeout_seconds()
+    response = httpx.get(
+        feed_url,
+        follow_redirects=True,
+        timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds)),
+        headers={
+            "User-Agent": "travel-assistant/1.0 (+https://localhost)",
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+        },
+    )
+    response.raise_for_status()
+    return feedparser.parse(response.content, response_headers=dict(response.headers))
+
+
+def feed_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("TRAVEL_FEED_TIMEOUT_SECONDS", DEFAULT_FEED_TIMEOUT_SECONDS)))
+    except ValueError:
+        return DEFAULT_FEED_TIMEOUT_SECONDS
+
+
+def max_entries_per_feed() -> int:
+    try:
+        return max(1, int(os.getenv("TRAVEL_FEED_MAX_ENTRIES_PER_FEED", DEFAULT_MAX_ENTRIES_PER_FEED)))
+    except ValueError:
+        return DEFAULT_MAX_ENTRIES_PER_FEED
 
 
 def fetch_travel_feeds(feed_urls: Iterable[str], vector_store: PostgresTravelVectorStore | None) -> int:
@@ -116,6 +190,13 @@ def parse_entry_datetime(entry: Any) -> datetime | None:
 def source_name_from_url(url: str) -> str:
     host = urlparse(url).netloc or "rss"
     return host.replace("www.", "")
+
+
+def is_usable_feed_url(url: str) -> bool:
+    if not url:
+        return False
+    lowered = url.strip().lower()
+    return "xxxxx" not in lowered
 
 
 if __name__ == "__main__":

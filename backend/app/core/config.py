@@ -34,6 +34,10 @@ class Settings:
     amap_api_key: str | None
     web_search_mcp_command: str | None
     web_search_mcp_tool: str
+    embedding_provider: str
+    embedding_model_id: str
+    embedding_dimensions: int
+    embedding_api_key: str | None
     planner_mode: str
     research_cache_enabled: bool
     research_cache_ttl_seconds: int
@@ -89,6 +93,15 @@ def get_settings() -> Settings:
         amap_api_key=os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY"),
         web_search_mcp_command=os.getenv("WEB_SEARCH_MCP_COMMAND"),
         web_search_mcp_tool=os.getenv("WEB_SEARCH_MCP_TOOL", "web_search"),
+        embedding_provider=os.getenv("EMBEDDING_PROVIDER", "dashscope"),
+        embedding_model_id=os.getenv("EMBEDDING_MODEL_ID", "tongyi-embedding-vision-plus-2026-03-06"),
+        embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "512")),
+        embedding_api_key=(
+            os.getenv("EMBEDDING_API_KEY")
+            or os.getenv("DASHSCOPE_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        ),
         planner_mode=os.getenv("PLANNER_MODE", "fast"),
         research_cache_enabled=_env_bool("RESEARCH_CACHE_ENABLED", default=True),
         research_cache_ttl_seconds=int(os.getenv("RESEARCH_CACHE_TTL_SECONDS", "86400")),

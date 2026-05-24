@@ -128,7 +128,7 @@ def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path
 
 
 def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
-    from app.knowledge.news_agent import TravelNewsIngestionAgent
+    from app.knowledge import news_agent
 
     feedparser_stub = SimpleNamespace(
         parse=lambda url: SimpleNamespace(
@@ -144,9 +144,10 @@ def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
         )
     )
     monkeypatch.setitem(sys.modules, "feedparser", feedparser_stub)
+    monkeypatch.setattr(news_agent, "parse_feed", lambda parser, url: parser.parse(url))
     store = FakeTravelVectorStore()
 
-    result = TravelNewsIngestionAgent(store).fetch_travel_feeds(["https://feeds.example.test/travel"])
+    result = news_agent.TravelNewsIngestionAgent(store).fetch_travel_feeds(["https://feeds.example.test/travel"])
 
     assert result["total_seen"] == 1
     assert result["total_added"] == 1
@@ -159,6 +160,7 @@ def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
 def test_travel_qa_agent_answers_from_retrieved_vector_documents():
     from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
     from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
 
     doc = KnowledgeDocument(
         id="doc-1",
@@ -170,7 +172,7 @@ def test_travel_qa_agent_answers_from_retrieved_vector_documents():
         published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
         score=0.91,
     )
-    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=None)
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=None, web_client=WebSearchMCPClient(command=""))
 
     result = agent.ask("端午去南京要注意什么？")
 
@@ -178,6 +180,44 @@ def test_travel_qa_agent_answers_from_retrieved_vector_documents():
     assert result.retrieved_count == 1
     assert "提前预约" in result.answer
     assert result.sources[0].title == "南京端午预约提醒"
+
+
+def test_travel_qa_agent_uses_realtime_search_for_time_sensitive_questions():
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    class RealtimeCaller:
+        def __init__(self):
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "results": [
+                    {
+                        "title": "南京市文旅局端午预约公告",
+                        "url": "https://wlj.nanjing.gov.cn/notice",
+                        "content": "端午期间热门景区实行实名预约，建议错峰前往夫子庙和博物馆。",
+                    },
+                    {
+                        "title": "南京旅行社区经验",
+                        "url": "https://www.mafengwo.cn/nanjing",
+                        "content": "游客分享夜游夫子庙体验，晚间人流较多。",
+                    },
+                ]
+            }
+
+    caller = RealtimeCaller()
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore(), llm=None, web_client=web)
+
+    result = agent.ask("端午去南京三天有哪些预约和交通注意事项？")
+
+    assert caller.calls
+    assert "官方" in caller.calls[0]["arguments"]["query"]
+    assert result.retrieved_count >= 2
+    assert result.sources[0].source == "web-official"
+    assert "实名预约" in result.answer
 
 
 def test_settings_support_reference_env_names(monkeypatch):
