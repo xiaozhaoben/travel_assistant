@@ -264,7 +264,7 @@ const ingestSummary = ref('')
 const serviceStatusText = computed(() => {
   if (!serviceHealth.value) return '正在连接后端服务...'
   if (serviceHealth.value.external_api_disabled) return '当前强制使用本地 fallback 数据，适合离线调试。'
-  if (serviceHealth.value.llm.enabled) return '后端已读取大模型配置，规划时会优先调用 LangChain 大模型。'
+  if (serviceHealth.value.llm.enabled) return '后端已读取大模型配置，规划时会优先调用大模型。'
   return '后端未检测到大模型 Key，会使用本地 fallback 生成可编辑行程。'
 })
 
