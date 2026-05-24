@@ -180,10 +180,16 @@
       </a-form>
     </a-card>
 
-    <a-button type="primary" class="qa-floating-button" @click="qaModalOpen = true">
-      <template #icon><MessageOutlined /></template>
-      <span>智能问答</span>
-    </a-button>
+    <div class="side-action-buttons">
+      <a-button type="primary" class="side-action-button" @click="qaModalOpen = true">
+        <template #icon><MessageOutlined /></template>
+        <span>智能问答</span>
+      </a-button>
+      <a-button type="primary" class="side-action-button report-action-button" @click="router.push('/reports')">
+        <template #icon><FileTextOutlined /></template>
+        <span>历史报表</span>
+      </a-button>
+    </div>
 
     <a-modal v-model:open="qaModalOpen" width="920px" :footer="null" centered wrap-class-name="qa-modal">
       <template #title>
@@ -245,7 +251,14 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { CompassOutlined, DatabaseOutlined, MessageOutlined, SendOutlined, SyncOutlined } from '@ant-design/icons-vue'
+import {
+  CompassOutlined,
+  DatabaseOutlined,
+  FileTextOutlined,
+  MessageOutlined,
+  SendOutlined,
+  SyncOutlined,
+} from '@ant-design/icons-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import { askTravelQuestion, generateTripPlan, healthCheck, ingestTravelNews } from '@/services/api'
 import type { ServiceHealth, TravelQAResponse, TripFormData } from '@/types'

@@ -10,6 +10,8 @@ import type {
   TripPlan,
   TripPlanningResult,
   TripPlanResponse,
+  TripReportDetail,
+  TripReportSummary,
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
@@ -152,6 +154,37 @@ function normalizePlanningResult(raw: any, formData: TripFormData): TripPlanning
   }
 }
 
+function formDataFromReport(raw: any, selectedPlan: any): TripFormData {
+  const days = selectedPlan?.days || []
+  return {
+    city: selectedPlan?.city || raw?.city || '',
+    start_date: raw?.start_date || days[0]?.date || '',
+    end_date: raw?.end_date || days[days.length - 1]?.date || '',
+    travel_days: Number(raw?.days || selectedPlan?.days_count || days.length || 1),
+    transportation: raw?.transportation || days[0]?.transportation || '公共交通',
+    accommodation: raw?.accommodation || days[0]?.hotel?.type || '舒适型酒店',
+    preferences: Array.isArray(selectedPlan?.preferences) ? selectedPlan.preferences : [],
+    free_text_input: '',
+    travel_style: String(raw?.travel_style || '经典均衡'),
+    companions: String(raw?.companions || ''),
+    food_preferences: String(raw?.food_preferences || ''),
+    must_visit: Array.isArray(raw?.must_visit) ? raw.must_visit.join('，') : '',
+    avoid_places: Array.isArray(raw?.avoid_places) ? raw.avoid_places.join('，') : '',
+    low_intensity: Boolean(raw?.low_intensity),
+  }
+}
+
+export function normalizeReportPlanningResult(detail: TripReportDetail): TripPlanningResult {
+  const rawResult = {
+    ...detail.result,
+    report_id: detail.id,
+    report_created_at: detail.created_at,
+    report_updated_at: detail.updated_at,
+  }
+  const selectedPlan = detail.selected_plan || (detail.result as any).options?.[0]?.plan
+  return normalizePlanningResult(rawResult, formDataFromReport(detail.request, selectedPlan))
+}
+
 export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
   try {
     const response = await apiClient.post('/api/trip/plan', {
@@ -176,6 +209,22 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
   } catch (error: any) {
     throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
   }
+}
+
+export async function listTripReports(limit = 50): Promise<TripReportSummary[]> {
+  const response = await apiClient.get('/api/reports', { params: { limit } })
+  if (!response.data.success) {
+    throw new Error(response.data.message || '历史报表获取失败')
+  }
+  return response.data.data || []
+}
+
+export async function getTripReport(reportId: string): Promise<TripReportDetail> {
+  const response = await apiClient.get(`/api/reports/${reportId}`)
+  if (!response.data.success || !response.data.data) {
+    throw new Error(response.data.message || '历史报表详情获取失败')
+  }
+  return response.data.data
 }
 
 export async function recalculateTripPlan(

@@ -115,19 +115,24 @@
             </a-card>
           </div>
 
-          <a-card id="map" title="景点地图" :bordered="false" class="map-card">
+          <a-card id="map" title="地图点位" :bordered="false" class="map-card">
             <div v-if="mapMode === 'amap'" id="amap-container" class="amap-real"></div>
             <div v-else class="mock-map">
               <div
-                v-for="(pin, index) in mapPins"
-                :key="`${pin.name}-${index}`"
-                class="mock-pin"
+                v-for="pin in mapPins"
+                :key="pin.id"
+                :class="['mock-pin', `mock-pin-${pin.kind}`]"
                 :style="{ left: `${pin.x}%`, top: `${pin.y}%` }"
-                :title="pin.name"
+                :title="pin.title"
               >
-                {{ index + 1 }}
+                {{ pin.label }}
               </div>
               <div class="mock-map-hint">{{ mapHint }}</div>
+            </div>
+            <div v-if="mapPointSummary.length" class="map-legend">
+              <span v-for="item in mapPointSummary" :key="item.kind">
+                <i :class="`map-legend-dot map-legend-dot-${item.kind}`"></i>{{ item.label }}
+              </span>
             </div>
           </a-card>
         </section>
@@ -255,9 +260,21 @@ import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
 import travelHeroUrl from '@/assets/travel-qa-hero.png'
-import type { Attraction, TripPlanningResult, TripPlan } from '@/types'
+import type { Attraction, Hotel, Location, Meal, TripPlanningResult, TripPlan } from '@/types'
 
 type MapMode = 'amap' | 'mock'
+type MapPointKind = 'attraction' | 'hotel' | 'meal'
+
+interface MapPoint {
+  id: string
+  kind: MapPointKind
+  name: string
+  title: string
+  label: string
+  address?: string
+  location: Location
+  detailLines: string[]
+}
 
 const router = useRouter()
 const planningResult = ref<TripPlanningResult | null>(null)
@@ -501,17 +518,17 @@ function renderAmapMarkers() {
   amapInstance.clearMap()
 
   const attractions = allAttractions.value
-  const markers = attractions.map((attraction, index) => {
+  const markers = allMapPoints.value.map((point) => {
     const marker = new AMapRuntime.Marker({
-      position: [attraction.location.longitude, attraction.location.latitude],
-      title: attraction.name,
+      position: [point.location.longitude, point.location.latitude],
+      title: point.title,
       label: {
-        content: `<div class="amap-label">${index + 1}</div>`,
+        content: `<div class="amap-label amap-label-${point.kind}">${escapeHtml(point.label)}</div>`,
         offset: new AMapRuntime.Pixel(0, -28),
       },
     })
     const infoWindow = new AMapRuntime.InfoWindow({
-      content: `<div style="padding:8px 10px;max-width:240px"><strong>${attraction.name}</strong><br/>${attraction.address}<br/>游览 ${attraction.visit_duration} 分钟</div>`,
+      content: buildInfoWindowContent(point),
       offset: new AMapRuntime.Pixel(0, -32),
     })
     marker.on('click', () => infoWindow.open(amapInstance, marker.getPosition()))
@@ -521,6 +538,11 @@ function renderAmapMarkers() {
   if (markers.length > 0) amapInstance.add(markers)
   drawAmapRoutes(attractions)
   if (markers.length > 0) amapInstance.setFitView(markers)
+}
+
+function buildInfoWindowContent(point: MapPoint) {
+  const lines = [point.address, ...point.detailLines].filter(Boolean).map((line) => escapeHtml(line || ''))
+  return `<div style="padding:8px 10px;max-width:260px"><strong>${escapeHtml(point.name)}</strong><br/>${lines.join('<br/>')}</div>`
 }
 
 function drawAmapRoutes(attractions: Attraction[]) {
@@ -552,26 +574,136 @@ const allAttractions = computed(() => {
   return tripPlan.value?.days.flatMap((day) => day.attractions) || []
 })
 
+const allMapPoints = computed<MapPoint[]>(() => {
+  if (!tripPlan.value) return []
+
+  const points: MapPoint[] = []
+  const seenHotels = new Set<string>()
+  let attractionIndex = 0
+
+  tripPlan.value.days.forEach((day) => {
+    day.attractions.forEach((attraction) => {
+      if (!isValidLocation(attraction.location)) return
+      attractionIndex += 1
+      points.push({
+        id: `attraction-${day.day_index}-${attractionIndex}-${attraction.name}`,
+        kind: 'attraction',
+        name: attraction.name,
+        title: `D${day.day_index} ${attraction.name}`,
+        label: String(attractionIndex),
+        address: attraction.address,
+        location: attraction.location,
+        detailLines: [`D${day.day_index}`, `游览 ${attraction.visit_duration} 分钟`],
+      })
+    })
+
+    const hotelPoint = createHotelPoint(day.hotel, day.day_index, seenHotels)
+    if (hotelPoint) points.push(hotelPoint)
+
+    day.meals.forEach((meal) => {
+      const mealPoint = createMealPoint(meal, day.day_index)
+      if (mealPoint) points.push(mealPoint)
+    })
+  })
+
+  return points
+})
+
 const mapCenter = computed<[number, number]>(() => {
-  const first = allAttractions.value[0]
+  const first = allMapPoints.value[0]
   return first ? [first.location.longitude, first.location.latitude] : [116.397128, 39.916527]
 })
 
 const mapPins = computed(() => {
-  const attractions = allAttractions.value
-  if (attractions.length === 0) return []
-  const lngs = attractions.map((item) => item.location.longitude)
-  const lats = attractions.map((item) => item.location.latitude)
+  const points = allMapPoints.value
+  if (points.length === 0) return []
+  const lngs = points.map((item) => item.location.longitude)
+  const lats = points.map((item) => item.location.latitude)
   const minLng = Math.min(...lngs)
   const maxLng = Math.max(...lngs)
   const minLat = Math.min(...lats)
   const maxLat = Math.max(...lats)
   const lngSpan = maxLng - minLng || 1
   const latSpan = maxLat - minLat || 1
-  return attractions.map((item) => ({
+  return points.map((item) => ({
+    id: item.id,
+    kind: item.kind,
     name: item.name,
+    title: item.title,
+    label: item.label,
     x: 10 + ((item.location.longitude - minLng) / lngSpan) * 80,
     y: 90 - ((item.location.latitude - minLat) / latSpan) * 80,
   }))
 })
+
+const mapPointSummary = computed(() => {
+  const kinds = new Set(allMapPoints.value.map((point) => point.kind))
+  return [
+    { kind: 'attraction', label: '景点' },
+    { kind: 'hotel', label: '酒店' },
+    { kind: 'meal', label: '餐饮' },
+  ].filter((item) => kinds.has(item.kind as MapPointKind))
+})
+
+function createHotelPoint(hotel: Hotel | undefined, dayIndex: number, seenHotels: Set<string>): MapPoint | null {
+  if (!hotel?.location || !isValidLocation(hotel.location)) return null
+  const hotelKey = `${hotel.name}-${hotel.location.longitude}-${hotel.location.latitude}`
+  if (seenHotels.has(hotelKey)) return null
+  seenHotels.add(hotelKey)
+  return {
+    id: `hotel-${dayIndex}-${hotel.name}`,
+    kind: 'hotel',
+    name: hotel.name,
+    title: `D${dayIndex} ${hotel.name}`,
+    label: `H${dayIndex}`,
+    address: hotel.address,
+    location: hotel.location,
+    detailLines: [`D${dayIndex} 酒店`, hotel.price_range, hotel.rating ? `评分 ${hotel.rating}` : ''],
+  }
+}
+
+function createMealPoint(meal: Meal, dayIndex: number): MapPoint | null {
+  if (!meal.location || !isValidLocation(meal.location)) return null
+  return {
+    id: `meal-${dayIndex}-${meal.type}-${meal.name}`,
+    kind: 'meal',
+    name: meal.name,
+    title: `D${dayIndex} ${getMealLabel(meal.type)}`,
+    label: mealMarkerLabel(meal.type),
+    address: meal.address,
+    location: meal.location,
+    detailLines: [
+      `D${dayIndex} ${getMealLabel(meal.type)}`,
+      meal.estimated_cost ? `约 ¥${meal.estimated_cost}` : '',
+      meal.rating ? `评分 ${meal.rating}` : '',
+    ],
+  }
+}
+
+function mealMarkerLabel(type: string) {
+  const labels: Record<string, string> = {
+    breakfast: 'B',
+    lunch: 'L',
+    dinner: 'D',
+    snack: 'S',
+  }
+  return labels[type] || 'M'
+}
+
+function isValidLocation(location: Location | undefined | null): location is Location {
+  return Boolean(location && Number.isFinite(location.longitude) && Number.isFinite(location.latitude))
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (char) => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }
+    return entities[char]
+  })
+}
 </script>

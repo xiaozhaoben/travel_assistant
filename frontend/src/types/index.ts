@@ -97,11 +97,18 @@ export interface TripPlanOption {
   plan: TripPlan
 }
 
+export interface QualityReport {
+  score: number
+  warnings: string[]
+  recommendations: string[]
+}
+
 export interface TripPlanningResult {
   selected_option_id: string
   options: TripPlanOption[]
   research_context: ResearchSnippet[]
   clarifying_suggestions: string[]
+  quality_report?: QualityReport
   report_id?: string | null
   report_created_at?: string | null
   report_updated_at?: string | null
@@ -135,6 +142,34 @@ export interface TripPlanResponse {
   data?: TripPlanningResult
 }
 
+export interface TripReportSummary {
+  id: string
+  prompt: string
+  city: string
+  days_count: number
+  budget_total: number
+  generation_mode: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TripReportRevision {
+  id: string
+  report_id: string
+  operation: string
+  plan: Record<string, unknown>
+  research_context: ResearchSnippet[]
+  budget_total: number
+  created_at: string
+}
+
+export interface TripReportDetail extends TripReportSummary {
+  request: Record<string, unknown>
+  result: Record<string, unknown>
+  selected_plan: Record<string, unknown>
+  revisions: TripReportRevision[]
+}
+
 export interface ServiceHealth {
   status: string
   service: string
@@ -145,8 +180,18 @@ export interface ServiceHealth {
     disabled: boolean
   }
   amap_configured: boolean
+  amap_transport?: string
   unsplash_configured: boolean
+  planner_mode?: string
+  cache_enabled?: boolean
   external_api_disabled: boolean
+  image_providers?: {
+    wikimedia: boolean
+    openverse: boolean
+    pexels_configured: boolean
+    pixabay_configured: boolean
+    unsplash_configured: boolean
+  }
   database?: {
     enabled: boolean
     ok: boolean
