@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from datetime import timedelta
@@ -22,6 +23,7 @@ from app.domain.models import (
     Attraction,
     DayPlan,
     Hotel,
+    Location,
     Meal,
     ResearchSnippet,
     TripPlan,
@@ -473,6 +475,14 @@ class PlannerAgent:
         selected_attractions = attractions[: min(len(attractions), 6)]
         selected_hotels = hotels[: min(len(hotels), 2)]
         research_context = research_context or []
+        guidance_days = min(requirement.days, 3)
+        guidance_per_day = 2 if requirement.low_intensity else 3
+        guidance_per_day = max(1, min(guidance_per_day, len(selected_attractions) // guidance_days or guidance_per_day))
+        daily_groups = self._cluster_attractions_by_day(
+            selected_attractions,
+            guidance_days,
+            guidance_per_day,
+        )
         payload = {
             "user_request": requirement.model_dump(mode="json"),
             "attractions": [
@@ -502,12 +512,24 @@ class PlannerAgent:
                 }
                 for item in selected_hotels
             ],
+            "route_guidance": [
+                {
+                    "day_index": index + 1,
+                    "preferred_attractions": [item.name for item in group],
+                    "max_pair_distance_km": round(self._route_span_km([item.location for item in group]), 1),
+                    "nearest_hotel": self._nearest_hotel_name(group, selected_hotels),
+                }
+                for index, group in enumerate(daily_groups)
+                if group
+            ],
             "research_context": [item.model_dump(mode="json") for item in research_context[:6]],
         }
         return (
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
             "options 必须包含 balanced、relaxed、deep_dive 三套方案；每项包含 id,title,style,suitable_for,highlights,tradeoffs,plan。"
             "plan 字段必须匹配 TripPlan：city, days_count, preferences, budget_level, days, weather, budget, map_center, overall_suggestions, agent_trace。"
+            "必须优先遵守 route_guidance：同一天景点要在相邻片区或顺路动线上，酒店选择靠近当天首末景点或公共交通换乘点，餐饮安排在酒店或当天景点附近。"
+            "不要把东西南北相距很远的景点硬塞进同一天；远郊、海岛、温泉、主题乐园等应单独安排半天到一天。"
             "如果用户需求中出现资料列表外但真实存在的目的地，请由你判断并放入对应 day.attractions，提供 name,category,address,location,visit_duration_minutes,description,ticket_price；"
             "每日 summary 中提到的游览地点必须同步出现在该日 attractions，不要只写在文字描述里。"
             "请把 research_context 中的预约、交通、避坑、餐饮信息写入建议或每日摘要；不要 Markdown，不要额外解释。\n"
@@ -599,15 +621,21 @@ class PlannerAgent:
 
         source_attractions = {item.id: item for item in attractions}
         source_attractions.update({item.name: item for item in attractions})
+        target_per_day = 2 if requirement.low_intensity else 3
+        target_per_day = max(1, min(target_per_day, len(attractions) // requirement.days or target_per_day))
+        fallback_groups = self._cluster_attractions_by_day(attractions, requirement.days, target_per_day)
         normalized_days = []
         raw_days = self._ensure_list(normalized.get("days"), [])
         for index in range(requirement.days):
             raw_day = raw_days[index] if index < len(raw_days) and isinstance(raw_days[index], dict) else {}
-            fallback_hotel = hotels[index % len(hotels)]
-            raw_hotel = raw_day.get("hotel")
-            day_hotel = self._repair_hotel(raw_hotel, fallback_hotel)
             raw_attractions = raw_day.get("attractions") or raw_day.get("activities") or raw_day.get("spots") or []
             repaired_attractions = self._repair_attractions(raw_attractions, attractions, source_attractions, index, requirement.city)
+            repaired_attractions = self._spatially_repair_day_attractions(repaired_attractions, fallback_groups, index)
+            route_locations = [item["location"] for item in repaired_attractions]
+            fallback_hotel = self._closest_hotel_for_route(hotels, route_locations, hotels[index % len(hotels)])
+            raw_hotel = raw_day.get("hotel")
+            day_hotel = self._repair_hotel(raw_hotel, fallback_hotel, route_locations, hotels)
+            repaired_attractions = self._order_repaired_attractions(repaired_attractions, day_hotel.get("location"))
             route_locations = [item["location"] for item in repaired_attractions]
             meals = self._repair_meals(raw_day.get("meals"), requirement.city, requirement.budget_level, requirement.food_preferences, route_locations)
             normalized_days.append(
@@ -632,13 +660,19 @@ class PlannerAgent:
         normalized["budget"] = self._budget_from_day_dicts(normalized_days)
         return normalized
 
-    def _repair_hotel(self, raw_hotel, fallback_hotel: Hotel) -> dict:
+    def _repair_hotel(self, raw_hotel, fallback_hotel: Hotel, route_locations=None, hotels: List[Hotel] | None = None) -> dict:
         hotel = fallback_hotel.model_dump(mode="json")
         if not isinstance(raw_hotel, dict):
             return hotel
         for key in ("id", "name", "address", "location", "type", "rating", "nightly_price", "description"):
             if raw_hotel.get(key) not in (None, ""):
                 hotel[key] = raw_hotel[key]
+        if hotels and route_locations:
+            closest = self._closest_hotel_for_route(hotels, route_locations, fallback_hotel).model_dump(mode="json")
+            current_distance = self._hotel_route_distance_km(hotel, route_locations)
+            closest_distance = self._hotel_route_distance_km(closest, route_locations)
+            if current_distance > closest_distance + 3:
+                return closest
         return hotel
 
     def _repair_attractions(self, raw_items, attractions: List[Attraction], source_attractions: dict, day_index: int, city: str) -> list[dict]:
@@ -710,6 +744,145 @@ class PlannerAgent:
         if self.amap is not None:
             return self.amap.city_center(city).model_dump(mode="json")
         return AmapMCPClient(api_key="").city_center(city).model_dump(mode="json")
+
+    def _cluster_attractions_by_day(self, attractions: List[Attraction], days_count: int, target_per_day: int) -> list[list[Attraction]]:
+        if days_count <= 0:
+            return []
+        remaining = list(attractions)
+        groups: list[list[Attraction]] = []
+        for _ in range(days_count):
+            if not remaining:
+                groups.append([])
+                continue
+            seed = remaining.pop(0)
+            group = [seed]
+            while remaining and len(group) < target_per_day:
+                next_item = min(
+                    remaining,
+                    key=lambda item: (
+                        self._route_expansion_km([candidate.location for candidate in group], item.location),
+                        attractions.index(item) if item in attractions else 0,
+                    ),
+                )
+                remaining.remove(next_item)
+                group.append(next_item)
+            groups.append(group)
+        return groups
+
+    def _spatially_repair_day_attractions(
+        self,
+        repaired_attractions: list[dict],
+        fallback_groups: list[list[Attraction]],
+        day_index: int,
+    ) -> list[dict]:
+        if day_index >= len(fallback_groups) or not fallback_groups[day_index]:
+            return repaired_attractions
+        fallback_items = [item.model_dump(mode="json") for item in fallback_groups[day_index]]
+        if not repaired_attractions:
+            return fallback_items
+        if any(str(item.get("id") or "").startswith("llm-") for item in repaired_attractions):
+            return repaired_attractions
+        current_span = self._route_span_km([item.get("location") for item in repaired_attractions])
+        fallback_span = self._route_span_km([item.location for item in fallback_groups[day_index]])
+        if len(repaired_attractions) >= 2 and current_span > max(10.0, fallback_span * 1.8 + 2.0):
+            return fallback_items
+        return repaired_attractions
+
+    def _order_repaired_attractions(self, attractions: list[dict], start_location) -> list[dict]:
+        if len(attractions) <= 1:
+            return attractions
+        ordered: list[dict] = []
+        remaining = list(attractions)
+        current = self._as_location(start_location) or self._as_location(remaining[0].get("location"))
+        while remaining:
+            if current is None:
+                ordered.extend(remaining)
+                break
+            next_item = min(
+                remaining,
+                key=lambda item: self._distance_km(current, item.get("location")),
+            )
+            remaining.remove(next_item)
+            ordered.append(next_item)
+            current = self._as_location(next_item.get("location")) or current
+        return ordered
+
+    def _order_attractions_for_route(self, attractions: List[Attraction], start_location) -> List[Attraction]:
+        if len(attractions) <= 1:
+            return attractions
+        ordered: list[Attraction] = []
+        remaining = list(attractions)
+        current = self._as_location(start_location) or remaining[0].location
+        while remaining:
+            next_item = min(remaining, key=lambda item: self._distance_km(current, item.location))
+            remaining.remove(next_item)
+            ordered.append(next_item)
+            current = next_item.location
+        return ordered
+
+    def _nearest_hotel_name(self, attractions: list[Attraction], hotels: list[Hotel]) -> str | None:
+        if not attractions or not hotels:
+            return None
+        route_locations = [item.location for item in attractions]
+        return self._closest_hotel_for_route(hotels, route_locations, hotels[0]).name
+
+    def _closest_hotel_for_route(self, hotels: List[Hotel], route_locations, fallback_hotel: Hotel) -> Hotel:
+        if not hotels or not route_locations:
+            return fallback_hotel
+        return min(
+            hotels,
+            key=lambda hotel: (
+                self._hotel_route_distance_km(hotel.model_dump(mode="json"), route_locations),
+                -(hotel.rating or 0),
+            ),
+        )
+
+    def _hotel_route_distance_km(self, hotel, route_locations) -> float:
+        hotel_location = self._as_location(hotel.get("location") if isinstance(hotel, dict) else getattr(hotel, "location", None))
+        locations = [location for location in (self._as_location(item) for item in route_locations or []) if location]
+        if hotel_location is None or not locations:
+            return 0.0
+        return sum(self._distance_km(hotel_location, location) for location in locations) / len(locations)
+
+    def _route_expansion_km(self, route_locations, candidate_location) -> float:
+        locations = [location for location in (self._as_location(item) for item in route_locations or []) if location]
+        candidate = self._as_location(candidate_location)
+        if candidate is None:
+            return float("inf")
+        if not locations:
+            return 0.0
+        return min(self._distance_km(candidate, location) for location in locations)
+
+    def _route_span_km(self, route_locations) -> float:
+        locations = [location for location in (self._as_location(item) for item in route_locations or []) if location]
+        if len(locations) <= 1:
+            return 0.0
+        return max(
+            self._distance_km(left, right)
+            for left_index, left in enumerate(locations)
+            for right in locations[left_index + 1 :]
+        )
+
+    def _as_location(self, value) -> Location | None:
+        if isinstance(value, Location):
+            return value
+        repaired = self._repair_location(value)
+        if repaired is None:
+            return None
+        try:
+            return Location(longitude=float(repaired["longitude"]), latitude=float(repaired["latitude"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _distance_km(self, left, right) -> float:
+        left_location = self._as_location(left)
+        right_location = self._as_location(right)
+        if left_location is None or right_location is None:
+            return float("inf")
+        average_latitude = math.radians((left_location.latitude + right_location.latitude) / 2)
+        longitude_km = (left_location.longitude - right_location.longitude) * 111.0 * math.cos(average_latitude)
+        latitude_km = (left_location.latitude - right_location.latitude) * 111.0
+        return math.hypot(longitude_km, latitude_km)
 
     def _repair_meals(self, raw_items, city: str, budget_level: str = "中等", food_preferences: str = "", route_points=None) -> list[dict]:
         defaults = self._meals(city, budget_level, food_preferences, route_points or [])
@@ -921,11 +1094,12 @@ class PlannerAgent:
         ordered_attractions = list(attractions)
         if variant_id == "deep_dive":
             ordered_attractions = attractions[1:] + attractions[:1]
+        attraction_groups = self._cluster_attractions_by_day(ordered_attractions, requirement.days, per_day)
 
         for index in range(requirement.days):
-            start = index * per_day
-            selected = ordered_attractions[start : start + per_day] or ordered_attractions[:per_day]
-            day_hotel = hotels[index % len(hotels)]
+            selected = attraction_groups[index] if index < len(attraction_groups) and attraction_groups[index] else ordered_attractions[:per_day]
+            day_hotel = self._closest_hotel_for_route(hotels, [item.location for item in selected], hotels[index % len(hotels)])
+            selected = self._order_attractions_for_route(selected, day_hotel.location)
             meals = self._meals(requirement.city, requirement.budget_level, requirement.food_preferences, [item.location for item in selected])
             variant_summary = {
                 "balanced": "控制步行和换乘强度",

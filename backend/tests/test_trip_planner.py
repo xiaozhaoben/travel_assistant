@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.main import app
 from app.core.config import get_settings
-from app.domain.models import Attraction, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
+from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
 from app.integrations.services import AmapMCPClient, AmapStdioMCPToolCaller, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.storage.plan_log import PlanLogRecorder
@@ -1832,6 +1833,79 @@ def test_planner_agent_prefers_real_amap_meals_over_generic_llm_meal_text():
     assert meals[0]["address"] == "情侣中路1号"
     assert meals[0]["id"] == "real-breakfast"
     assert meals[0]["location"] == {"longitude": 113.576, "latitude": 22.292}
+
+
+def test_fallback_plan_groups_nearby_attractions_and_hotels_by_route():
+    planner = PlannerAgent(llm=None)
+    requirement = TravelRequirement(
+        prompt="我想去北京玩 2 天，预算中等",
+        city="北京",
+        days=2,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+    attractions = [
+        Attraction(id="a1", name="东城景点A", category="景点", address="东城", location=Location(longitude=116.400, latitude=39.900), visit_duration_minutes=90, description="东城片区", ticket_price=20),
+        Attraction(id="b1", name="西郊景点A", category="景点", address="西郊", location=Location(longitude=116.000, latitude=39.600), visit_duration_minutes=90, description="西郊片区", ticket_price=20),
+        Attraction(id="a2", name="东城景点B", category="景点", address="东城", location=Location(longitude=116.405, latitude=39.905), visit_duration_minutes=90, description="东城片区", ticket_price=20),
+        Attraction(id="b2", name="西郊景点B", category="景点", address="西郊", location=Location(longitude=116.005, latitude=39.605), visit_duration_minutes=90, description="西郊片区", ticket_price=20),
+    ]
+    hotels = [
+        Hotel(id="hotel-east", name="东城酒店", address="东城", location=Location(longitude=116.402, latitude=39.902), type="中等型酒店", rating=4.6, nightly_price=520, description="靠近东城景点"),
+        Hotel(id="hotel-west", name="西郊酒店", address="西郊", location=Location(longitude=116.002, latitude=39.602), type="中等型酒店", rating=4.6, nightly_price=520, description="靠近西郊景点"),
+    ]
+    weather = AmapMCPClient(api_key="").get_weather("北京", requirement.start_date, requirement.days)
+
+    plan = planner._fallback_plan(requirement, attractions, weather, hotels)
+
+    assert [item.name for item in plan.days[0].attractions] == ["东城景点A", "东城景点B"]
+    assert [item.name for item in plan.days[1].attractions] == ["西郊景点A", "西郊景点B"]
+    assert plan.days[0].hotel.name == "东城酒店"
+    assert plan.days[1].hotel.name == "西郊酒店"
+    assert planner._route_span_km(plan.days[0].route_points) < 1
+    assert planner._route_span_km(plan.days[1].route_points) < 1
+
+
+def test_llm_plan_normalization_repairs_cross_district_days_and_hotels():
+    planner = PlannerAgent(llm=None)
+    requirement = TravelRequirement(
+        prompt="我想去北京玩 2 天，预算中等",
+        city="北京",
+        days=2,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+    attractions = [
+        Attraction(id="a1", name="东城景点A", category="景点", address="东城", location=Location(longitude=116.400, latitude=39.900), visit_duration_minutes=90, description="东城片区", ticket_price=20),
+        Attraction(id="b1", name="西郊景点A", category="景点", address="西郊", location=Location(longitude=116.000, latitude=39.600), visit_duration_minutes=90, description="西郊片区", ticket_price=20),
+        Attraction(id="a2", name="东城景点B", category="景点", address="东城", location=Location(longitude=116.405, latitude=39.905), visit_duration_minutes=90, description="东城片区", ticket_price=20),
+        Attraction(id="b2", name="西郊景点B", category="景点", address="西郊", location=Location(longitude=116.005, latitude=39.605), visit_duration_minutes=90, description="西郊片区", ticket_price=20),
+    ]
+    hotels = [
+        Hotel(id="hotel-east", name="东城酒店", address="东城", location=Location(longitude=116.402, latitude=39.902), type="中等型酒店", rating=4.6, nightly_price=520, description="靠近东城景点"),
+        Hotel(id="hotel-west", name="西郊酒店", address="西郊", location=Location(longitude=116.002, latitude=39.602), type="中等型酒店", rating=4.6, nightly_price=520, description="靠近西郊景点"),
+    ]
+    weather = AmapMCPClient(api_key="").get_weather("北京", requirement.start_date, requirement.days)
+
+    normalized = planner._normalize_llm_data(
+        {
+            "days": [
+                {"attractions": [{"id": "a1"}, {"id": "b1"}], "hotel": hotels[1].model_dump(mode="json")},
+                {"attractions": [{"id": "a2"}, {"id": "b2"}], "hotel": hotels[0].model_dump(mode="json")},
+            ]
+        },
+        requirement,
+        attractions,
+        weather,
+        hotels,
+    )
+
+    assert [item["name"] for item in normalized["days"][0]["attractions"]] == ["东城景点A", "东城景点B"]
+    assert [item["name"] for item in normalized["days"][1]["attractions"]] == ["西郊景点A", "西郊景点B"]
+    assert normalized["days"][0]["hotel"]["name"] == "东城酒店"
+    assert normalized["days"][1]["hotel"]["name"] == "西郊酒店"
 
 
 def test_planner_prompt_limits_source_lists_for_faster_llm_response():
