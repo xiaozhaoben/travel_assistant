@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080,http://127.0.0.1:5173,http://127.0.0.1:8080}
+    ports:
+      - "8010:8000"
+    volumes:
+      - ./backend/logs:/app/logs
+      - ./backend/runtime:/app/runtime
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8010}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+        VITE_AMAP_WEB_JS_KEY: ${VITE_AMAP_WEB_JS_KEY:-}
+        VITE_AMAP_SECURITY_JS_CODE: ${VITE_AMAP_SECURITY_JS_CODE:-}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
