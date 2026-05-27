@@ -36,16 +36,17 @@ class WebSearchMCPClient:
     def available(self) -> bool:
         return bool(self.mcp_caller or self.command)
 
-    def search(self, query: str) -> list[dict[str, Any]]:
+    def search(self, query: str, extra_args: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        arguments = {"query": query, **(extra_args or {})}
         if self.mcp_caller:
             start = perf_counter()
             try:
-                raw = self.mcp_caller.call_tool(self.tool_name, {"query": query})
+                raw = self.mcp_caller.call_tool(self.tool_name, arguments)
                 results = self._normalize_result(raw)
                 record_api_call(
                     component="web_search_mcp",
                     operation=self.tool_name,
-                    request_payload={"query": query},
+                    request_payload=arguments,
                     response_payload={"results": results},
                     duration_ms=elapsed_ms(start),
                 )
@@ -54,21 +55,22 @@ class WebSearchMCPClient:
                 record_api_call(
                     component="web_search_mcp",
                     operation=self.tool_name,
-                    request_payload={"query": query},
+                    request_payload=arguments,
                     error=str(exc),
                     duration_ms=elapsed_ms(start),
                 )
                 raise
         if not self.command:
             return []
-        return self._call_stdio(query)
+        return self._call_stdio(query, extra_args=extra_args)
 
-    def _call_stdio(self, query: str) -> list[dict[str, Any]]:
+    def _call_stdio(self, query: str, extra_args: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         import anyio
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
         command = _parse_command(self.command or "")
+        arguments = {"query": query, **(extra_args or {})}
 
         async def _call() -> list[dict[str, Any]]:
             server = StdioServerParameters(
@@ -80,7 +82,7 @@ class WebSearchMCPClient:
                 async with ClientSession(read_stream, write_stream) as session:
                     with anyio.fail_after(self.timeout_seconds):
                         await session.initialize()
-                        result = await session.call_tool(self.tool_name, {"query": query})
+                        result = await session.call_tool(self.tool_name, arguments)
                     text = "\n".join(
                         getattr(item, "text", "")
                         for item in result.content
@@ -94,7 +96,7 @@ class WebSearchMCPClient:
             record_api_call(
                 component="web_search_mcp",
                 operation=self.tool_name,
-                request_payload={"query": query, "command": command},
+                request_payload={**arguments, "command": command},
                 response_payload={"results": results},
                 duration_ms=elapsed_ms(start),
             )
@@ -103,7 +105,7 @@ class WebSearchMCPClient:
             record_api_call(
                 component="web_search_mcp",
                 operation=self.tool_name,
-                request_payload={"query": query, "command": command},
+                request_payload={**arguments, "command": command},
                 error=str(exc),
                 duration_ms=elapsed_ms(start),
             )

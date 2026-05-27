@@ -1428,6 +1428,44 @@ def test_image_client_uses_web_search_before_open_sources():
     assert url == "https://cdn.example.com/gugong.jpg"
 
 
+def test_image_client_requests_and_parses_tavily_image_results():
+    from app.researching.research import WebSearchMCPClient
+
+    caller = FakeMCPCaller(
+        [
+            (
+                "Detailed Results:\n\n"
+                "Title: Zhuhai Museum travel guide\n"
+                "URL: https://example.com/zhuhai-museum\n"
+                "Content: Museum overview.\n\n"
+                "Images:\n\n"
+                "[1] URL: https://cdn.example.com/zhuhai-museum-photo.jpeg\n"
+                "   Description: Zhuhai Museum exterior photo.\n"
+            )
+        ]
+    )
+    web = WebSearchMCPClient(tool_name="tavily_search", mcp_caller=caller)
+    images = UnsplashMCPClient(
+        access_key="",
+        http_client=FakeHttpClient([]),
+        web_search_client=web,
+        enable_llm_selector=False,
+    )
+
+    url = images.image_for("Zhuhai Museum")
+
+    assert caller.calls[0] == {
+        "tool_name": "tavily_search",
+        "arguments": {
+            "query": "Zhuhai Museum landmark photo image",
+            "include_images": True,
+            "include_image_descriptions": True,
+            "max_results": 5,
+        },
+    }
+    assert url == "https://cdn.example.com/zhuhai-museum-photo.jpeg"
+
+
 def test_image_client_lets_llm_choose_web_search_image_candidate():
     from app.researching.research import WebSearchMCPClient
 

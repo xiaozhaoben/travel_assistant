@@ -1350,7 +1350,7 @@ class UnsplashMCPClient:
         search_query = f"{query} landmark photo image"
         try:
             candidates = []
-            for item in self.web_search_client.search(search_query)[:5]:
+            for item in self._search_image_candidates(search_query)[:5]:
                 url = self._extract_image_url(item)
                 if url:
                     candidates.append(
@@ -1372,6 +1372,19 @@ class UnsplashMCPClient:
             self._log_image_event("image_search_error", query, provider="web_search", error=str(exc))
             return None
         return None
+
+    def _search_image_candidates(self, query: str) -> list[dict[str, Any]]:
+        extra_args: dict[str, Any] | None = None
+        if getattr(self.web_search_client, "tool_name", "") == "tavily_search":
+            extra_args = {
+                "include_images": True,
+                "include_image_descriptions": True,
+                "max_results": 5,
+            }
+        try:
+            return self.web_search_client.search(query, extra_args=extra_args)
+        except TypeError:
+            return self.web_search_client.search(query)
 
     def _choose_image_with_llm(self, query: str, candidates: list[dict[str, Any]]) -> str | None:
         if self.llm is None:
@@ -1441,6 +1454,10 @@ class UnsplashMCPClient:
                         if nested:
                             return nested
         text = " ".join(str(item.get(field) or "") for field in ("content", "summary", "snippet"))
+        images_section = text.split("Images:", 1)[1] if "Images:" in text else ""
+        for candidate in re.findall(r"URL:\s*(https?://[^\s\"'<>]+)", images_section):
+            if self._is_http_url(candidate):
+                return candidate.rstrip(").,;]")
         for candidate in re.findall(r"https?://[^\s\"'<>]+", text):
             if self._looks_like_image_url(candidate):
                 return candidate.rstrip(").,;]")
