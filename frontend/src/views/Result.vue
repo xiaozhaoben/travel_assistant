@@ -254,12 +254,11 @@
 </template>
 
 <script setup lang="ts">
-import AMapLoader from '@amap/amap-jsapi-loader'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
-import travelHeroUrl from '@/assets/travel-qa-hero.png'
+import travelHeroUrl from '@/assets/travel-qa-hero.webp'
 import type { Attraction, Hotel, Location, Meal, TripPlanningResult, TripPlan } from '@/types'
 
 type MapMode = 'amap' | 'mock'
@@ -494,6 +493,7 @@ async function initAmap() {
     }
     mapMode.value = 'amap'
     await nextTick()
+    const { default: AMapLoader } = await import('@amap/amap-jsapi-loader')
     AMapRuntime = await AMapLoader.load({
       key,
       version: '2.0',

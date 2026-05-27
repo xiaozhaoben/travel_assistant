@@ -20,6 +20,16 @@ export default defineConfig({
     },
   },
   build: {
-    chunkSizeWarningLimit: 1800,
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vue: ['vue', 'vue-router'],
+          antd: ['ant-design-vue', '@ant-design/icons-vue'],
+          maps: ['@amap/amap-jsapi-loader'],
+          pdf: ['html2canvas', 'jspdf'],
+        },
+      },
+    },
   },
 })

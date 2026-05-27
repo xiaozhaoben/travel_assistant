@@ -10,7 +10,7 @@ body {
   border-radius: 8px;
   background:
     linear-gradient(180deg, rgba(18, 31, 42, 0.5), rgba(18, 31, 42, 0.72)),
-    url("./assets/travel-qa-hero.png");
+    url("./assets/travel-qa-hero.webp");
   background-size: cover;
   background-position: center;
 }
