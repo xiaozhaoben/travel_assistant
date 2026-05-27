@@ -5,6 +5,7 @@ import logging
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, List
 
@@ -1196,19 +1197,35 @@ class TravelAgentOrchestrator:
                 updates[field_name] = value
         if updates:
             requirement = requirement.model_copy(update=updates)
-        log_agent_event(self.attractions.name, "input", {"requirement": requirement})
-        attractions = self.attractions.run(requirement)
-        log_agent_event(self.attractions.name, "output", {"attractions": attractions})
-
-        log_agent_event(self.weather.name, "input", {"requirement": requirement})
-        weather = self.weather.run(requirement)
-        log_agent_event(self.weather.name, "output", {"weather": weather})
-
-        log_agent_event(self.hotels.name, "input", {"requirement": requirement})
-        hotels = self.hotels.run(requirement)
-        log_agent_event(self.hotels.name, "output", {"hotels": hotels})
-
-        research_context = self.research.research(requirement.city, requirement.preferences, requirement.days)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            attraction_future = executor.submit(
+                self._run_logged_agent,
+                self.attractions,
+                requirement,
+                "attractions",
+            )
+            weather_future = executor.submit(
+                self._run_logged_agent,
+                self.weather,
+                requirement,
+                "weather",
+            )
+            hotel_future = executor.submit(
+                self._run_logged_agent,
+                self.hotels,
+                requirement,
+                "hotels",
+            )
+            research_future = executor.submit(
+                self.research.research,
+                requirement.city,
+                requirement.preferences,
+                requirement.days,
+            )
+            attractions = attraction_future.result()
+            weather = weather_future.result()
+            hotels = hotel_future.result()
+            research_context = research_future.result()
 
         log_agent_event(
             self.planner.name,
@@ -1223,6 +1240,12 @@ class TravelAgentOrchestrator:
         )
         result = self.planner.run(requirement, attractions, weather, hotels, research_context)
         log_agent_event(self.planner.name, "output", {"result": result})
+        return result
+
+    def _run_logged_agent(self, agent, requirement: TravelRequirement, output_key: str):
+        log_agent_event(agent.name, "input", {"requirement": requirement})
+        result = agent.run(requirement)
+        log_agent_event(agent.name, "output", {output_key: result})
         return result
 
     def recalculate(
