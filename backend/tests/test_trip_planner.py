@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 
@@ -262,6 +263,51 @@ def test_settings_builds_database_url_from_postgres_parts(monkeypatch):
     assert settings.database_url == "postgresql://travel:secret@db.example.test:15432/travel"
 
 
+def test_database_connection_manager_uses_pool_and_closes_it():
+    from app.storage.db import DatabaseConnectionManager
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+    class FakePool:
+        instances = []
+
+        def __init__(self, conninfo, min_size, max_size, open):
+            self.conninfo = conninfo
+            self.min_size = min_size
+            self.max_size = max_size
+            self.open = open
+            self.connection_calls = 0
+            self.closed = False
+            FakePool.instances.append(self)
+
+        def connection(self):
+            self.connection_calls += 1
+            return FakeConnection()
+
+        def close(self):
+            self.closed = True
+
+    manager = DatabaseConnectionManager(
+        "postgresql://example/db",
+        pool_factory=FakePool,
+        min_size=1,
+        max_size=3,
+    )
+
+    with manager.connection() as conn:
+        assert isinstance(conn, FakeConnection)
+    manager.close()
+
+    assert FakePool.instances[0].conninfo == "postgresql://example/db"
+    assert FakePool.instances[0].connection_calls == 1
+    assert FakePool.instances[0].closed is True
+
+
 def test_settings_support_provider_disable_flags(monkeypatch):
     monkeypatch.setenv("DISABLE_LLM", "true")
     monkeypatch.setenv("DISABLE_EXTERNAL_API", "1")
@@ -287,10 +333,12 @@ def test_settings_support_provider_disable_flags(monkeypatch):
 def test_llm_settings_support_dashscope_thinking_toggle(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    monkeypatch.setenv("MCP_TIMEOUT_SECONDS", "12.5")
 
     settings = get_settings()
 
     assert settings.llm_enable_thinking is False
+    assert settings.mcp_timeout_seconds == 12.5
 
 
 def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
@@ -2195,6 +2243,123 @@ def test_api_plan_honors_structured_dates_and_days():
     assert payload["days_count"] == 2
     assert [day["date"] for day in payload["days"]] == ["2026-06-01", "2026-06-02"]
     assert [item["date"] for item in payload["weather"]] == ["2026-06-01", "2026-06-02"]
+
+
+def test_api_uses_resources_from_app_state_when_available():
+    class FakeStore:
+        def health(self):
+            return {"enabled": True, "ok": True, "source": "state"}
+
+    previous_state = getattr(app.state, "resources", None)
+    previous_orchestrator = main_module.orchestrator
+    previous_report_store = main_module.report_store
+    previous_vector_store = main_module.travel_vector_store
+    try:
+        main_module.orchestrator = None
+        main_module.report_store = None
+        main_module.travel_vector_store = None
+        app.state.resources = SimpleNamespace(
+            orchestrator=TravelAgentOrchestrator(disable_llm=True, disable_external_api=True),
+            report_store=FakeStore(),
+            travel_vector_store=FakeStore(),
+            news_agent=main_module.news_agent,
+            qa_agent=main_module.qa_agent,
+            image_provider=main_module.image_provider,
+        )
+        client = TestClient(app)
+
+        response = client.get("/api/health")
+
+        assert response.status_code == 200
+        assert response.json()["database"]["source"] == "state"
+        assert response.json()["travel_knowledge"]["source"] == "state"
+    finally:
+        main_module.orchestrator = previous_orchestrator
+        main_module.report_store = previous_report_store
+        main_module.travel_vector_store = previous_vector_store
+        if previous_state is None:
+            try:
+                del app.state.resources
+            except AttributeError:
+                pass
+        else:
+            app.state.resources = previous_state
+
+
+def test_orchestrator_runs_independent_planning_steps_concurrently():
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    sleep_seconds = 0.18
+
+    class SlowAttractionAgent:
+        name = "SlowAttractionAgent"
+
+        def run(self, requirement):
+            time.sleep(sleep_seconds)
+            return [
+                Attraction(
+                    id="a1",
+                    name="Concurrent Attraction",
+                    category="landmark",
+                    address="Concurrent Road",
+                    location=Location(longitude=116.397, latitude=39.916),
+                    visit_duration_minutes=90,
+                    description="A deterministic test attraction",
+                    ticket_price=10,
+                )
+            ]
+
+    class SlowWeatherAgent:
+        name = "SlowWeatherAgent"
+
+        def run(self, requirement):
+            time.sleep(sleep_seconds)
+            return AmapMCPClient(api_key="").get_weather(requirement.city, requirement.start_date, requirement.days)
+
+    class SlowHotelAgent:
+        name = "SlowHotelAgent"
+
+        def run(self, requirement):
+            time.sleep(sleep_seconds)
+            return [
+                Hotel(
+                    id="h1",
+                    name="Concurrent Hotel",
+                    address="Concurrent Road",
+                    location=Location(longitude=116.397, latitude=39.916),
+                    type="standard",
+                    rating=4.6,
+                    nightly_price=500,
+                    description="A deterministic test hotel",
+                )
+            ]
+
+    class SlowResearchService:
+        def research(self, city, preferences, days):
+            time.sleep(sleep_seconds)
+            return []
+
+    orchestrator.attractions = SlowAttractionAgent()
+    orchestrator.weather = SlowWeatherAgent()
+    orchestrator.hotels = SlowHotelAgent()
+    orchestrator.research = SlowResearchService()
+
+    started = time.perf_counter()
+    result = orchestrator.plan(TripPlanRequest(prompt="test prompt for concurrency", days=1, start_date=date(2026, 6, 1)))
+    elapsed = time.perf_counter() - started
+
+    assert result.selected_plan.days_count == 1
+    assert elapsed < sleep_seconds * 3
+
+
+def test_map_endpoints_reject_excessive_query_sizes():
+    main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    client = TestClient(app)
+
+    poi = client.get("/api/map/poi", params={"keywords": "history", "city": "Beijing", "limit": 500})
+    weather = client.get("/api/map/weather", params={"city": "Beijing", "days": 99})
+
+    assert poi.status_code == 422
+    assert weather.status_code == 422
 
 
 def _fake_llm_plan():
