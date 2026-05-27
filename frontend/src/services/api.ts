@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { z } from 'zod'
 import type {
   Budget,
   DayPlan,
@@ -23,6 +24,40 @@ const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+const apiEnvelopeSchema = z
+  .object({
+    success: z.boolean(),
+    message: z.string().default(''),
+    data: z.unknown().optional(),
+  })
+  .passthrough()
+
+function parseApiEnvelope(responseData: unknown, fallbackMessage: string) {
+  const parsed = apiEnvelopeSchema.safeParse(responseData)
+  if (!parsed.success) {
+    throw new Error(fallbackMessage)
+  }
+  return parsed.data
+}
+
+function requireApiData<T>(responseData: unknown, fallbackMessage: string): T {
+  const envelope = parseApiEnvelope(responseData, fallbackMessage)
+  if (!envelope.success || envelope.data === undefined || envelope.data === null) {
+    throw new Error(envelope.message || fallbackMessage)
+  }
+  return envelope.data as T
+}
+
+function errorMessage(error: unknown, fallbackMessage: string): string {
+  if (axios.isAxiosError(error)) {
+    const detail = (error.response?.data as { detail?: unknown } | undefined)?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    if (error.message) return error.message
+  }
+  if (error instanceof Error && error.message) return error.message
+  return fallbackMessage
+}
 
 function formToPrompt(formData: TripFormData): string {
   const preferenceText =
@@ -201,30 +236,25 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
       avoid_places: splitCsv(formData.avoid_places),
       low_intensity: formData.low_intensity,
     })
+    const envelope = parseApiEnvelope(response.data, 'Trip plan generation failed')
     return {
-      success: response.data.success,
-      message: response.data.message,
-      data: response.data.data ? normalizePlanningResult(response.data.data, formData) : undefined,
+      success: envelope.success,
+      message: envelope.message,
+      data: envelope.data ? normalizePlanningResult(envelope.data, formData) : undefined,
     }
-  } catch (error: any) {
-    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
+  } catch (error: unknown) {
+    throw new Error(errorMessage(error, 'Trip plan generation failed'))
   }
 }
 
 export async function listTripReports(limit = 50): Promise<TripReportSummary[]> {
   const response = await apiClient.get('/api/reports', { params: { limit } })
-  if (!response.data.success) {
-    throw new Error(response.data.message || '历史报表获取失败')
-  }
-  return response.data.data || []
+  return requireApiData<TripReportSummary[]>(response.data, 'Trip report list request failed')
 }
 
 export async function getTripReport(reportId: string): Promise<TripReportDetail> {
   const response = await apiClient.get(`/api/reports/${reportId}`)
-  if (!response.data.success || !response.data.data) {
-    throw new Error(response.data.message || '历史报表详情获取失败')
-  }
-  return response.data.data
+  return requireApiData<TripReportDetail>(response.data, 'Trip report detail request failed')
 }
 
 export async function recalculateTripPlan(
@@ -244,7 +274,8 @@ export async function recalculateTripPlan(
     day_index: options.day_index,
     research_context: options.research_context || [],
   })
-  return normalizePlan(response.data.data, {
+  const data = requireApiData<unknown>(response.data, 'Trip recalculation failed')
+  return normalizePlan(data, {
     city: plan.city,
     start_date: plan.start_date,
     end_date: plan.end_date,
@@ -335,25 +366,19 @@ export async function askTravelQuestion(question: string, topK = 5): Promise<Tra
     question,
     top_k: topK,
   })
-  if (!response.data.success || !response.data.data) {
-    throw new Error(response.data.message || '智能问答失败')
-  }
-  return response.data.data
+  return requireApiData<TravelQAResponse>(response.data, 'Travel QA request failed')
 }
 
 export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelNewsIngestResult> {
   const response = await apiClient.post('/api/news/ingest', {
     feed_urls: feedUrls,
   })
-  if (!response.data.success || !response.data.data) {
-    throw new Error(response.data.message || '旅行资讯入库失败')
-  }
-  return response.data.data
+  return requireApiData<TravelNewsIngestResult>(response.data, 'Travel news ingest request failed')
 }
 
 export async function getAttractionPhoto(name: string): Promise<string> {
   const response = await apiClient.get('/api/poi/photo', { params: { name } })
-  return response.data.data.photo_url
+  return requireApiData<{ photo_url: string }>(response.data, 'Attraction photo request failed').photo_url
 }
 
 export default apiClient
