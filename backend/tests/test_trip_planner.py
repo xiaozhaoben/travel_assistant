@@ -1393,6 +1393,124 @@ def test_image_client_falls_back_to_unsplash_after_open_sources():
     assert url == "https://images.example/photo.jpg"
 
 
+def test_image_client_uses_web_search_before_open_sources():
+    from app.researching.research import WebSearchMCPClient
+
+    caller = FakeMCPCaller(
+        [
+            {
+                "results": [
+                    {
+                        "title": "Forbidden City official image",
+                        "url": "https://example.com/gugong",
+                        "image": "https://cdn.example.com/gugong.jpg",
+                    }
+                ]
+            }
+        ]
+    )
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    client = FakeHttpClient(
+        [
+            {"query": {"pages": {}}},
+            {"results": []},
+        ]
+    )
+    images = UnsplashMCPClient(access_key="", http_client=client, web_search_client=web, enable_llm_selector=False)
+
+    url = images.image_for("Beijing Forbidden City")
+
+    assert caller.calls[0] == {
+        "tool_name": "web_search",
+        "arguments": {"query": "Beijing Forbidden City landmark photo image"},
+    }
+    assert client.calls == []
+    assert url == "https://cdn.example.com/gugong.jpg"
+
+
+def test_image_client_lets_llm_choose_web_search_image_candidate():
+    from app.researching.research import WebSearchMCPClient
+
+    caller = FakeMCPCaller(
+        [
+            {
+                "results": [
+                    {
+                        "title": "Generic Beijing travel article",
+                        "url": "https://example.com/beijing",
+                        "image": "https://cdn.example.com/generic-city.jpg",
+                        "content": "A broad Beijing travel overview.",
+                    },
+                    {
+                        "title": "Forbidden City official visitor photo",
+                        "url": "https://example.com/forbidden-city",
+                        "image": "https://cdn.example.com/forbidden-city.jpg",
+                        "content": "Official visitor information for the Forbidden City.",
+                    },
+                ]
+            }
+        ]
+    )
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    llm = FakeLLM('{"image_url": "https://cdn.example.com/forbidden-city.jpg"}')
+    images = UnsplashMCPClient(
+        access_key="",
+        http_client=FakeHttpClient([{"query": {"pages": {}}}, {"results": []}]),
+        web_search_client=web,
+        llm=llm,
+    )
+
+    url = images.image_for("Beijing Forbidden City")
+
+    assert url == "https://cdn.example.com/forbidden-city.jpg"
+    assert "Beijing Forbidden City" in llm.calls[0][0][1]
+    assert "Generic Beijing travel article" in llm.calls[0][0][1]
+    assert images.http_client.calls == []
+
+
+def test_image_client_falls_back_to_open_sources_when_llm_rejects_web_candidates():
+    from app.researching.research import WebSearchMCPClient
+
+    caller = FakeMCPCaller(
+        [
+            {
+                "results": [
+                    {
+                        "title": "Generic Beijing travel article",
+                        "url": "https://example.com/beijing",
+                        "image": "https://cdn.example.com/generic-city.jpg",
+                    }
+                ]
+            }
+        ]
+    )
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    llm = FakeLLM('{"image_url": ""}')
+    client = FakeHttpClient(
+        [
+            {
+                "query": {
+                    "pages": {
+                        "1": {
+                            "imageinfo": [
+                                {
+                                    "thumburl": "https://upload.wikimedia.org/thumb/forbidden-city.jpg",
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        ]
+    )
+    images = UnsplashMCPClient(access_key="", http_client=client, web_search_client=web, llm=llm)
+
+    url = images.image_for("Beijing Forbidden City")
+
+    assert "commons.wikimedia.org" in client.calls[0]["url"]
+    assert url == "https://upload.wikimedia.org/thumb/forbidden-city.jpg"
+
+
 def test_image_client_uses_wikimedia_before_keyed_stock_providers():
     client = FakeHttpClient(
         [

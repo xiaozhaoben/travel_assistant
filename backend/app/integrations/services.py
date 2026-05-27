@@ -1272,6 +1272,9 @@ class UnsplashMCPClient:
         pixabay_api_key: str | None = None,
         enable_open_sources: bool = True,
         http_client=None,
+        web_search_client=None,
+        llm: Any | None = None,
+        enable_llm_selector: bool = True,
     ):
         settings = get_settings()
         self.access_key = access_key if access_key is not None else settings.unsplash_access_key
@@ -1280,6 +1283,12 @@ class UnsplashMCPClient:
         self.wikimedia_user_agent = settings.wikimedia_user_agent
         self.enable_open_sources = enable_open_sources
         self.http_client = http_client or httpx.Client()
+        self.web_search_client = web_search_client if web_search_client is not None else self._create_web_search_client()
+        self.llm = llm if llm is not None else (
+            self._create_llm()
+            if enable_llm_selector and self.web_search_client is not None and getattr(self.web_search_client, "available", False)
+            else None
+        )
 
     def close(self) -> None:
         close = getattr(self.http_client, "close", None)
@@ -1300,6 +1309,8 @@ class UnsplashMCPClient:
 
     def _provider_order(self):
         providers = []
+        if self.web_search_client is not None and getattr(self.web_search_client, "available", False):
+            providers.append(("web_search", self._image_from_web_search))
         if self.enable_open_sources:
             providers.extend([
                 ("wikimedia", self._image_from_wikimedia),
@@ -1312,6 +1323,137 @@ class UnsplashMCPClient:
         if self.access_key:
             providers.append(("unsplash", self._image_from_unsplash))
         return providers
+
+    def _create_web_search_client(self):
+        if not self.enable_open_sources:
+            return None
+        try:
+            from app.researching.research import WebSearchMCPClient
+
+            return WebSearchMCPClient()
+        except Exception:
+            return None
+
+    def _create_llm(self):
+        try:
+            if get_settings().disable_llm:
+                return None
+            from app.core.llm_service import create_llm
+
+            return create_llm()
+        except Exception:
+            return None
+
+    def _image_from_web_search(self, query: str) -> str | None:
+        if self.web_search_client is None:
+            return None
+        search_query = f"{query} landmark photo image"
+        try:
+            candidates = []
+            for item in self.web_search_client.search(search_query)[:5]:
+                url = self._extract_image_url(item)
+                if url:
+                    candidates.append(
+                        {
+                            "title": str(item.get("title") or item.get("name") or "")[:120],
+                            "page_url": item.get("url") or item.get("link"),
+                            "image_url": url,
+                            "summary": str(item.get("content") or item.get("summary") or item.get("snippet") or "")[:220],
+                        }
+                    )
+            if not candidates:
+                return None
+            selected = self._choose_image_with_llm(query, candidates)
+            if selected:
+                return selected
+            if self.llm is None:
+                return candidates[0]["image_url"]
+        except Exception as exc:
+            self._log_image_event("image_search_error", query, provider="web_search", error=str(exc))
+            return None
+        return None
+
+    def _choose_image_with_llm(self, query: str, candidates: list[dict[str, Any]]) -> str | None:
+        if self.llm is None:
+            return None
+        allowed_urls = {str(candidate.get("image_url")) for candidate in candidates if candidate.get("image_url")}
+        prompt = (
+            "你是旅行景点图片筛选器。请只从候选图片中选择最适合用户查询的景点实拍或官方高可信图片。"
+            "优先具体景点、官方/百科/地图来源、真实照片；避开城市泛图、Logo、广告、无关配图。"
+            "只返回 JSON，例如 {\"image_url\":\"https://example.com/photo.jpg\"}；无法判断时返回 {\"image_url\":\"\"}。\n"
+            f"查询：{query}\n"
+            f"候选：{json.dumps(candidates, ensure_ascii=False)}"
+        )
+        try:
+            response = self.llm.invoke([("user", prompt)])
+            content = getattr(response, "content", response)
+            data = self._parse_llm_json(str(content))
+            selected = str(data.get("image_url") or data.get("url") or "").strip()
+            if selected in allowed_urls:
+                return selected
+        except Exception as exc:
+            self._log_image_event("image_search_error", query, provider="web_search_llm", error=str(exc))
+        return None
+
+    def _parse_llm_json(self, content: str) -> dict[str, Any]:
+        try:
+            data = json.loads(content)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                return {}
+            try:
+                data = json.loads(match.group(0))
+                return data if isinstance(data, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+
+    def _extract_image_url(self, item: Any) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        direct_fields = (
+            "image",
+            "image_url",
+            "imageUrl",
+            "thumbnail",
+            "thumbnail_url",
+            "thumbnailUrl",
+            "contentUrl",
+            "content_url",
+        )
+        for field in direct_fields:
+            candidate = item.get(field)
+            if isinstance(candidate, str) and self._is_http_url(candidate):
+                return candidate
+            if isinstance(candidate, dict):
+                nested = self._extract_image_url(candidate)
+                if nested:
+                    return nested
+        for container_field in ("images", "image_urls", "thumbnails"):
+            container = item.get(container_field)
+            if isinstance(container, list):
+                for candidate in container:
+                    if isinstance(candidate, str) and self._is_http_url(candidate):
+                        return candidate
+                    if isinstance(candidate, dict):
+                        nested = self._extract_image_url(candidate)
+                        if nested:
+                            return nested
+        text = " ".join(str(item.get(field) or "") for field in ("content", "summary", "snippet"))
+        for candidate in re.findall(r"https?://[^\s\"'<>]+", text):
+            if self._looks_like_image_url(candidate):
+                return candidate.rstrip(").,;]")
+        return None
+
+    def _is_http_url(self, url: str) -> bool:
+        return url.strip().lower().startswith(("http://", "https://"))
+
+    def _looks_like_image_url(self, url: str) -> bool:
+        lower = url.strip().lower()
+        if not self._is_http_url(url):
+            return False
+        return bool(re.search(r"\.(?:jpg|jpeg|png|webp|gif)(?:[?#].*)?$", lower))
 
     def _image_from_wikimedia(self, query: str) -> str | None:
         try:

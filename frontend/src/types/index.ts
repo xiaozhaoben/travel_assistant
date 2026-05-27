@@ -186,6 +186,8 @@ export interface ServiceHealth {
   cache_enabled?: boolean
   external_api_disabled: boolean
   image_providers?: {
+    web_search?: boolean
+    llm_selector?: boolean
     wikimedia: boolean
     openverse: boolean
     pexels_configured: boolean

@@ -129,7 +129,7 @@ TRAVEL_FEEDS=
 - `POST /api/qa/ask`：基于 PostgreSQL 向量库召回资料并回答旅行问题。
 - `GET /api/map/poi`：通过 `uvx amap-mcp-server` 的 `maps_text_search` / `maps_search_detail` 工具搜索 POI。
 - `GET /api/map/weather`：通过 `uvx amap-mcp-server` 的 `maps_weather` 工具查询天气。
-- `GET /api/poi/photo`：通过 Unsplash MCP 风格适配层获取景点图片。
+- `GET /api/poi/photo`：通过图片适配层获取景点图片；配置实时搜索 MCP 和大模型 Key 时，会先搜索候选图片并由大模型筛选，再回落到 Wikimedia/Openverse/Pexels/Pixabay/Unsplash。
 
 ## 日志
 

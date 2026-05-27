@@ -209,6 +209,8 @@ def health():
         "planner_mode": settings.planner_mode,
         "cache_enabled": settings.research_cache_enabled,
         "image_providers": {
+            "web_search": bool(settings.web_search_mcp_command),
+            "llm_selector": bool(settings.web_search_mcp_command and settings.has_llm_credentials and not settings.disable_llm),
             "wikimedia": True,
             "openverse": True,
             "pexels_configured": bool(settings.pexels_api_key),

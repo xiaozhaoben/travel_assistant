@@ -19,8 +19,8 @@
           <a-tag :color="serviceHealth?.amap_configured && !serviceHealth?.external_api_disabled ? 'green' : 'orange'">
             高德地图：{{ serviceHealth?.amap_configured && !serviceHealth?.external_api_disabled ? '已配置' : '本地数据' }}
           </a-tag>
-          <a-tag :color="serviceHealth?.unsplash_configured && !serviceHealth?.external_api_disabled ? 'green' : 'orange'">
-            Unsplash：{{ serviceHealth?.unsplash_configured && !serviceHealth?.external_api_disabled ? '已配置' : '占位图片' }}
+          <a-tag :color="imageProviderStatus.color">
+            图片：{{ imageProviderStatus.text }}
           </a-tag>
           <a-tag :color="serviceHealth?.travel_knowledge?.enabled ? 'green' : 'orange'">
             知识库：{{ serviceHealth?.travel_knowledge?.enabled ? 'PostgreSQL' : '未配置' }}
@@ -272,6 +272,21 @@ const serviceStatusText = computed(() => {
   if (serviceHealth.value.external_api_disabled) return '当前强制使用本地 fallback 数据，适合离线调试。'
   if (serviceHealth.value.llm.enabled) return '后端已读取大模型配置，规划时会优先调用大模型。'
   return '后端未检测到大模型 Key，会使用本地 fallback 生成可编辑行程。'
+})
+const imageProviderStatus = computed(() => {
+  if (!serviceHealth.value || serviceHealth.value.external_api_disabled) {
+    return { color: 'orange', text: '占位图片' }
+  }
+  if (serviceHealth.value.image_providers?.web_search && serviceHealth.value.image_providers?.llm_selector) {
+    return { color: 'green', text: '搜索+大模型' }
+  }
+  if (serviceHealth.value.image_providers?.web_search) {
+    return { color: 'green', text: '实时搜索优先' }
+  }
+  if (serviceHealth.value.unsplash_configured) {
+    return { color: 'green', text: '图库已配置' }
+  }
+  return { color: 'green', text: '开放源' }
 })
 
 async function handleAskQuestion() {

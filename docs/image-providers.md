@@ -2,19 +2,21 @@
 
 后端现在会通过 `UnsplashMCPClient` 这个兼容旧命名的适配器搜索景点图片。实际顺序是：
 
-1. Wikimedia Commons
-2. Openverse
-3. Pexels
-4. Pixabay
-5. Unsplash
-6. 无结果时返回空字符串，由前端使用本地生成图片兜底，避免额外网络占位图
+1. Web Search MCP + 大模型筛选（如果配置了 `WEB_SEARCH_MCP_COMMAND` 和大模型 Key，先从搜索结果的 `image`、`image_url`、`thumbnail` 等字段整理候选图片，再由大模型选择最贴近景点实拍/官方高可信的 URL）
+2. Wikimedia Commons
+3. Openverse
+4. Pexels
+5. Pixabay
+6. Unsplash
+7. 无结果时返回空字符串，由前端使用本地生成图片兜底，避免额外网络占位图
 
-当配置了 Pexels 或 Pixabay Key 时，会优先尝试 Wikimedia Commons 和 Openverse 这类开放授权来源，再进入图库来源；如果没有任何图片 API Key，也会尝试 Wikimedia Commons 和 Openverse。
+当配置了实时搜索 MCP 和大模型 Key 时，会先尝试用网页搜索找到候选图片，并让大模型只从候选 URL 中选择最合适的一张；大模型未选出有效图片时，再尝试 Wikimedia Commons 和 Openverse 这类开放授权来源，然后进入图库来源。如果没有大模型 Key 但配置了实时搜索 MCP，会使用搜索结果中的首个图片 URL 作为轻量兜底。
 
 ## 注册和 Key 地址
 
 | Provider | 是否需要 Key | 获取地址 |
 | --- | --- | --- |
+| Web Search MCP | 取决于 MCP server，例如 Tavily 需要对应 Key | https://github.com/tavily-ai/tavily-mcp |
 | Wikimedia Commons | 不需要 | https://commons.wikimedia.org/wiki/Commons:API |
 | Openverse | 基础搜索不需要；高额度可注册 OAuth 应用 | https://api.openverse.org/v1/#tag/auth |
 | Pexels | 需要 | https://www.pexels.com/api/ |
@@ -26,6 +28,11 @@
 ## backend/.env 配置
 
 ```env
+LLM_MODEL_ID=
+LLM_API_KEY=
+LLM_BASE_URL=
+WEB_SEARCH_MCP_COMMAND=["npx","-y","tavily-mcp"]
+WEB_SEARCH_MCP_TOOL=web_search
 PEXELS_API_KEY=
 PIXABAY_API_KEY=
 UNSPLASH_ACCESS_KEY=
