@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="icon-wrapper"><CompassOutlined /></div>
       <h1 class="page-title">旅行规划工作台</h1>
-      <p class="page-subtitle">规划行程、沉淀旅行资讯、回答目的地问题</p>
+      <p class="page-subtitle">规划行程 · 沉淀旅行资讯 · 回答目的地问题</p>
     </div>
 
     <a-card class="form-card" :bordered="false">
@@ -233,16 +233,6 @@
           <a-empty v-if="!qaAnswer" description="旅行问答会显示在这里" />
           <template v-else>
             <div class="qa-answer-text">{{ qaAnswer.answer }}</div>
-<!--            <a-divider orientation="left">参考资料</a-divider>-->
-<!--            <a-empty v-if="!qaAnswer.sources.length" description="暂无参考资料" />-->
-<!--            <a-list v-else :data-source="qaAnswer.sources" size="small">-->
-<!--              <template #renderItem="{ item }">-->
-<!--                <a-list-item>-->
-<!--                  <a-list-item-meta :title="item.title" :description="item.summary" />-->
-<!--                  <a-tag>{{ item.source }}</a-tag>-->
-<!--                </a-list-item>-->
-<!--              </template>-->
-<!--            </a-list>-->
           </template>
         </div>
       </div>

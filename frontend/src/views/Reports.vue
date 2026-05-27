@@ -105,3 +105,47 @@ function formatDate(value: string) {
   return dayjs(value).format('YYYY-MM-DD HH:mm')
 }
 </script>
+
+<style scoped>
+.reports-container {
+  min-height: calc(100vh - 80px);
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  animation: fadeInUp 0.6s ease-out;
+}
+
+.reports-header {
+  margin-bottom: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.reports-header h1 {
+  margin: 0;
+  color: var(--color-forest);
+  font-size: 36px;
+  font-weight: 800;
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.reports-header p {
+  margin: 8px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 15px;
+}
+
+@media (max-width: 768px) {
+  .reports-container {
+    padding: 20px 16px;
+  }
+
+  .reports-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+</style>

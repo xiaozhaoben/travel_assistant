@@ -1,12 +1,27 @@
 <template>
   <div class="result-container">
     <div class="result-header">
-      <a-button size="large" @click="goBack">返回首页</a-button>
+      <a-button size="large" @click="goBack">
+        <template #icon><ArrowLeftOutlined /></template>
+        返回首页
+      </a-button>
       <a-space>
-        <a-button v-if="!editMode" @click="startEdit">编辑行程</a-button>
-        <a-button v-if="editMode" :loading="saving" @click="smartRefillDay">智能补景点</a-button>
-        <a-button v-if="editMode" :loading="saving" @click="smartReorderDay">重排当天</a-button>
-        <a-button v-if="editMode" type="primary" :loading="saving" @click="saveChanges">保存修改</a-button>
+        <a-button v-if="!editMode" @click="startEdit">
+          <template #icon><EditOutlined /></template>
+          编辑行程
+        </a-button>
+        <a-button v-if="editMode" :loading="saving" @click="smartRefillDay">
+          <template #icon><PlusOutlined /></template>
+          智能补景点
+        </a-button>
+        <a-button v-if="editMode" :loading="saving" @click="smartReorderDay">
+          <template #icon><SwapOutlined /></template>
+          重排当天
+        </a-button>
+        <a-button v-if="editMode" type="primary" :loading="saving" @click="saveChanges">
+          <template #icon><SaveOutlined /></template>
+          保存修改
+        </a-button>
         <a-button v-if="editMode" @click="cancelEdit">取消编辑</a-button>
       </a-space>
     </div>
@@ -257,6 +272,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
+import {
+  ArrowLeftOutlined,
+  EditOutlined,
+  PlusOutlined,
+  SaveOutlined,
+  SwapOutlined,
+} from '@ant-design/icons-vue'
 import { getAttractionPhoto, recalculateTripPlan } from '@/services/api'
 import travelHeroUrl from '@/assets/travel-qa-hero.webp'
 import type { Attraction, Hotel, Location, Meal, TripPlanningResult, TripPlan } from '@/types'
@@ -554,9 +576,9 @@ function drawAmapRoutes(attractions: Attraction[]) {
     amapInstance.add(
       new AMapRuntime.Polyline({
         path,
-        strokeColor: '#1890ff',
+        strokeColor: '#1a3c34',
         strokeWeight: 4,
-        strokeOpacity: 0.82,
+        strokeOpacity: 0.72,
         showDir: true,
       }),
     )
@@ -707,3 +729,77 @@ function escapeHtml(value: string) {
   })
 }
 </script>
+
+<style scoped>
+.result-container {
+  padding: 24px;
+  background: var(--color-cream);
+}
+
+.result-header {
+  max-width: 1440px;
+  margin: 0 auto 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  animation: fadeInUp 0.5s ease-out;
+}
+
+.content-wrapper {
+  max-width: 1440px;
+  margin: 0 auto;
+  display: flex;
+  gap: 28px;
+}
+
+.side-nav {
+  width: 240px;
+  flex-shrink: 0;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.top-info-section {
+  display: grid;
+  grid-template-columns: 420px minmax(0, 1fr);
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.left-info {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+@media (max-width: 1100px) {
+  .content-wrapper,
+  .top-info-section {
+    display: block;
+  }
+
+  .side-nav {
+    display: none;
+  }
+
+  .left-info,
+  .map-card {
+    margin-bottom: 24px;
+  }
+}
+
+@media (max-width: 768px) {
+  .result-container {
+    padding: 16px;
+  }
+
+  .result-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+  }
+}
+</style>
