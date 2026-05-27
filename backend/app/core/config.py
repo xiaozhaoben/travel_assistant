@@ -34,6 +34,7 @@ class Settings:
     amap_api_key: str | None
     web_search_mcp_command: str | None
     web_search_mcp_tool: str
+    mcp_timeout_seconds: float
     embedding_provider: str
     embedding_model_id: str
     embedding_dimensions: int
@@ -93,6 +94,7 @@ def get_settings() -> Settings:
         amap_api_key=os.getenv("AMAP_API_KEY") or os.getenv("AMAP_MAPS_API_KEY"),
         web_search_mcp_command=os.getenv("WEB_SEARCH_MCP_COMMAND"),
         web_search_mcp_tool=os.getenv("WEB_SEARCH_MCP_TOOL", "web_search"),
+        mcp_timeout_seconds=float(os.getenv("MCP_TIMEOUT_SECONDS", "20")),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "dashscope"),
         embedding_model_id=os.getenv("EMBEDDING_MODEL_ID", "tongyi-embedding-vision-plus-2026-03-06"),
         embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "512")),

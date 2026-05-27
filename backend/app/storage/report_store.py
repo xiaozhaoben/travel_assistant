@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - lets tests run without database extras
     Jsonb = None
 
 from app.domain.models import ResearchSnippet, TripPlan, TripPlanRequest, TripPlanningResult, TripReportDetail, TripReportSummary
+from app.storage.db import DatabaseConnectionManager
 from app.storage.plan_log import PlanLogEntry
 
 logger = logging.getLogger(__name__)
@@ -68,14 +69,15 @@ CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_event_type ON plan_execution_
 
 
 class PostgresReportStore:
-    def __init__(self, database_url: str):
-        if psycopg is None or dict_row is None or Jsonb is None:
+    def __init__(self, database_url: str, connection_manager: DatabaseConnectionManager | None = None):
+        if (psycopg is None or dict_row is None or Jsonb is None) and connection_manager is None:
             raise RuntimeError("PostgreSQL storage requires psycopg. Run: pip install -r backend/requirements.txt")
         self.database_url = database_url
+        self.connections = connection_manager or DatabaseConnectionManager(database_url)
         self._schema_ready = False
 
     def ensure_schema(self) -> None:
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             conn.execute(SCHEMA_SQL)
         self._schema_ready = True
 
@@ -85,7 +87,7 @@ class PostgresReportStore:
 
     def health(self) -> dict[str, Any]:
         try:
-            with psycopg.connect(self.database_url) as conn:
+            with self.connections.connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     row = cur.execute("SELECT 1 AS ok").fetchone()
             return {"enabled": True, "ok": bool(row and row["ok"] == 1)}
@@ -101,7 +103,7 @@ class PostgresReportStore:
         result_payload = result.model_dump(mode="json")
         selected_plan_payload = selected_plan.model_dump(mode="json")
 
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 row = cur.execute(
                     """
@@ -138,7 +140,7 @@ class PostgresReportStore:
         plan_payload = plan.model_dump(mode="json")
         research_payload = [snippet.model_dump(mode="json") for snippet in research_context or []]
 
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 updated = cur.execute(
                     """
@@ -200,7 +202,7 @@ class PostgresReportStore:
             )
             for log in logs
         ]
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -215,7 +217,7 @@ class PostgresReportStore:
 
     def list_reports(self, limit: int = 50) -> list[TripReportSummary]:
         self._ensure_schema_once()
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     """
@@ -230,7 +232,7 @@ class PostgresReportStore:
 
     def get_report(self, report_id: str) -> TripReportDetail | None:
         self._ensure_schema_once()
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 report = cur.execute(
                     """
@@ -284,6 +286,9 @@ class PostgresReportStore:
                 ],
             }
         )
+
+    def close(self) -> None:
+        self.connections.close()
 
 
 def create_report_store(database_url: str | None) -> PostgresReportStore | None:

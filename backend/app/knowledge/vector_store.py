@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from app.core.config import get_settings
+from app.storage.db import DatabaseConnectionManager
 
 try:  # pragma: no cover - optional until LangChain text splitters are installed
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -159,16 +160,22 @@ def create_embedding_service():
 
 
 class PostgresTravelVectorStore:
-    def __init__(self, database_url: str, embeddings: Any | None = None):
-        if psycopg is None or dict_row is None or Jsonb is None:
+    def __init__(
+        self,
+        database_url: str,
+        embeddings: Any | None = None,
+        connection_manager: DatabaseConnectionManager | None = None,
+    ):
+        if (psycopg is None or dict_row is None or Jsonb is None) and connection_manager is None:
             raise RuntimeError("Travel vector store requires psycopg. Run: pip install -r backend/requirements.txt")
         self.database_url = database_url
+        self.connections = connection_manager or DatabaseConnectionManager(database_url)
         self.embeddings = embeddings or create_embedding_service()
         self.embedding_dimensions = int(getattr(self.embeddings, "dimensions", EMBEDDING_DIMENSIONS))
         self._schema_ready = False
 
     def ensure_schema(self) -> None:
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             conn.execute(SCHEMA_SQL)
             self._ensure_embedding_column_dimension(conn)
         self._schema_ready = True
@@ -203,7 +210,7 @@ class PostgresTravelVectorStore:
 
     def health(self) -> dict[str, Any]:
         try:
-            with psycopg.connect(self.database_url) as conn:
+            with self.connections.connection() as conn:
                 with conn.cursor(row_factory=dict_row) as cur:
                     row = cur.execute(
                         """
@@ -244,7 +251,7 @@ class PostgresTravelVectorStore:
             return 0
 
         added = 0
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 for index, chunk in enumerate(chunks):
                     content_hash = stable_hash(source_url or title, chunk)
@@ -279,7 +286,7 @@ class PostgresTravelVectorStore:
     def similarity_search(self, query: str, k: int = 5) -> list[KnowledgeDocument]:
         self._ensure_schema_once()
         vector_literal = vector_to_sql_literal(self.embeddings.embed_query(query))
-        with psycopg.connect(self.database_url) as conn:
+        with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     """
@@ -293,6 +300,9 @@ class PostgresTravelVectorStore:
                     (vector_literal, vector_literal, max(1, min(k, 12))),
                 ).fetchall()
         return [KnowledgeDocument(**dict(row)) for row in rows]
+
+    def close(self) -> None:
+        self.connections.close()
 
 
 def create_travel_vector_store(database_url: str | None) -> PostgresTravelVectorStore | None:

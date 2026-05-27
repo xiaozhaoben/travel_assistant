@@ -96,6 +96,7 @@ class AmapStdioMCPToolCaller:
 
     def __init__(self, api_key: str | None):
         self.api_key = api_key or ""
+        self.timeout_seconds = get_settings().mcp_timeout_seconds
 
     def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         import anyio
@@ -115,8 +116,9 @@ class AmapStdioMCPToolCaller:
             )
             async with stdio_client(server) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, arguments)
+                    with anyio.fail_after(self.timeout_seconds):
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, arguments)
                     return "\n".join(
                         getattr(item, "text", "")
                         for item in result.content
@@ -332,6 +334,11 @@ class AmapMCPClient:
         self.mcp_caller = mcp_caller or (AmapStdioMCPToolCaller(self.api_key) if self.api_key else None)
         self.recommendation_service = recommendation_service or AttractionRecommendationService()
         self.http_client = http_client or httpx.Client()
+
+    def close(self) -> None:
+        close = getattr(self.http_client, "close", None)
+        if callable(close):
+            close()
 
     def search_pois(
         self,
@@ -1273,6 +1280,11 @@ class UnsplashMCPClient:
         self.wikimedia_user_agent = settings.wikimedia_user_agent
         self.enable_open_sources = enable_open_sources
         self.http_client = http_client or httpx.Client()
+
+    def close(self) -> None:
+        close = getattr(self.http_client, "close", None)
+        if callable(close):
+            close()
 
     def image_for(self, query: str, use_api: bool = True) -> str:
         if use_api:

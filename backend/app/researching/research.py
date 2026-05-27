@@ -29,6 +29,7 @@ class WebSearchMCPClient:
         settings = get_settings()
         self.command = command if command is not None else settings.web_search_mcp_command
         self.tool_name = tool_name or settings.web_search_mcp_tool
+        self.timeout_seconds = settings.mcp_timeout_seconds
         self.mcp_caller = mcp_caller
 
     @property
@@ -77,8 +78,9 @@ class WebSearchMCPClient:
             )
             async with stdio_client(server) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
-                    await session.initialize()
-                    result = await session.call_tool(self.tool_name, {"query": query})
+                    with anyio.fail_after(self.timeout_seconds):
+                        await session.initialize()
+                        result = await session.call_tool(self.tool_name, {"query": query})
                     text = "\n".join(
                         getattr(item, "text", "")
                         for item in result.content
