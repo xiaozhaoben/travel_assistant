@@ -41,6 +41,7 @@ jobs:
         working-directory: frontend
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_API_TIMEOUT_MS: ${{ vars.VITE_API_TIMEOUT_MS }}
           VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH || format('/{0}/', github.event.repository.name) }}
           VITE_AMAP_WEB_JS_KEY: ${{ vars.VITE_AMAP_WEB_JS_KEY }}
           VITE_AMAP_SECURITY_JS_CODE: ${{ vars.VITE_AMAP_SECURITY_JS_CODE }}

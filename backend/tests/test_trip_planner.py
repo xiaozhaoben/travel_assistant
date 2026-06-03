@@ -300,6 +300,17 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.has_llm_credentials is True
 
 
+def test_settings_normalizes_cors_origins_to_browser_origins(monkeypatch):
+    monkeypatch.setenv(
+        "CORS_ORIGINS",
+        "https://xiaozhaoben.github.io/travel_assistant/,https://xiao-zhao.top/api",
+    )
+
+    settings = get_settings()
+
+    assert settings.cors_origins == ["https://xiaozhaoben.github.io", "https://xiao-zhao.top"]
+
+
 def test_backend_paths_stay_at_backend_root_after_package_split():
     from app.core.config import BACKEND_DIR, ENV_PATH
     from app.researching.research import DestinationResearchService

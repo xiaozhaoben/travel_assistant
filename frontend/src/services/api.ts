@@ -16,10 +16,13 @@ import type {
 } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+const DEFAULT_API_TIMEOUT_MS = 300000
+const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || DEFAULT_API_TIMEOUT_MS)
+const TRIP_PLAN_TIMEOUT_MESSAGE = '行程生成耗时较长，请稍后在历史报表获取。'
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 300000,
+  timeout: Number.isFinite(API_TIMEOUT_MS) && API_TIMEOUT_MS > 0 ? API_TIMEOUT_MS : DEFAULT_API_TIMEOUT_MS,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -57,6 +60,22 @@ function errorMessage(error: unknown, fallbackMessage: string): string {
   }
   if (error instanceof Error && error.message) return error.message
   return fallbackMessage
+}
+
+function isTimeoutError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false
+  return (
+    error.code === 'ECONNABORTED' ||
+    error.code === 'ETIMEDOUT' ||
+    error.response?.status === 408 ||
+    error.response?.status === 504 ||
+    /timeout/i.test(error.message)
+  )
+}
+
+function tripPlanErrorMessage(error: unknown): string {
+  if (isTimeoutError(error)) return TRIP_PLAN_TIMEOUT_MESSAGE
+  return errorMessage(error, 'Trip plan generation failed')
 }
 
 function formToPrompt(formData: TripFormData): string {
@@ -243,7 +262,7 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
       data: envelope.data ? normalizePlanningResult(envelope.data, formData) : undefined,
     }
   } catch (error: unknown) {
-    throw new Error(errorMessage(error, 'Trip plan generation failed'))
+    throw new Error(tripPlanErrorMessage(error))
   }
 }
 

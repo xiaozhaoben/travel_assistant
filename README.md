@@ -78,10 +78,11 @@ npm run dev
 ```bash
 set VITE_BACKEND_URL=http://127.0.0.1:8010
 set VITE_API_BASE_URL=http://127.0.0.1:8010
+set VITE_API_TIMEOUT_MS=300000
 npm run dev
 ```
 
-本地开发通常使用 `VITE_BACKEND_URL` 让 Vite 代理 `/api` 请求；如果前端构建后由其他静态服务托管，则使用 `VITE_API_BASE_URL` 直接指定后端地址。
+本地开发通常使用 `VITE_BACKEND_URL` 让 Vite 代理 `/api` 请求；如果前端构建后由其他静态服务托管，则使用 `VITE_API_BASE_URL` 直接指定后端地址。`VITE_API_TIMEOUT_MS` 控制浏览器端 axios 等待时间，默认 300000 毫秒。
 
 如果需要显示真实高德 JS 地图，在前端启动前补充：
 
@@ -195,18 +196,19 @@ docker build -t travel-assistant-backend ./backend
 docker run -d --name travel-assistant-backend --env-file backend/.env -p 8000:8000 travel-assistant-backend
 ```
 
-服务器上的 `backend/.env` 需要把 `HOST=0.0.0.0`，并在 `CORS_ORIGINS` 里加入 GitHub Pages 前端地址，例如 `https://你的用户名.github.io/travel_assistant`。如果后端要给 GitHub Pages 调用，建议放在 HTTPS 域名后面。
+服务器上的 `backend/.env` 需要把 `HOST=0.0.0.0`，并在 `CORS_ORIGINS` 里加入 GitHub Pages 的浏览器 Origin，例如 `https://你的用户名.github.io`。CORS 只匹配协议、域名和端口，不包含 `/travel_assistant` 这类路径。如果后端要给 GitHub Pages 调用，建议放在 HTTPS 域名后面。
 
 前端也可以用 Docker 预览静态产物：
 
 ```bash
-docker build -t travel-assistant-frontend ./frontend --build-arg VITE_API_BASE_URL=https://你的后端域名
+docker build -t travel-assistant-frontend ./frontend --build-arg VITE_API_BASE_URL=https://你的后端域名 --build-arg VITE_API_TIMEOUT_MS=300000
 docker run -d --name travel-assistant-frontend -p 8080:80 travel-assistant-frontend
 ```
 
 GitHub Pages 部署使用 `.github/workflows/deploy-frontend-pages.yml`。在仓库的 `Settings -> Variables -> Actions` 配置：
 
-- `VITE_API_BASE_URL`：服务器后端地址，例如 `https://api.example.com`
+- `VITE_API_BASE_URL`：服务器后端地址，例如 `https://api.example.com`；如果 Nginx 用 `/api` 作为代理前缀，可以填 `https://api.example.com/api`
+- `VITE_API_TIMEOUT_MS`：浏览器端接口超时时间，默认 `300000`；
 - `VITE_BASE_PATH`：项目 Pages 默认可不填；自定义域名时设为 `/`
 - `VITE_AMAP_WEB_JS_KEY` / `VITE_AMAP_SECURITY_JS_CODE`：需要真实高德 JS 地图时填写
 

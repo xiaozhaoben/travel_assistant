@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from dotenv import load_dotenv
 
@@ -68,7 +68,7 @@ def get_settings() -> Settings:
         or os.getenv("DEEPSEEK_BASE_URL")
     )
     cors_origins = [
-        item.strip()
+        _normalize_cors_origin(item)
         for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174").split(",")
         if item.strip()
     ]
@@ -119,6 +119,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_cors_origin(value: str) -> str:
+    origin = value.strip().rstrip("/")
+    parsed = urlsplit(origin)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return origin
 
 
 def _database_url_from_env() -> str | None:
