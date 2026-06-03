@@ -32,11 +32,19 @@ from app.domain.models import (
     TripPlanningResult,
     TripPlanRequest,
     TravelRequirement,
+    WeatherInfo,
 )
 from app.integrations.services import AmapMCPClient, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.researching.research import DestinationResearchService
 from app.storage.plan_log import elapsed_ms, record_llm_call
+from app.tools import (
+    create_attraction_search_tool,
+    create_hotel_search_tool,
+    create_meal_search_tool,
+    create_weather_query_tool,
+)
+from app.tools.middleware import log_before_model, monitor_tool
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,7 @@ def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, 
             tools=tools,
             system_prompt=system_prompt,
             name=name,
+            middleware=[monitor_tool, log_before_model],
         )
     except Exception as exc:
         logger.warning("LangChain create_agent failed for %s: %s", name, exc)
@@ -81,6 +90,21 @@ def _extract_agent_content(response: Any) -> str:
             if isinstance(value, dict) and value.get("messages"):
                 return _extract_message_content(value["messages"][-1])
     return _extract_message_content(response)
+
+
+def _extract_json_payload(content: Any) -> Any:
+    text = str(content or "").strip()
+    if not text:
+        return None
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0]
+    else:
+        match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+        if match:
+            text = match.group(1)
+    return json.loads(text.strip())
 
 
 def _extract_stream_content(chunk: Any) -> str:
@@ -158,14 +182,21 @@ class AttractionSearchAgent:
         self.amap = amap
         self.unsplash = unsplash
         self.llm = llm
+        self.tools = [create_attraction_search_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.ATTRACTION_SEARCH,
             "attraction_search_agent",
         )
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
+        agent_attractions = self._try_agent_attractions(requirement)
+        if agent_attractions:
+            return [
+                attraction.model_copy(update={"image_url": attraction.image_url or self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
+                for attraction in agent_attractions
+            ]
         search_queries = self._build_search_queries(requirement)
         search_options: dict[str, Any] = {
             "limit": requirement.days * 3,
@@ -180,6 +211,30 @@ class AttractionSearchAgent:
             attraction.model_copy(update={"image_url": self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
             for attraction in attractions
         ]
+
+    def _try_agent_attractions(self, requirement: TravelRequirement) -> List[Attraction]:
+        if self.langchain_agent is None:
+            return []
+        prompt = (
+            "请根据下面的旅行需求返回真实景点 JSON：{\"attractions\":[...]}，不要 Markdown。"
+            "如果没有可用结果，返回 {\"attractions\":[]}。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            data = _extract_json_payload(_extract_agent_content(response))
+            if isinstance(data, dict):
+                raw_items = data.get("attractions", [])
+            elif isinstance(data, list):
+                raw_items = data
+            else:
+                raw_items = []
+            if not isinstance(raw_items, list):
+                return []
+            return [Attraction.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("AttractionSearchAgent tool-driven search failed, using fallback search: %s", exc)
+            return []
 
     def _build_search_queries(self, requirement: TravelRequirement) -> List[str]:
         ai_queries = self._try_ai_search_queries(requirement)
@@ -357,15 +412,43 @@ class WeatherQueryAgent:
 
     def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
         self.amap = amap
+        self.tools = [create_weather_query_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.WEATHER_QUERY,
             "weather_query_agent",
         )
 
     def run(self, requirement: TravelRequirement):
+        agent_weather = self._try_agent_weather(requirement)
+        if agent_weather:
+            return agent_weather
         return self.amap.get_weather(requirement.city, requirement.start_date, requirement.days)
+
+    def _try_agent_weather(self, requirement: TravelRequirement) -> List[WeatherInfo]:
+        if self.langchain_agent is None:
+            return []
+        prompt = (
+            "请根据下面的旅行需求返回天气 JSON：{\"weather\":[...]}，不要 Markdown。"
+            "如果没有可用结果，返回 {\"weather\":[]}。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            data = _extract_json_payload(_extract_agent_content(response))
+            if isinstance(data, dict):
+                raw_items = data.get("weather", [])
+            elif isinstance(data, list):
+                raw_items = data
+            else:
+                raw_items = []
+            if not isinstance(raw_items, list):
+                return []
+            return [WeatherInfo.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("WeatherQueryAgent tool-driven query failed, using fallback weather: %s", exc)
+            return []
 
 
 class HotelAgent:
@@ -373,15 +456,43 @@ class HotelAgent:
 
     def __init__(self, amap: AmapMCPClient, llm: Any | None = None):
         self.amap = amap
+        self.tools = [create_hotel_search_tool(amap)]
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.HOTEL,
             "hotel_agent",
         )
 
     def run(self, requirement: TravelRequirement) -> List[Hotel]:
+        agent_hotels = self._try_agent_hotels(requirement)
+        if agent_hotels:
+            return agent_hotels
         return self.amap.search_hotels(requirement.city, requirement.budget_level, limit=3)
+
+    def _try_agent_hotels(self, requirement: TravelRequirement) -> List[Hotel]:
+        if self.langchain_agent is None:
+            return []
+        prompt = (
+            "请根据下面的旅行需求返回酒店 JSON：{\"hotels\":[...]}，不要 Markdown。"
+            "如果没有可用结果，返回 {\"hotels\":[]}。\n"
+            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
+        )
+        try:
+            response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+            data = _extract_json_payload(_extract_agent_content(response))
+            if isinstance(data, dict):
+                raw_items = data.get("hotels", [])
+            elif isinstance(data, list):
+                raw_items = data
+            else:
+                raw_items = []
+            if not isinstance(raw_items, list):
+                return []
+            return [Hotel.model_validate(item) for item in raw_items if isinstance(item, dict)]
+        except Exception as exc:
+            logger.warning("HotelAgent tool-driven search failed, using fallback hotels: %s", exc)
+            return []
 
 
 class PlannerAgent:
@@ -401,9 +512,10 @@ class PlannerAgent:
             pixabay_api_key="",
             enable_open_sources=False,
         )
+        self.tools = [create_meal_search_tool(amap)] if amap is not None else []
         self.langchain_agent = _safe_create_agent(
             llm,
-            [],
+            self.tools,
             AgentPrompts.PLANNER,
             "planner_agent",
         )

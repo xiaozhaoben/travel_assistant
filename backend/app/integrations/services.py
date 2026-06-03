@@ -7,15 +7,20 @@ import os
 import re
 import shutil
 from datetime import date, timedelta
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Dict, Iterable, List
 import httpx
 
 from app.core.config import get_settings
 from app.domain.models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
+from app.integrations.mcp_utils import is_broken_resource_cleanup_error, wait_for_stdio_transport_cleanup
 from app.storage.plan_log import elapsed_ms, record_api_call
 
 logger = logging.getLogger(__name__)
+
+AMAP_QPS_LIMIT_INFO = "CUQPS_HAS_EXCEEDED_THE_LIMIT"
+AMAP_QPS_LIMIT_INFOCODE = "10021"
+AMAP_HTTP_QPS_RETRY_DELAYS = (1.0, 2.0)
 
 
 class TravelRequirementParser:
@@ -114,16 +119,28 @@ class AmapStdioMCPToolCaller:
                 args=self.command[1:],
                 env=env,
             )
-            async with stdio_client(server) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    with anyio.fail_after(self.timeout_seconds):
-                        await session.initialize()
-                        result = await session.call_tool(tool_name, arguments)
-                    return "\n".join(
-                        getattr(item, "text", "")
-                        for item in result.content
-                        if getattr(item, "text", "")
-                    )
+            text: str | None = None
+            cleanup_error: BaseException | None = None
+            try:
+                async with stdio_client(server) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        with anyio.fail_after(self.timeout_seconds):
+                            await session.initialize()
+                            result = await session.call_tool(tool_name, arguments)
+                        text = "\n".join(
+                            getattr(item, "text", "")
+                            for item in result.content
+                            if getattr(item, "text", "")
+                        )
+            except BaseException as exc:
+                if is_broken_resource_cleanup_error(exc):
+                    cleanup_error = exc
+                else:
+                    raise
+            await wait_for_stdio_transport_cleanup(anyio)
+            if cleanup_error is not None:
+                logger.debug("Ignoring MCP stdio cleanup error after successful %s call: %s", tool_name, cleanup_error)
+            return text or ""
 
         return anyio.run(_call)
 
@@ -423,20 +440,12 @@ class AmapMCPClient:
     ) -> List[Meal]:
         route_point_list = self._normalize_route_points(route_points or [])
         defaults = self._fallback_meals(city, budget_level, route_point_list)
-        use_http_first = self.api_key and (
-            self.mcp_caller is None or isinstance(self.mcp_caller, AmapStdioMCPToolCaller)
-        )
-        if use_http_first:
-            meals = self._search_meals_from_http(city, budget_level, food_preferences, route_point_list)
-            if meals:
-                by_type = {meal.type: meal for meal in meals}
-                return [by_type.get(default.type, default) for default in defaults]
         if self.mcp_caller:
             meals = self._search_meals_from_mcp(city, budget_level, food_preferences, route_point_list)
             if meals:
                 by_type = {meal.type: meal for meal in meals}
                 return [by_type.get(default.type, default) for default in defaults]
-        if self.api_key and not use_http_first:
+        if self.api_key:
             meals = self._search_meals_from_http(city, budget_level, food_preferences, route_point_list)
             if meals:
                 by_type = {meal.type: meal for meal in meals}
@@ -653,23 +662,34 @@ class AmapMCPClient:
             "output": "json",
         }
         try:
-            response = self.http_client.get(
-                "https://restapi.amap.com/v3/place/text",
-                params=params,
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-            if str(data.get("status")) != "1":
-                raise RuntimeError(data.get("info") or "Amap place text search failed")
-            record_api_call(
-                component="amap_http",
-                operation="place_text",
-                request_payload={"url": "https://restapi.amap.com/v3/place/text", "params": params},
-                response_payload=data,
-                duration_ms=elapsed_ms(start),
-            )
-            return data
+            for attempt, delay in enumerate((0.0, *AMAP_HTTP_QPS_RETRY_DELAYS)):
+                if delay:
+                    sleep(delay)
+                response = self.http_client.get(
+                    "https://restapi.amap.com/v3/place/text",
+                    params=params,
+                    timeout=10,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if str(data.get("status")) == "1":
+                    record_api_call(
+                        component="amap_http",
+                        operation="place_text",
+                        request_payload={"url": "https://restapi.amap.com/v3/place/text", "params": params},
+                        response_payload=data,
+                        duration_ms=elapsed_ms(start),
+                    )
+                    return data
+                if not self._is_amap_qps_limit(data) or attempt >= len(AMAP_HTTP_QPS_RETRY_DELAYS):
+                    raise RuntimeError(data.get("info") or "Amap place text search failed")
+                logger.info(
+                    "高德 HTTP QPS 超限，等待 %.1f 秒后重试 place/text: keywords=%s city=%s",
+                    AMAP_HTTP_QPS_RETRY_DELAYS[attempt],
+                    keywords,
+                    city,
+                )
+            raise RuntimeError("Amap place text search failed")
         except Exception as exc:
             record_api_call(
                 component="amap_http",
@@ -679,6 +699,9 @@ class AmapMCPClient:
                 duration_ms=elapsed_ms(start),
             )
             raise
+
+    def _is_amap_qps_limit(self, data: dict) -> bool:
+        return str(data.get("infocode")) == AMAP_QPS_LIMIT_INFOCODE or data.get("info") == AMAP_QPS_LIMIT_INFO
 
     def _get_weather_from_mcp(self, city: str, start: date, days: int) -> List[WeatherInfo]:
         try:

@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from app.core.config import BACKEND_DIR, get_settings
 from app.domain.models import ResearchSnippet
+from app.integrations.mcp_utils import is_broken_resource_cleanup_error, wait_for_stdio_transport_cleanup
 from app.storage.plan_log import elapsed_ms, record_api_call
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ class WebSearchMCPClient:
     ):
         settings = get_settings()
         self.command = command if command is not None else settings.web_search_mcp_command
-        self.tool_name = tool_name or settings.web_search_mcp_tool
+        self.tool_name = _normalize_web_search_tool_name(tool_name or settings.web_search_mcp_tool)
         self.timeout_seconds = settings.mcp_timeout_seconds
         self.mcp_caller = mcp_caller
 
@@ -78,17 +79,29 @@ class WebSearchMCPClient:
                 args=command[1:],
                 env=os.environ.copy(),
             )
-            async with stdio_client(server) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    with anyio.fail_after(self.timeout_seconds):
-                        await session.initialize()
-                        result = await session.call_tool(self.tool_name, arguments)
-                    text = "\n".join(
-                        getattr(item, "text", "")
-                        for item in result.content
-                        if getattr(item, "text", "")
-                    )
-                    return self._normalize_result(text)
+            results: list[dict[str, Any]] | None = None
+            cleanup_error: BaseException | None = None
+            try:
+                async with stdio_client(server) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        with anyio.fail_after(self.timeout_seconds):
+                            await session.initialize()
+                            result = await session.call_tool(self.tool_name, arguments)
+                        text = "\n".join(
+                            getattr(item, "text", "")
+                            for item in result.content
+                            if getattr(item, "text", "")
+                        )
+                        results = self._normalize_result(text)
+            except BaseException as exc:
+                if is_broken_resource_cleanup_error(exc):
+                    cleanup_error = exc
+                else:
+                    raise
+            await wait_for_stdio_transport_cleanup(anyio)
+            if cleanup_error is not None:
+                logger.debug("Ignoring web search MCP stdio cleanup error after successful %s call: %s", self.tool_name, cleanup_error)
+            return results or []
 
         start = perf_counter()
         try:
@@ -271,3 +284,10 @@ def _parse_command(command: str) -> list[str]:
         parsed = json.loads(command)
         return [str(item) for item in parsed]
     return shlex.split(command)
+
+
+def _normalize_web_search_tool_name(tool_name: str) -> str:
+    aliases = {
+        "tavily-search": "tavily_search",
+    }
+    return aliases.get(tool_name, tool_name)

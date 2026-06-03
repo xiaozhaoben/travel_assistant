@@ -15,7 +15,7 @@ from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledge
 from app.integrations.services import AmapMCPClient, AmapStdioMCPToolCaller, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.storage.plan_log import PlanLogRecorder
-from app.workflows.agents import AttractionSearchAgent, PlannerAgent, TravelAgentOrchestrator
+from app.workflows.agents import AttractionSearchAgent, HotelAgent, PlannerAgent, TravelAgentOrchestrator, WeatherQueryAgent
 
 
 class FakeMessage:
@@ -126,6 +126,66 @@ def test_destination_research_service_uses_web_mcp_and_returns_snippets(tmp_path
     assert snippets[0].title == "北京故宫预约攻略"
     assert snippets[0].source == "web"
     assert "预约" in snippets[0].keywords
+
+
+def test_web_search_client_normalizes_tavily_tool_name_alias():
+    from app.researching.research import WebSearchMCPClient
+
+    caller = FakeWebSearchCaller()
+    web = WebSearchMCPClient(tool_name="tavily-search", mcp_caller=caller)
+
+    web.search("Zhuhai Museum official website", {"max_results": 5})
+
+    assert caller.calls[0]["tool_name"] == "tavily_search"
+
+
+def test_mcp_cleanup_error_detection_handles_nested_broken_resource_error():
+    import anyio
+    from exceptiongroup import ExceptionGroup
+
+    from app.integrations.mcp_utils import is_broken_resource_cleanup_error
+
+    error = ExceptionGroup("unhandled errors in a TaskGroup", [anyio.BrokenResourceError()])
+
+    assert is_broken_resource_cleanup_error(error)
+    assert not is_broken_resource_cleanup_error(RuntimeError("Unknown tool"))
+
+
+def test_mcp_cleanup_error_detection_handles_deeply_nested_taskgroup_error():
+    import anyio
+    from exceptiongroup import ExceptionGroup
+
+    from app.integrations.mcp_utils import is_broken_resource_cleanup_error
+
+    error = ExceptionGroup(
+        "outer",
+        [
+            ExceptionGroup(
+                "inner",
+                [anyio.BrokenResourceError()],
+            )
+        ],
+    )
+
+    assert is_broken_resource_cleanup_error(error)
+
+
+def test_mcp_stdio_cleanup_wait_uses_short_delay():
+    import anyio
+
+    from app.integrations.mcp_utils import MCP_STDIO_CLEANUP_DELAY_SECONDS, wait_for_stdio_transport_cleanup
+
+    calls = []
+
+    class FakeAnyio:
+        @staticmethod
+        async def sleep(delay):
+            calls.append(delay)
+
+    anyio.run(wait_for_stdio_transport_cleanup, FakeAnyio)
+
+    assert calls == [MCP_STDIO_CLEANUP_DELAY_SECONDS]
+    assert 0 < MCP_STDIO_CLEANUP_DELAY_SECONDS <= 0.25
 
 
 def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
@@ -508,7 +568,15 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
     calls = []
 
     def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
-        calls.append({"model": model, "tools": tools or [], "system_prompt": system_prompt, "name": name})
+        calls.append(
+            {
+                "model": model,
+                "tools": tools or [],
+                "system_prompt": system_prompt,
+                "name": name,
+                "middleware": kwargs.get("middleware") or [],
+            }
+        )
         return object()
 
     monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
@@ -527,6 +595,34 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
         AgentPrompts.HOTEL,
         AgentPrompts.PLANNER,
     ]
+    tools_by_agent = {call["name"]: {tool.name for tool in call["tools"]} for call in calls}
+    assert tools_by_agent["attraction_search_agent"] == {"search_attractions"}
+    assert tools_by_agent["weather_query_agent"] == {"query_weather"}
+    assert tools_by_agent["hotel_agent"] == {"search_hotels"}
+    assert tools_by_agent["planner_agent"] == {"search_meals"}
+    middleware_by_agent = {
+        call["name"]: {getattr(item, "__name__", type(item).__name__) for item in call["middleware"]}
+        for call in calls
+    }
+    assert middleware_by_agent["attraction_search_agent"] == {"monitor_tool", "log_before_model"}
+    assert middleware_by_agent["weather_query_agent"] == {"monitor_tool", "log_before_model"}
+    assert middleware_by_agent["hotel_agent"] == {"monitor_tool", "log_before_model"}
+    assert middleware_by_agent["planner_agent"] == {"monitor_tool", "log_before_model"}
+
+
+def test_tool_middleware_tolerates_missing_runtime_context():
+    from app.tools.middleware import log_before_model, monitor_tool
+
+    runtime = SimpleNamespace(context=None)
+
+    assert log_before_model.before_model({"messages": []}, runtime) is None
+    assert (
+        monitor_tool.wrap_tool_call(
+            SimpleNamespace(tool_call={"name": "search_meals", "args": {}}, runtime=runtime),
+            lambda request: "ok",
+        )
+        == "ok"
+    )
 
 
 def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
@@ -551,6 +647,49 @@ def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
         "planner_agent",
     ]
     assert all(call["model"] is configured_llm for call in calls)
+
+
+def test_agent_prompts_hold_tool_usage_instructions():
+    assert "search_attractions" in AgentPrompts.ATTRACTION_SEARCH
+    assert "query_weather" in AgentPrompts.WEATHER_QUERY
+    assert "search_hotels" in AgentPrompts.HOTEL
+    assert "search_meals" in AgentPrompts.PLANNER
+    all_prompts = " ".join(
+        [
+            AgentPrompts.ATTRACTION_SEARCH,
+            AgentPrompts.WEATHER_QUERY,
+            AgentPrompts.HOTEL,
+            AgentPrompts.PLANNER,
+        ]
+    )
+    assert "When the" not in all_prompts
+    assert "source of truth" not in all_prompts
+    assert "Before final JSON" not in all_prompts
+
+
+def test_tool_middleware_detects_prior_tool_messages():
+    from app.tools.middleware import tool_call_names_from_state
+
+    state = {
+        "messages": [
+            FakeMessage("user request"),
+            SimpleNamespace(content="[]", type="tool", name="search_hotels"),
+            {"role": "tool", "name": "search_meals", "content": "[]"},
+        ]
+    }
+
+    assert tool_call_names_from_state(state) == ["search_hotels", "search_meals"]
+
+
+def test_weather_query_tool_calls_amap_with_start_argument_name():
+    from app.tools.amap_tools import create_weather_query_tool
+
+    tool = create_weather_query_tool(AmapMCPClient(api_key=""))
+
+    weather = tool.invoke({"city": "北京", "start_date": "2026-06-01", "days": 2})
+
+    assert len(weather) == 2
+    assert weather[0]["date"] == "2026-06-01"
 
 
 def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
@@ -593,6 +732,132 @@ def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
     assert amap.calls[0]["keywords"] != requirement.preferences
     assert amap.calls[0]["ranking_preferences"] == ["历史文化"]
     assert attractions[0].name == "唐家古镇"
+
+
+def test_attraction_agent_prefers_langchain_tool_result_over_direct_amap(monkeypatch):
+    runtime = FakeLangChainAgent(
+        json.dumps(
+            {
+                "attractions": [
+                    {
+                        "id": "tool-attraction",
+                        "name": "陈家祠",
+                        "category": "历史文化",
+                        "address": "广州市荔湾区中山七路",
+                        "location": {"longitude": 113.2466, "latitude": 23.1317},
+                        "visit_duration_minutes": 120,
+                        "description": "由 search_attractions 工具返回的真实 POI。",
+                        "ticket_price": 10,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
+
+    class DirectAmapForbidden:
+        def search_pois(self, *args, **kwargs):
+            raise AssertionError("should prefer LangChain tool result before direct amap.search_pois")
+
+    agent = AttractionSearchAgent(DirectAmapForbidden(), UnsplashMCPClient(access_key=""), llm=FakeLLM("{}"))
+    requirement = TravelRequirement(
+        prompt="广州 1 天 历史文化 中等预算",
+        city="广州",
+        days=1,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+
+    attractions = agent.run(requirement)
+
+    assert runtime.calls
+    assert attractions[0].id == "tool-attraction"
+    assert attractions[0].image_url is not None
+
+
+def test_weather_agent_prefers_langchain_tool_result_over_direct_amap(monkeypatch):
+    runtime = FakeLangChainAgent(
+        json.dumps(
+            {
+                "weather": [
+                    {
+                        "date": "2026-06-01",
+                        "day_weather": "晴",
+                        "night_weather": "多云",
+                        "day_temp": 28,
+                        "night_temp": 22,
+                        "wind": "东风1-3级",
+                        "suggestion": "适合户外游览。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
+
+    class DirectAmapForbidden:
+        def get_weather(self, *args, **kwargs):
+            raise AssertionError("should prefer LangChain tool result before direct amap.get_weather")
+
+    agent = WeatherQueryAgent(DirectAmapForbidden(), llm=FakeLLM("{}"))
+    requirement = TravelRequirement(
+        prompt="广州 1 天 历史文化 中等预算",
+        city="广州",
+        days=1,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+
+    weather = agent.run(requirement)
+
+    assert runtime.calls
+    assert weather[0].day_weather == "晴"
+
+
+def test_hotel_agent_prefers_langchain_tool_result_over_direct_amap(monkeypatch):
+    runtime = FakeLangChainAgent(
+        json.dumps(
+            {
+                "hotels": [
+                    {
+                        "id": "tool-hotel",
+                        "name": "城央精选酒店",
+                        "address": "广州市越秀区",
+                        "location": {"longitude": 113.2644, "latitude": 23.1291},
+                        "type": "中等型酒店",
+                        "rating": 4.6,
+                        "nightly_price": 520,
+                        "description": "由 search_hotels 工具返回的酒店。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    monkeypatch.setattr("app.workflows.agents.create_agent", lambda *args, **kwargs: runtime)
+
+    class DirectAmapForbidden:
+        def search_hotels(self, *args, **kwargs):
+            raise AssertionError("should prefer LangChain tool result before direct amap.search_hotels")
+
+    agent = HotelAgent(DirectAmapForbidden(), llm=FakeLLM("{}"))
+    requirement = TravelRequirement(
+        prompt="广州 1 天 历史文化 中等预算",
+        city="广州",
+        days=1,
+        preferences=["历史文化"],
+        budget_level="中等",
+        start_date=date(2026, 6, 1),
+    )
+
+    hotels = agent.run(requirement)
+
+    assert runtime.calls
+    assert hotels[0].id == "tool-hotel"
 
 
 def test_attraction_agent_filters_ai_generic_category_queries(monkeypatch):
@@ -1198,6 +1463,49 @@ def test_amap_client_uses_mcp_for_restaurant_meals_near_day_route():
     assert all(call["tool_name"] == "maps_text_search" for call in caller.calls)
 
 
+def test_amap_client_prefers_stdio_mcp_over_http_for_restaurant_meals():
+    class FakeStdioMCPCaller(AmapStdioMCPToolCaller):
+        def __init__(self):
+            super().__init__("amap-key")
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "pois": [
+                    {
+                        "id": "mcp-breakfast",
+                        "name": "\u73e0\u6d77\u65e9\u8336",
+                        "address": "\u60c5\u4fa3\u4e2d\u8def",
+                        "type": "\u9910\u996e\u670d\u52a1;\u4e2d\u9910\u5385;\u5e7f\u4e1c\u83dc",
+                        "location": "113.5760,22.2920",
+                        "cityname": "\u73e0\u6d77\u5e02",
+                    }
+                ]
+            }
+
+    class HttpForbidden:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, *args, **kwargs):
+            self.calls.append({"args": args, "kwargs": kwargs})
+            raise AssertionError("餐饮搜索应先走高德 MCP，不能先请求 HTTP")
+
+        def close(self):
+            return None
+
+    caller = FakeStdioMCPCaller()
+    http = HttpForbidden()
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=caller, http_client=http)
+
+    meals = amap.search_meals("\u73e0\u6d77", "\u4e2d\u7b49")
+
+    assert meals[0].id == "mcp-breakfast"
+    assert caller.calls[0]["tool_name"] == "maps_text_search"
+    assert http.calls == []
+
+
 def test_amap_client_falls_back_to_local_city_meals_without_mcp():
     amap = AmapMCPClient(api_key="")
 
@@ -1281,6 +1589,54 @@ def test_amap_client_uses_http_restaurant_search_when_mcp_unavailable():
     assert meals[0].location.longitude == 113.5760
     assert all(call["url"] == "https://restapi.amap.com/v3/place/text" for call in client.calls)
     assert client.calls[0]["params"]["keywords"] == "\u73e0\u6d77\u65e9\u9910"
+
+
+def test_amap_http_restaurant_search_waits_and_retries_after_qps_limit(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("app.integrations.services.sleep", lambda seconds: sleeps.append(seconds))
+
+    client = FakeHttpClient(
+        [
+            {"status": "0", "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT", "infocode": "10021"},
+            {
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "retry-breakfast",
+                        "name": "\u73e0\u6d77\u65e9\u8336\u9910\u5385",
+                        "address": "\u60c5\u4fa3\u4e2d\u8def",
+                        "type": "\u9910\u996e\u670d\u52a1;\u4e2d\u9910\u5385;\u5e7f\u4e1c\u83dc",
+                        "location": "113.5760,22.2920",
+                        "cityname": "\u73e0\u6d77\u5e02",
+                    }
+                ],
+            },
+        ]
+    )
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=None, http_client=client)
+
+    data = amap._amap_place_text("\u73e0\u6d77\u65e9\u9910", "\u73e0\u6d77")
+
+    assert data["pois"][0]["id"] == "retry-breakfast"
+    assert len(client.calls) == 2
+    assert sleeps == [1.0]
+
+
+def test_amap_http_restaurant_search_does_not_retry_non_qps_errors(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("app.integrations.services.sleep", lambda seconds: sleeps.append(seconds))
+    client = FakeHttpClient([{"status": "0", "info": "USERKEY_PLAT_NOMATCH", "infocode": "10009"}])
+    amap = AmapMCPClient(api_key="amap-key", mcp_caller=None, http_client=client)
+
+    try:
+        amap._amap_place_text("\u73e0\u6d77\u65e9\u9910", "\u73e0\u6d77")
+    except RuntimeError as exc:
+        assert "USERKEY_PLAT_NOMATCH" in str(exc)
+    else:
+        raise AssertionError("expected non-QPS Amap error to be raised")
+
+    assert len(client.calls) == 1
+    assert sleeps == []
 
 
 def test_amap_stdio_mcp_caller_finds_winget_uvx_when_path_is_stale(monkeypatch):
@@ -1787,6 +2143,8 @@ def test_planner_agent_invokes_langchain_runtime_when_model_is_available(monkeyp
 
     assert runtime.calls, "PlannerAgent should call the LangChain create_agent runtime"
     assert runtime.calls[0]["messages"][0]["role"] == "user"
+    assert "search_meals" not in runtime.calls[0]["messages"][0]["content"]
+    assert "search_meals" in AgentPrompts.PLANNER
     assert plan.city == "北京"
     assert plan.days[0].summary == "LLM生成的历史文化一日游"
     assert plan.budget.total == 860
@@ -1826,6 +2184,66 @@ def test_planner_agent_invokes_langchain_agent_runtime():
     assert runtime.calls
     assert runtime.calls[0]["messages"][0]["role"] == "user"
     assert plan.generation_mode == "llm"
+
+
+def test_planner_agent_does_not_retry_invoke_when_stream_fails():
+    fake_plan = _fake_llm_plan()
+
+    class StreamFailInvokeAgent:
+        def __init__(self):
+            self.stream_calls = []
+            self.invoke_calls = []
+
+        def stream(self, state, **kwargs):
+            self.stream_calls.append({"state": state, "kwargs": kwargs})
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+            yield
+
+        def invoke(self, state):
+            self.invoke_calls.append(state)
+            return {"messages": [FakeMessage(json.dumps(fake_plan, ensure_ascii=False))]}
+
+    runtime = StreamFailInvokeAgent()
+    planner = PlannerAgent(llm=None)
+    planner.langchain_agent = runtime
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等")
+    attractions = orchestrator.attractions.run(requirement)
+    weather = orchestrator.weather.run(requirement)
+    hotels = orchestrator.hotels.run(requirement)
+
+    plan = planner.run(requirement, attractions, weather, hotels)
+
+    assert runtime.stream_calls
+    assert not runtime.invoke_calls
+    assert plan.generation_mode == "fallback"
+
+
+def test_planner_agent_does_not_retry_raw_llm_when_langchain_agent_fails():
+    fake_plan = _fake_llm_plan()
+
+    class BrokenLangChainAgent:
+        def stream(self, state, **kwargs):
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+            yield
+
+        def invoke(self, state):
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+
+    llm = FakeLLM(json.dumps(fake_plan, ensure_ascii=False))
+    planner = PlannerAgent(llm=None)
+    planner.llm = llm
+    planner.langchain_agent = BrokenLangChainAgent()
+    orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
+    requirement = orchestrator.parser.parse("我想去北京玩 1 天，喜欢历史文化，预算中等")
+    attractions = orchestrator.attractions.run(requirement)
+    weather = orchestrator.weather.run(requirement)
+    hotels = orchestrator.hotels.run(requirement)
+
+    plan = planner.run(requirement, attractions, weather, hotels)
+
+    assert not llm.calls
+    assert plan.generation_mode == "fallback"
 
 
 def test_planner_agent_marks_fallback_generation_mode_without_model():
