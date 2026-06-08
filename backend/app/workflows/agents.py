@@ -26,6 +26,7 @@ from app.domain.models import (
     Hotel,
     Location,
     Meal,
+    PlannerLLMOutput,
     ResearchSnippet,
     TripPlan,
     TripPlanOption,
@@ -45,6 +46,8 @@ from app.tools import (
     create_weather_query_tool,
 )
 from app.tools.middleware import log_before_model, monitor_tool
+from app.workflows.react import ReActMaxIterationsExceeded, ReActOutputRunner
+from app.workflows.reflection_memory import FailedCaseNotebook, ReflectionMemoryStore, SupervisorReflectionAgent
 
 logger = logging.getLogger(__name__)
 
@@ -503,9 +506,16 @@ class PlannerAgent:
         llm: Any | None = None,
         amap: AmapMCPClient | None = None,
         image_provider: UnsplashMCPClient | None = None,
+        reflection_memory: ReflectionMemoryStore | None = None,
+        reflection_agent: SupervisorReflectionAgent | None = None,
+        max_iterations: int | None = None,
     ):
+        settings = get_settings()
         self.llm = llm
         self.amap = amap
+        self.max_iterations = max_iterations or settings.planner_max_iterations
+        self.reflection_memory = reflection_memory
+        self.reflection_agent = reflection_agent or SupervisorReflectionAgent(reflection_memory)
         self.image_provider = image_provider or UnsplashMCPClient(
             access_key="",
             pexels_api_key="",
@@ -544,6 +554,7 @@ class PlannerAgent:
         research_context: List[ResearchSnippet],
     ) -> TripPlanningResult | None:
         prompt = self._build_prompt(requirement, attractions, weather, hotels, research_context)
+        return self._try_llm_plan_with_react(prompt, requirement, attractions, weather, hotels, research_context)
         try:
             if SystemMessage is not None and HumanMessage is not None:
                 messages = [
@@ -576,6 +587,99 @@ class PlannerAgent:
         except Exception as exc:
             logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
             return None
+
+    def _try_llm_plan_with_react(
+        self,
+        prompt: str,
+        requirement: TravelRequirement,
+        attractions: List[Attraction],
+        weather,
+        hotels: List[Hotel],
+        research_context: List[ResearchSnippet],
+    ) -> TripPlanningResult | None:
+        memory_context = self._retrieve_reflection_memory(requirement, prompt)
+        runner = ReActOutputRunner(self.name, max_iterations=self.max_iterations)
+        try:
+            result, attempts = runner.run(
+                base_prompt=prompt,
+                invoke=self._invoke_planner_llm,
+                parse=self._extract_json,
+                build=lambda data: self._normalize_llm_result(
+                    data,
+                    requirement,
+                    attractions,
+                    weather,
+                    hotels,
+                    research_context,
+                ),
+                memory_context=memory_context,
+            )
+            if any(attempt.error for attempt in attempts):
+                self._reflect_on_attempts(prompt, attempts, requirement)
+            return result
+        except ReActMaxIterationsExceeded as exc:
+            self._reflect_on_attempts(prompt, exc.attempts, requirement)
+            logger.warning("PlannerAgent LLM planning failed after ReAct retries, falling back to local planner: %s", exc)
+            return None
+        except Exception as exc:
+            logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
+            return None
+
+    def _invoke_planner_llm(self, prompt: str, iteration: int) -> str:
+        if SystemMessage is not None and HumanMessage is not None:
+            messages = [
+                SystemMessage(content="You are a professional travel planner. Return valid JSON only."),
+                HumanMessage(content=prompt),
+            ]
+        else:
+            messages = prompt
+        if self.langchain_agent is not None:
+            return _stream_agent_content(
+                self.langchain_agent,
+                {"messages": [{"role": "user", "content": prompt}]},
+                self.name,
+            )
+        if self.llm is None:
+            raise RuntimeError("Planner LLM is not configured.")
+        start = time.perf_counter()
+        response = self.llm.invoke(messages)
+        content = str(getattr(response, "content", response))
+        record_llm_call(
+            component=self.name,
+            operation="react_invoke",
+            request_payload={"messages": messages, "iteration": iteration},
+            response_payload={"content": content},
+            duration_ms=elapsed_ms(start),
+        )
+        return content
+
+    def _retrieve_reflection_memory(self, requirement: TravelRequirement, prompt: str) -> list[str]:
+        if self.reflection_memory is None:
+            return []
+        query = " ".join(
+            [
+                requirement.prompt,
+                requirement.city,
+                ",".join(requirement.preferences),
+                prompt[:1000],
+            ]
+        )
+        return self.reflection_memory.retrieve(query, k=3)
+
+    def _reflect_on_attempts(
+        self,
+        prompt: str,
+        attempts,
+        requirement: TravelRequirement,
+    ) -> None:
+        if self.reflection_agent is None:
+            return
+        self.reflection_agent.review(
+            component=self.name,
+            prompt=prompt,
+            attempts=list(attempts),
+            context={"requirement": requirement.model_dump(mode="json")},
+        )
 
     def _build_prompt(
         self,
@@ -636,6 +740,11 @@ class PlannerAgent:
                 if group
             ],
             "research_context": [item.model_dump(mode="json") for item in research_context[:6]],
+            "output_contract": {
+                "validator": "PlannerLLMOutput",
+                "required_shape": "Return JSON with options[].plan.days or top-level days. Include thought as one short repair note.",
+                "max_react_iterations": self.max_iterations,
+            },
         }
         return (
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
@@ -658,6 +767,7 @@ class PlannerAgent:
         hotels: List[Hotel],
         research_context: List[ResearchSnippet],
     ) -> TripPlanningResult:
+        PlannerLLMOutput.model_validate(data)
         raw_options = data.get("options")
         if not isinstance(raw_options, list) or not raw_options:
             plan_data = self._normalize_llm_data(data, requirement, attractions, weather, hotels)
@@ -1279,11 +1389,28 @@ class TravelAgentOrchestrator:
         configured_llm = None if disable_llm else create_llm()
         agent_llm = llm if llm is not None else configured_llm
         planner_llm = agent_llm
+        self.reflection_memory: ReflectionMemoryStore | None = None
+        self.reflection_agent = SupervisorReflectionAgent()
         self.attractions = AttractionSearchAgent(self.amap, self.unsplash, llm=agent_llm)
         self.weather = WeatherQueryAgent(self.amap, llm=agent_llm)
         self.hotels = HotelAgent(self.amap, llm=agent_llm)
-        self.planner = PlannerAgent(llm=planner_llm, amap=self.amap, image_provider=self.unsplash)
+        self.planner = PlannerAgent(
+            llm=planner_llm,
+            amap=self.amap,
+            image_provider=self.unsplash,
+            reflection_agent=self.reflection_agent,
+            max_iterations=settings.planner_max_iterations,
+        )
         self.research = DestinationResearchService()
+
+    def configure_reflection_memory(self, vector_store: Any | None, failed_case_path=None) -> None:
+        self.reflection_memory = ReflectionMemoryStore(vector_store)
+        self.reflection_agent = SupervisorReflectionAgent(
+            memory_store=self.reflection_memory,
+            notebook=FailedCaseNotebook(failed_case_path),
+        )
+        self.planner.reflection_memory = self.reflection_memory
+        self.planner.reflection_agent = self.reflection_agent
 
     def plan(self, request: TripPlanRequest) -> TripPlanningResult:
         requirement = self.parser.parse(request.prompt)

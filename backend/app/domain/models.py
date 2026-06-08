@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any, Generic, List, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class TripPlanRequest(BaseModel):
@@ -213,6 +213,49 @@ class TripPlanningResult(BaseModel):
     @property
     def agent_trace(self) -> List[str]:
         return self.selected_plan.agent_trace
+
+
+class PlannerLLMOptionOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[str] = None
+    title: Optional[str] = None
+    style: Optional[str] = None
+    suitable_for: Optional[str] = None
+    highlights: List[str] = Field(default_factory=list)
+    tradeoffs: List[str] = Field(default_factory=list)
+    plan: Optional[dict[str, Any]] = None
+    days: Optional[List[dict[str, Any]]] = None
+
+
+class PlannerLLMOutput(BaseModel):
+    """Validated contract for raw planner LLM JSON before repair/normalization."""
+
+    model_config = ConfigDict(extra="allow")
+
+    thought: Optional[str] = Field(
+        default=None,
+        description="One short repair note for the current attempt; do not include hidden reasoning.",
+    )
+    selected_option_id: Optional[str] = None
+    options: List[PlannerLLMOptionOutput] = Field(default_factory=list)
+    clarifying_suggestions: List[str] = Field(default_factory=list)
+    days: Optional[List[dict[str, Any]]] = None
+
+    @model_validator(mode="after")
+    def require_plan_shape(self) -> "PlannerLLMOutput":
+        if self.options:
+            for index, option in enumerate(self.options):
+                option_plan = option.plan if isinstance(option.plan, dict) else None
+                if option_plan and isinstance(option_plan.get("days"), list) and option_plan["days"]:
+                    continue
+                if isinstance(option.days, list) and option.days:
+                    continue
+                raise ValueError(f"options[{index}] must include plan.days or days.")
+            return self
+        if isinstance(self.days, list) and self.days:
+            return self
+        raise ValueError("Planner output must include either options or top-level days.")
 
 
 class PlanEditRequest(BaseModel):

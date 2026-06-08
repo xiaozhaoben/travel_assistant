@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import sys
@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.main import app
 from app.core.config import get_settings
-from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest
+from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest, WeatherInfo
 from app.integrations.services import AmapMCPClient, AmapStdioMCPToolCaller, BudgetCalculator, TravelRequirementParser, UnsplashMCPClient
 from app.prompts.agent_prompts import AgentPrompts
 from app.storage.plan_log import PlanLogRecorder
@@ -31,6 +31,17 @@ class FakeLLM:
     def invoke(self, messages):
         self.calls.append(messages)
         return FakeMessage(self.content)
+
+
+class SequentialFakeLLM:
+    def __init__(self, contents):
+        self.contents = list(contents)
+        self.calls = []
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        content = self.contents.pop(0) if self.contents else "{}"
+        return FakeMessage(content)
 
 
 class FakeLangChainAgent:
@@ -2166,6 +2177,93 @@ def test_planner_agent_falls_back_to_raw_llm_when_create_agent_fails(monkeypatch
     assert llm.calls
     assert plan.days[0].summary == fake_plan["days"][0]["summary"]
     assert plan.generation_mode == "llm"
+
+
+def test_planner_agent_retries_with_error_feedback_after_schema_failure(monkeypatch, tmp_path):
+    from app.workflows.reflection_memory import FailedCaseNotebook, SupervisorReflectionAgent
+
+    fake_plan = _fake_llm_plan()
+    invalid_payload = {
+        "thought": "first attempt omitted plan payload",
+        "selected_option_id": "balanced",
+        "options": [{"id": "balanced"}],
+    }
+    llm = SequentialFakeLLM(
+        [
+            json.dumps(invalid_payload, ensure_ascii=False),
+            json.dumps(fake_plan, ensure_ascii=False),
+        ]
+    )
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        raise RuntimeError("unsupported model")
+
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
+    planner = PlannerAgent(
+        llm=llm,
+        max_iterations=2,
+        reflection_agent=SupervisorReflectionAgent(notebook=FailedCaseNotebook(tmp_path / "failed.jsonl")),
+    )
+    requirement = TravelRequirement(
+        prompt="planner retry test",
+        city=fake_plan["city"],
+        days=1,
+        preferences=fake_plan["preferences"],
+        budget_level=fake_plan["budget_level"],
+        start_date=date.fromisoformat(fake_plan["days"][0]["date"]),
+    )
+    attractions = [Attraction.model_validate(fake_plan["days"][0]["attractions"][0])]
+    weather = [WeatherInfo.model_validate(fake_plan["weather"][0])]
+    hotels = [Hotel.model_validate(fake_plan["days"][0]["hotel"])]
+
+    result = planner.run(requirement, attractions, weather, hotels)
+
+    assert result.generation_mode == "llm"
+    assert len(llm.calls) == 2
+    assert "Previous attempt failed" in llm.calls[1][1].content
+    assert (tmp_path / "failed.jsonl").exists()
+
+
+def test_planner_agent_reflects_failed_cases_to_memory_after_max_iterations(monkeypatch, tmp_path):
+    from app.workflows.reflection_memory import FailedCaseNotebook, ReflectionMemoryStore, SupervisorReflectionAgent
+
+    store = FakeTravelVectorStore()
+    memory = ReflectionMemoryStore(store)
+    llm = SequentialFakeLLM(["not json", "still not json"])
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        raise RuntimeError("unsupported model")
+
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
+    planner = PlannerAgent(
+        llm=llm,
+        max_iterations=2,
+        reflection_memory=memory,
+        reflection_agent=SupervisorReflectionAgent(
+            memory_store=memory,
+            notebook=FailedCaseNotebook(tmp_path / "failed.jsonl"),
+        ),
+    )
+    fake_plan = _fake_llm_plan()
+    requirement = TravelRequirement(
+        prompt="planner failure memory test",
+        city=fake_plan["city"],
+        days=1,
+        preferences=fake_plan["preferences"],
+        budget_level=fake_plan["budget_level"],
+        start_date=date.fromisoformat(fake_plan["days"][0]["date"]),
+    )
+    attractions = [Attraction.model_validate(fake_plan["days"][0]["attractions"][0])]
+    weather = [WeatherInfo.model_validate(fake_plan["weather"][0])]
+    hotels = [Hotel.model_validate(fake_plan["days"][0]["hotel"])]
+
+    result = planner.run(requirement, attractions, weather, hotels)
+
+    assert result.generation_mode == "fallback"
+    assert len(llm.calls) == 2
+    assert store.saved
+    assert store.saved[0]["source_name"] == "planner-reflection"
+    assert (tmp_path / "failed.jsonl").read_text(encoding="utf-8")
 
 
 def test_planner_agent_invokes_langchain_agent_runtime():
