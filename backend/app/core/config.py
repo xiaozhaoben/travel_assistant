@@ -40,6 +40,7 @@ class Settings:
     embedding_dimensions: int
     embedding_api_key: str | None
     planner_mode: str
+    planner_max_iterations: int
     research_cache_enabled: bool
     research_cache_ttl_seconds: int
     research_cache_max_entries: int
@@ -105,6 +106,7 @@ def get_settings() -> Settings:
             or os.getenv("OPENAI_API_KEY")
         ),
         planner_mode=os.getenv("PLANNER_MODE", "fast"),
+        planner_max_iterations=max(1, min(int(os.getenv("PLANNER_MAX_ITERATIONS", "3")), 10)),
         research_cache_enabled=_env_bool("RESEARCH_CACHE_ENABLED", default=True),
         research_cache_ttl_seconds=int(os.getenv("RESEARCH_CACHE_TTL_SECONDS", "86400")),
         research_cache_max_entries=int(os.getenv("RESEARCH_CACHE_MAX_ENTRIES", "200")),

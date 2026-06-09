@@ -53,9 +53,10 @@ image_provider: UnsplashMCPClient | None = None
 
 def create_app_resources() -> AppResources:
     resource_settings = get_settings()
-    resource_orchestrator = TravelAgentOrchestrator()
     resource_report_store = create_report_store(resource_settings.database_url)
     resource_vector_store = create_travel_vector_store(resource_settings.database_url)
+    resource_orchestrator = TravelAgentOrchestrator()
+    resource_orchestrator.configure_reflection_memory(resource_vector_store)
     resource_news_agent = TravelNewsIngestionAgent(resource_vector_store)
     resource_qa_agent = TravelQuestionAnsweringAgent(
         resource_vector_store,
@@ -81,6 +82,8 @@ def bind_app_resources(resources: AppResources) -> None:
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
+    if hasattr(orchestrator, "configure_reflection_memory"):
+        orchestrator.configure_reflection_memory(travel_vector_store)
     news_agent = resources.news_agent
     qa_agent = resources.qa_agent
     image_provider = resources.image_provider
@@ -207,6 +210,7 @@ def health():
         "amap_transport": "mcp-stdio",
         "unsplash_configured": bool(settings.unsplash_access_key),
         "planner_mode": settings.planner_mode,
+        "planner_max_iterations": settings.planner_max_iterations,
         "cache_enabled": settings.research_cache_enabled,
         "image_providers": {
             "web_search": bool(settings.web_search_mcp_command),

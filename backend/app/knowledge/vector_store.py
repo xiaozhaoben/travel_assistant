@@ -283,22 +283,36 @@ class PostgresTravelVectorStore:
                         added += 1
         return added
 
-    def similarity_search(self, query: str, k: int = 5) -> list[KnowledgeDocument]:
+    def similarity_search(self, query: str, k: int = 5, source_name: str | None = None) -> list[KnowledgeDocument]:
         self._ensure_schema_once()
         vector_literal = vector_to_sql_literal(self.embeddings.embed_query(query))
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(
-                    """
-                    SELECT
-                        id::text, title, content, summary, source_url, source_name,
-                        published_at, 1 - (embedding <=> %s::vector) AS score
-                    FROM travel_knowledge_documents
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (vector_literal, vector_literal, max(1, min(k, 12))),
-                ).fetchall()
+                if source_name:
+                    rows = cur.execute(
+                        """
+                        SELECT
+                            id::text, title, content, summary, source_url, source_name,
+                            published_at, 1 - (embedding <=> %s::vector) AS score
+                        FROM travel_knowledge_documents
+                        WHERE source_name = %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (vector_literal, source_name, vector_literal, max(1, min(k, 12))),
+                    ).fetchall()
+                else:
+                    rows = cur.execute(
+                        """
+                        SELECT
+                            id::text, title, content, summary, source_url, source_name,
+                            published_at, 1 - (embedding <=> %s::vector) AS score
+                        FROM travel_knowledge_documents
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (vector_literal, vector_literal, max(1, min(k, 12))),
+                    ).fetchall()
         return [KnowledgeDocument(**dict(row)) for row in rows]
 
     def close(self) -> None:
