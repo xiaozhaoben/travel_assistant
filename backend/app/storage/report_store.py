@@ -21,6 +21,27 @@ from app.storage.plan_log import PlanLogEntry
 logger = logging.getLogger(__name__)
 
 
+def _set_attraction_image_in_plan_payload(plan_payload: dict[str, Any], attraction_name: str, image_url: str) -> bool:
+    changed = False
+    for day in plan_payload.get("days") or []:
+        if not isinstance(day, dict):
+            continue
+        for attraction in day.get("attractions") or []:
+            if isinstance(attraction, dict) and attraction.get("name") == attraction_name:
+                if attraction.get("image_url") != image_url:
+                    attraction["image_url"] = image_url
+                    changed = True
+    return changed
+
+
+def _set_attraction_image_in_result_payload(result_payload: dict[str, Any], attraction_name: str, image_url: str) -> bool:
+    changed = _set_attraction_image_in_plan_payload(result_payload, attraction_name, image_url)
+    for option in result_payload.get("options") or []:
+        if isinstance(option, dict) and isinstance(option.get("plan"), dict):
+            changed = _set_attraction_image_in_plan_payload(option["plan"], attraction_name, image_url) or changed
+    return changed
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS trip_reports (
     id uuid PRIMARY KEY,
@@ -60,11 +81,26 @@ CREATE TABLE IF NOT EXISTS plan_execution_logs (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS trip_asset_cache (
+    id uuid PRIMARY KEY,
+    asset_type text NOT NULL,
+    cache_key text NOT NULL,
+    city text NOT NULL DEFAULT '',
+    name text NOT NULL,
+    value text NOT NULL,
+    response_payload jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    last_accessed_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (asset_type, cache_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_trip_reports_created_at ON trip_reports (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trip_reports_city ON trip_reports (city);
 CREATE INDEX IF NOT EXISTS idx_trip_report_revisions_report_id ON trip_report_revisions (report_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_report_id ON plan_execution_logs (report_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_event_type ON plan_execution_logs (event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trip_asset_cache_city_name ON trip_asset_cache (asset_type, city, name);
 """
 
 
@@ -214,6 +250,99 @@ class PostgresReportStore:
                     """,
                     rows,
                 )
+
+    def get_cached_asset(self, asset_type: str, cache_key: str) -> dict[str, Any] | None:
+        self._ensure_schema_once()
+        with self.connections.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    """
+                    UPDATE trip_asset_cache
+                    SET last_accessed_at = now()
+                    WHERE asset_type = %s AND cache_key = %s
+                    RETURNING
+                        id::text, asset_type, cache_key, city, name, value,
+                        response_payload, created_at, updated_at, last_accessed_at
+                    """,
+                    (asset_type, cache_key),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_asset_cache(
+        self,
+        asset_type: str,
+        cache_key: str,
+        city: str,
+        name: str,
+        value: str,
+        response_payload: dict[str, Any] | list[Any] | None = None,
+    ) -> None:
+        self._ensure_schema_once()
+        with self.connections.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO trip_asset_cache (
+                        id, asset_type, cache_key, city, name, value, response_payload
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (asset_type, cache_key)
+                    DO UPDATE SET
+                        city = EXCLUDED.city,
+                        name = EXCLUDED.name,
+                        value = EXCLUDED.value,
+                        response_payload = EXCLUDED.response_payload,
+                        updated_at = now(),
+                        last_accessed_at = now()
+                    """,
+                    (
+                        str(uuid4()),
+                        asset_type,
+                        cache_key,
+                        city or "",
+                        name,
+                        value,
+                        Jsonb(response_payload) if response_payload is not None else None,
+                    ),
+                )
+
+    def update_report_attraction_image(self, report_id: str, attraction_name: str, image_url: str) -> bool:
+        self._ensure_schema_once()
+        with self.connections.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                row = cur.execute(
+                    """
+                    SELECT result_payload, selected_plan_payload
+                    FROM trip_reports
+                    WHERE id = %s
+                    """,
+                    (report_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Report not found: {report_id}")
+
+                result_payload = dict(row["result_payload"])
+                selected_plan_payload = dict(row["selected_plan_payload"])
+                changed = _set_attraction_image_in_result_payload(result_payload, attraction_name, image_url)
+                changed = _set_attraction_image_in_plan_payload(selected_plan_payload, attraction_name, image_url) or changed
+                if not changed:
+                    return False
+
+                cur.execute(
+                    """
+                    UPDATE trip_reports
+                    SET result_payload = %s,
+                        selected_plan_payload = %s,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        Jsonb(result_payload),
+                        Jsonb(selected_plan_payload),
+                        report_id,
+                    ),
+                )
+        return True
 
     def list_reports(self, limit: int = 50) -> list[TripReportSummary]:
         self._ensure_schema_once()

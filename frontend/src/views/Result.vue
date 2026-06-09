@@ -468,6 +468,7 @@ function getMealLabel(type: string) {
 
 async function loadAttractionPhotos() {
   if (!tripPlan.value) return
+  let changed = false
   const tasks = tripPlan.value.days
     .flatMap((day) => day.attractions)
     .map((attraction) => async () => {
@@ -476,12 +477,25 @@ async function loadAttractionPhotos() {
         return
       }
       try {
-        attractionPhotos.value[attraction.name] = await getAttractionPhoto(attraction.name)
+        const photoUrl = await getAttractionPhoto(attraction.name, {
+          city: tripPlan.value?.city,
+          report_id: planningResult.value?.report_id,
+        })
+        attractionPhotos.value[attraction.name] = photoUrl
+        if (photoUrl) {
+          attraction.image_url = photoUrl
+          changed = true
+        }
       } catch {
         attractionPhotos.value[attraction.name] = ''
       }
     })
   await runLimited(tasks, 4)
+  if (changed) {
+    syncSelectedOption()
+    sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
+    if (planningResult.value) sessionStorage.setItem('tripPlanningResult', JSON.stringify(planningResult.value))
+  }
 }
 
 async function runLimited(tasks: Array<() => Promise<void>>, limit: number) {

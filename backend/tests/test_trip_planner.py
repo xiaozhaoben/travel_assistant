@@ -656,6 +656,7 @@ def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
         return object()
 
     monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("PLANNER_MODE", "quality")
     monkeypatch.setattr("app.workflows.agents.create_llm", lambda: configured_llm)
     monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
 
@@ -669,6 +670,38 @@ def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):
         "planner_agent",
     ]
     assert all(call["model"] is configured_llm for call in calls)
+
+
+def test_fast_planner_mode_skips_all_configured_llm_agents(monkeypatch):
+    calls = []
+    configured_llm = object()
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        calls.append({"name": name, "model": model})
+        return object()
+
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("PLANNER_MODE", "fast")
+    monkeypatch.setattr("app.workflows.agents.create_llm", lambda: configured_llm)
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
+
+    orchestrator = TravelAgentOrchestrator(disable_external_api=True)
+
+    assert orchestrator.attractions.llm is None
+    assert orchestrator.weather.langchain_agent is None
+    assert orchestrator.hotels.langchain_agent is None
+    assert orchestrator.planner.llm is None
+    assert calls == []
+
+
+def test_fast_planner_mode_uses_local_amap_fallback_for_plan_generation(monkeypatch):
+    monkeypatch.setenv("PLANNER_MODE", "fast")
+    monkeypatch.setenv("AMAP_API_KEY", "test-amap-key")
+
+    orchestrator = TravelAgentOrchestrator(disable_llm=True)
+
+    assert orchestrator.amap.api_key == ""
+    assert orchestrator.amap.mcp_caller is None
 
 
 def test_agent_prompts_hold_tool_usage_instructions():
@@ -754,6 +787,42 @@ def test_attraction_agent_uses_ai_generated_amap_queries(monkeypatch):
     assert amap.calls[0]["keywords"] != requirement.preferences
     assert amap.calls[0]["ranking_preferences"] == ["历史文化"]
     assert attractions[0].name == "唐家古镇"
+
+
+def test_attraction_agent_does_not_fetch_images_during_plan_generation():
+    class FakeAmap:
+        def search_pois(self, city, keywords, limit=9, **kwargs):
+            return [
+                Attraction(
+                    id="poi-1",
+                    name="image-skip-attraction",
+                    category="history",
+                    address="test address",
+                    location=Location(longitude=116.397, latitude=39.916),
+                    visit_duration_minutes=120,
+                    description="test description",
+                    ticket_price=0,
+                )
+            ]
+
+    class ForbiddenImages:
+        def image_for(self, query, *args, **kwargs):
+            raise AssertionError("image provider should not be called during trip plan generation")
+
+    agent = AttractionSearchAgent(FakeAmap(), ForbiddenImages(), llm=None)
+    requirement = TravelRequirement(
+        prompt="image skip test",
+        city="test city",
+        days=1,
+        preferences=["history"],
+        budget_level="medium",
+        start_date=date(2026, 6, 1),
+    )
+
+    attractions = agent.run(requirement)
+
+    assert len(attractions) == 1
+    assert attractions[0].image_url == ""
 
 
 def test_attraction_agent_prefers_langchain_tool_result_over_direct_amap(monkeypatch):
@@ -2799,6 +2868,8 @@ def test_api_plan_persists_report_and_returns_report_id():
         def __init__(self):
             self.saved = []
             self.saved_logs = []
+            self.cached_assets = []
+            self.updated_images = []
 
         def health(self):
             return {"enabled": True, "ok": True}
@@ -2814,9 +2885,38 @@ def test_api_plan_persists_report_and_returns_report_id():
         def save_plan_logs(self, report_id, logs):
             self.saved_logs.append({"report_id": report_id, "logs": logs})
 
+        def get_cached_asset(self, asset_type, cache_key):
+            return None
+
+        def upsert_asset_cache(self, asset_type, cache_key, city, name, value, response_payload=None):
+            self.cached_assets.append(
+                {
+                    "asset_type": asset_type,
+                    "cache_key": cache_key,
+                    "city": city,
+                    "name": name,
+                    "value": value,
+                    "response_payload": response_payload,
+                }
+            )
+
+        def update_report_attraction_image(self, report_id, attraction_name, image_url):
+            self.updated_images.append(
+                {
+                    "report_id": report_id,
+                    "attraction_name": attraction_name,
+                    "image_url": image_url,
+                }
+            )
+
+    class FakeImageProvider:
+        def image_for(self, query):
+            return f"https://img.example.test/{len(query)}.jpg"
+
     store = FakeReportStore()
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     main_module.report_store = store
+    main_module.image_provider = FakeImageProvider()
     client = TestClient(app)
 
     response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
@@ -2828,6 +2928,151 @@ def test_api_plan_persists_report_and_returns_report_id():
     assert store.saved[0]["request"].prompt == "我想去北京玩 1 天，喜欢历史文化，预算中等"
     assert store.saved[0]["result"].selected_option_id == "balanced"
     assert store.saved_logs[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
+    assert store.cached_assets
+    assert store.updated_images
+    main_module.report_store = None
+    main_module.image_provider = None
+
+
+def test_api_poi_photo_uses_cached_asset_and_updates_report_without_provider_call():
+    class FakeReportStore:
+        def __init__(self):
+            self.updated_images = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def get_cached_asset(self, asset_type, cache_key):
+            assert asset_type == "attraction_image"
+            assert "北京" in cache_key
+            assert "故宫博物院" in cache_key
+            return {"value": "https://img.example.test/cached.jpg"}
+
+        def update_report_attraction_image(self, report_id, attraction_name, image_url):
+            self.updated_images.append((report_id, attraction_name, image_url))
+
+    class ForbiddenImageProvider:
+        def image_for(self, query):
+            raise AssertionError("cached image should avoid provider calls")
+
+    store = FakeReportStore()
+    main_module.report_store = store
+    main_module.image_provider = ForbiddenImageProvider()
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/poi/photo",
+        params={
+            "name": "故宫博物院",
+            "city": "北京",
+            "report_id": "11111111-1111-1111-1111-111111111111",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["photo_url"] == "https://img.example.test/cached.jpg"
+    assert store.updated_images == [
+        ("11111111-1111-1111-1111-111111111111", "故宫博物院", "https://img.example.test/cached.jpg")
+    ]
+    main_module.report_store = None
+    main_module.image_provider = None
+
+
+def test_api_poi_photo_caches_provider_result_and_updates_report():
+    class FakeReportStore:
+        def __init__(self):
+            self.cached_assets = []
+            self.updated_images = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def get_cached_asset(self, asset_type, cache_key):
+            return None
+
+        def upsert_asset_cache(self, asset_type, cache_key, city, name, value, response_payload=None):
+            self.cached_assets.append((asset_type, cache_key, city, name, value, response_payload))
+
+        def update_report_attraction_image(self, report_id, attraction_name, image_url):
+            self.updated_images.append((report_id, attraction_name, image_url))
+
+    class FakeImageProvider:
+        def __init__(self):
+            self.calls = []
+
+        def image_for(self, query):
+            self.calls.append(query)
+            return "https://img.example.test/fresh.jpg"
+
+    store = FakeReportStore()
+    provider = FakeImageProvider()
+    main_module.report_store = store
+    main_module.image_provider = provider
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/poi/photo",
+        params={
+            "name": "故宫博物院",
+            "city": "北京",
+            "report_id": "11111111-1111-1111-1111-111111111111",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["photo_url"] == "https://img.example.test/fresh.jpg"
+    assert provider.calls == ["北京 故宫博物院 China landmark"]
+    assert store.cached_assets[0][0] == "attraction_image"
+    assert store.cached_assets[0][2] == "北京"
+    assert store.cached_assets[0][3] == "故宫博物院"
+    assert store.updated_images == [
+        ("11111111-1111-1111-1111-111111111111", "故宫博物院", "https://img.example.test/fresh.jpg")
+    ]
+    main_module.report_store = None
+    main_module.image_provider = None
+
+
+def test_api_map_poi_uses_cached_asset_without_amap_call():
+    class FakeReportStore:
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def get_cached_asset(self, asset_type, cache_key):
+            assert asset_type == "map_poi"
+            assert "北京" in cache_key
+            assert "历史文化" in cache_key
+            return {
+                "value": "cached",
+                "response_payload": [
+                    {
+                        "id": "cached-poi",
+                        "name": "缓存景点",
+                        "category": "历史文化",
+                        "address": "缓存地址",
+                        "location": {"longitude": 116.397, "latitude": 39.916},
+                        "visit_duration_minutes": 120,
+                        "description": "来自缓存",
+                        "ticket_price": 0,
+                        "image_url": "",
+                        "rating": 4.6,
+                    }
+                ],
+            }
+
+    class ForbiddenAmap:
+        def search_pois(self, *args, **kwargs):
+            raise AssertionError("cached map POI should avoid Amap calls")
+
+    previous_orchestrator = main_module.orchestrator
+    main_module.orchestrator = SimpleNamespace(amap=ForbiddenAmap(), planner=SimpleNamespace(llm=None), unsplash=None)
+    main_module.report_store = FakeReportStore()
+    client = TestClient(app)
+
+    response = client.get("/api/map/poi", params={"keywords": "历史文化", "city": "北京", "limit": 3})
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["name"] == "缓存景点"
+    main_module.orchestrator = previous_orchestrator
     main_module.report_store = None
 
 

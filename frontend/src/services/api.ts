@@ -395,8 +395,17 @@ export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelN
   return requireApiData<TravelNewsIngestResult>(response.data, 'Travel news ingest request failed')
 }
 
-export async function getAttractionPhoto(name: string): Promise<string> {
-  const response = await apiClient.get('/api/poi/photo', { params: { name } })
+export async function getAttractionPhoto(
+  name: string,
+  options: { city?: string; report_id?: string | null } = {},
+): Promise<string> {
+  const response = await apiClient.get('/api/poi/photo', {
+    params: {
+      name,
+      city: options.city || undefined,
+      report_id: options.report_id || undefined,
+    },
+  })
   return requireApiData<{ photo_url: string }>(response.data, 'Attraction photo request failed').photo_url
 }
 

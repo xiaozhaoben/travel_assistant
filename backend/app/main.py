@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import logging
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import get_settings
@@ -31,6 +32,7 @@ from .workflows.agents import TravelAgentOrchestrator
 
 settings = get_settings()
 setup_logging(settings.log_level)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -183,6 +185,125 @@ def close_app_resources(resources: AppResources) -> None:
             close()
 
 
+def asset_cache_key(asset_type: str, city: str | None, name: str, extra: str | None = None) -> str:
+    parts = [asset_type, city or "", name, extra or ""]
+    normalized = [" ".join(str(part).strip().lower().split()) for part in parts]
+    return "|".join(normalized)
+
+
+def _valid_cached_url(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or "source.unsplash.com" in text:
+        return ""
+    return text
+
+
+def _call_if_present(target: object, method_name: str, *args, **kwargs):
+    method = getattr(target, method_name, None)
+    if not callable(method):
+        return None
+    return method(*args, **kwargs)
+
+
+def _iter_unique_attractions(result: TripPlanningResult):
+    seen: set[tuple[str, str]] = set()
+    for option in result.options:
+        city = option.plan.city
+        for day in option.plan.days:
+            for attraction in day.attractions:
+                key = (city, attraction.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield city, attraction
+
+
+def _write_report_attraction_image(report_id: str | None, store: object | None, name: str, image_url: str) -> None:
+    if not report_id or store is None or not image_url:
+        return
+    try:
+        _call_if_present(store, "update_report_attraction_image", report_id, name, image_url)
+    except Exception as exc:  # pragma: no cover - defensive for background enrichment
+        logger.warning("Failed to update report attraction image for %s: %s", name, exc)
+
+
+def _cache_asset(
+    store: object | None,
+    asset_type: str,
+    cache_key: str,
+    city: str,
+    name: str,
+    value: str,
+    response_payload: dict | list | None = None,
+) -> None:
+    if store is None or not value:
+        return
+    try:
+        _call_if_present(
+            store,
+            "upsert_asset_cache",
+            asset_type,
+            cache_key,
+            city,
+            name,
+            value,
+            response_payload=response_payload,
+        )
+    except Exception as exc:  # pragma: no cover - defensive for background enrichment
+        logger.warning("Failed to cache %s asset for %s: %s", asset_type, name, exc)
+
+
+def _cached_asset_value(store: object | None, asset_type: str, cache_key: str) -> str:
+    if store is None:
+        return ""
+    try:
+        cached = _call_if_present(store, "get_cached_asset", asset_type, cache_key)
+    except Exception as exc:
+        logger.warning("Failed to read %s asset cache %s: %s", asset_type, cache_key, exc)
+        return ""
+    if isinstance(cached, dict):
+        return _valid_cached_url(cached.get("value"))
+    return _valid_cached_url(cached)
+
+
+def _cached_asset_payload(store: object | None, asset_type: str, cache_key: str):
+    if store is None:
+        return None
+    try:
+        cached = _call_if_present(store, "get_cached_asset", asset_type, cache_key)
+    except Exception as exc:
+        logger.warning("Failed to read %s asset cache %s: %s", asset_type, cache_key, exc)
+        return None
+    if isinstance(cached, dict):
+        return cached.get("response_payload")
+    return None
+
+
+def hydrate_report_assets(report_id: str, result: TripPlanningResult, store: object | None, provider: UnsplashMCPClient) -> None:
+    for city, attraction in _iter_unique_attractions(result):
+        existing = _valid_cached_url(attraction.image_url)
+        key = asset_cache_key("attraction_image", city, attraction.name)
+        image_url = existing or _cached_asset_value(store, "attraction_image", key)
+        if not image_url:
+            try:
+                image_url = _valid_cached_url(provider.image_for(f"{city} {attraction.name} China landmark"))
+            except Exception as exc:  # pragma: no cover - depends on external providers
+                logger.warning("Background image hydration failed for %s: %s", attraction.name, exc)
+                image_url = ""
+        if not image_url:
+            continue
+        _cache_asset(
+            store,
+            "attraction_image",
+            key,
+            city,
+            attraction.name,
+            image_url,
+            response_payload={"photo_url": image_url},
+        )
+        _write_report_attraction_image(report_id, store, attraction.name, image_url)
+
+
 app = FastAPI(title="Travel Assistant API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
@@ -251,7 +372,7 @@ def plan_trip_usage():
 
 
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
-def plan_trip(request: TripPlanRequest):
+def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
     resources = get_app_resources()
     with PlanLogRecorder() as plan_logs:
         result = resources.orchestrator.plan(request)
@@ -268,6 +389,13 @@ def plan_trip(request: TripPlanRequest):
                 "report_created_at": report["created_at"],
                 "report_updated_at": report["updated_at"],
             }
+        )
+        background_tasks.add_task(
+            hydrate_report_assets,
+            report["id"],
+            result,
+            resources.report_store,
+            resources.image_provider,
         )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
 
@@ -357,14 +485,34 @@ def get_report(report_id: str):
 
 
 @app.get("/api/poi/photo")
-def get_poi_photo(name: str = Query(..., min_length=1, max_length=120)):
+def get_poi_photo(
+    name: str = Query(..., min_length=1, max_length=120),
+    city: str = Query(default="", max_length=40),
+    report_id: str | None = Query(default=None, max_length=80),
+):
     resources = get_app_resources()
+    cache_key = asset_cache_key("attraction_image", city, name)
+    photo_url = _cached_asset_value(resources.report_store, "attraction_image", cache_key)
+    if not photo_url:
+        query = f"{city} {name} China landmark".strip() if city else f"{name} China landmark"
+        photo_url = _valid_cached_url(resources.image_provider.image_for(query))
+        if photo_url:
+            _cache_asset(
+                resources.report_store,
+                "attraction_image",
+                cache_key,
+                city,
+                name,
+                photo_url,
+                response_payload={"photo_url": photo_url},
+            )
+    _write_report_attraction_image(report_id, resources.report_store, name, photo_url)
     return {
         "success": True,
         "message": "获取图片成功",
         "data": {
             "name": name,
-            "photo_url": resources.image_provider.image_for(f"{name} China landmark"),
+            "photo_url": photo_url,
         },
     }
 
@@ -376,11 +524,21 @@ def search_map_poi(
     limit: int = Query(default=10, ge=1, le=30),
 ):
     resources = get_app_resources()
+    cache_key = asset_cache_key("map_poi", city, keywords, str(limit))
+    cached_data = _cached_asset_payload(resources.report_store, "map_poi", cache_key)
+    if isinstance(cached_data, list):
+        return {
+            "success": True,
+            "message": "POI鎼滅储鎴愬姛",
+            "data": cached_data,
+        }
     pois = resources.orchestrator.amap.search_pois(city=city, keywords=[keywords], limit=limit)
+    data = [poi.model_dump(mode="json") for poi in pois]
+    _cache_asset(resources.report_store, "map_poi", cache_key, city, keywords, "cached", response_payload=data)
     return {
         "success": True,
         "message": "POI搜索成功",
-        "data": [poi.model_dump(mode="json") for poi in pois],
+        "data": data,
     }
 
 

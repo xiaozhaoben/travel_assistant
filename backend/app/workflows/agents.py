@@ -197,7 +197,7 @@ class AttractionSearchAgent:
         agent_attractions = self._try_agent_attractions(requirement)
         if agent_attractions:
             return [
-                attraction.model_copy(update={"image_url": attraction.image_url or self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
+                attraction.model_copy(update={"image_url": attraction.image_url or ""})
                 for attraction in agent_attractions
             ]
         search_queries = self._build_search_queries(requirement)
@@ -211,7 +211,7 @@ class AttractionSearchAgent:
             search_options["avoid_places"] = requirement.avoid_places
         attractions = self.amap.search_pois(requirement.city, search_queries, **search_options)
         return [
-            attraction.model_copy(update={"image_url": self.unsplash.image_for(f"{requirement.city} {attraction.name}")})
+            attraction.model_copy(update={"image_url": attraction.image_url or ""})
             for attraction in attractions
         ]
 
@@ -1379,15 +1379,17 @@ class TravelAgentOrchestrator:
         settings = get_settings()
         disable_llm = settings.disable_llm if disable_llm is None else disable_llm
         disable_external_api = settings.disable_external_api if disable_external_api is None else disable_external_api
+        fast_mode = settings.planner_mode.lower() == "fast"
+        planning_disable_external_api = disable_external_api or fast_mode
         self.parser = TravelRequirementParser()
-        self.amap = AmapMCPClient(api_key="" if disable_external_api else None)
+        self.amap = AmapMCPClient(api_key="" if planning_disable_external_api else None)
         self.unsplash = (
             UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
-            if disable_external_api
+            if planning_disable_external_api
             else UnsplashMCPClient()
         )
-        configured_llm = None if disable_llm else create_llm()
-        agent_llm = llm if llm is not None else configured_llm
+        configured_llm = None if disable_llm or fast_mode else create_llm()
+        agent_llm = llm if llm is not None else None if fast_mode else configured_llm
         planner_llm = agent_llm
         self.reflection_memory: ReflectionMemoryStore | None = None
         self.reflection_agent = SupervisorReflectionAgent()
