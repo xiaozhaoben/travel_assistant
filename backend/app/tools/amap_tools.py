@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
@@ -7,6 +8,25 @@ from langchain_core.tools import tool
 
 from app.domain.models import Location
 from app.integrations.services import AmapMCPClient
+
+
+def _parse_list_param(value: Any) -> list:
+    """Safely parse a value that may be a list, a JSON string, or None.
+
+    LangChain Agent sometimes passes list parameters as JSON strings
+    instead of actual Python lists, causing tool validation failures.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return []
 
 
 def create_attraction_search_tool(amap: AmapMCPClient):
@@ -28,11 +48,11 @@ def create_attraction_search_tool(amap: AmapMCPClient):
     ) -> list[dict[str, Any]]:
         attractions = amap.search_pois(
             city=city,
-            keywords=keywords,
+            keywords=_parse_list_param(keywords),
             limit=limit,
-            must_visit=must_visit,
-            avoid_places=avoid_places,
-            ranking_preferences=ranking_preferences,
+            must_visit=_parse_list_param(must_visit) or None,
+            avoid_places=_parse_list_param(avoid_places) or None,
+            ranking_preferences=_parse_list_param(ranking_preferences) or None,
         )
         return [item.model_dump(mode="json") for item in attractions]
 
@@ -83,10 +103,11 @@ def create_meal_search_tool(amap: AmapMCPClient):
         food_preferences: str = "",
         route_points: list[dict[str, float]] | None = None,
     ) -> list[dict[str, Any]]:
+        parsed_route = _parse_list_param(route_points)
         locations = [
             Location(longitude=float(item["longitude"]), latitude=float(item["latitude"]))
-            for item in route_points or []
-            if "longitude" in item and "latitude" in item
+            for item in parsed_route
+            if isinstance(item, dict) and "longitude" in item and "latitude" in item
         ]
         meals = amap.search_meals(
             city=city,

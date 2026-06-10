@@ -11,6 +11,11 @@ from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
+# Maximum consecutive tool errors before the agent should stop retrying.
+MAX_CONSECUTIVE_TOOL_ERRORS = 3
+_consecutive_tool_errors: dict[str, int] = {}
+
+
 
 def _runtime_context(runtime: Any) -> dict[str, Any]:
     context = getattr(runtime, "context", None)
@@ -51,10 +56,30 @@ def monitor_tool(
                 tool_calls.append(tool_name)
         result = handler(request)
         logger.info("[monitor_tool] tool=%s status=success", tool_name)
+        # Reset consecutive error counter on success
+        _consecutive_tool_errors.pop(tool_name, None)
         return result
-    except Exception:
-        logger.exception("[monitor_tool] tool=%s status=failed", tool_name)
+    except Exception as exc:
+        error_count = _consecutive_tool_errors.get(tool_name, 0) + 1
+        _consecutive_tool_errors[tool_name] = error_count
+        if error_count >= MAX_CONSECUTIVE_TOOL_ERRORS:
+            logger.warning(
+                "[monitor_tool] tool=%s has failed %d times consecutively, stopping retries",
+                tool_name,
+                error_count,
+            )
+            _consecutive_tool_errors[tool_name] = 0
+            return ToolMessage(
+                content=(
+                    f"Tool '{tool_name}' failed {error_count} times with the same error pattern. "
+                    f"Do NOT retry this tool. Proceed with the data you already have or generate a "
+                    f"response without calling this tool again."
+                ),
+                tool_call_id=request.tool_call.get("id", ""),
+            )
+        logger.warning("[monitor_tool] tool=%s status=failed (%d/%d): %s", tool_name, error_count, MAX_CONSECUTIVE_TOOL_ERRORS, exc)
         raise
+
 
 
 @before_model

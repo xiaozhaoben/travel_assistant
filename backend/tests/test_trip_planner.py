@@ -722,6 +722,27 @@ def test_agent_prompts_hold_tool_usage_instructions():
     assert "Before final JSON" not in all_prompts
 
 
+def test_agent_prompts_define_json_schema_and_few_shot_examples():
+    prompts = [
+        AgentPrompts.ATTRACTION_SEARCH,
+        AgentPrompts.WEATHER_QUERY,
+        AgentPrompts.HOTEL,
+        AgentPrompts.PLANNER,
+    ]
+
+    for prompt in prompts:
+        assert "JSON Schema" in prompt
+        assert "Few-Shot" in prompt
+
+    assert '"attractions"' in AgentPrompts.ATTRACTION_SEARCH
+    assert '"weather"' in AgentPrompts.WEATHER_QUERY
+    assert '"hotels"' in AgentPrompts.HOTEL
+    assert '"meals": [' in AgentPrompts.PLANNER
+    assert '"hotel": {' in AgentPrompts.PLANNER
+    assert '"agent_trace": [' in AgentPrompts.PLANNER
+    assert "route_points 必须是数组" in AgentPrompts.PLANNER
+
+
 def test_tool_middleware_detects_prior_tool_messages():
     from app.tools.middleware import tool_call_names_from_state
 

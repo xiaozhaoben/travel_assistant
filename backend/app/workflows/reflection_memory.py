@@ -44,9 +44,38 @@ class ReflectionMemoryStore:
             if source and source != self.source_name:
                 continue
             text = getattr(doc, "summary", None) or getattr(doc, "content", None) or str(doc)
-            if text:
-                snippets.append(str(text)[:500])
+            if not text:
+                continue
+            cleaned = str(text)[:500]
+            # Filter out garbage JSON fragments and incomplete data that add noise
+            if self._is_noisy_snippet(cleaned):
+                logger.debug("Skipping noisy reflection snippet: %s...", cleaned[:80])
+                continue
+            snippets.append(cleaned)
         return snippets[:k]
+
+    @staticmethod
+    def _is_noisy_snippet(text: str) -> bool:
+        """Check if a reflection snippet is noisy garbage that shouldn't be included in the prompt."""
+        stripped = text.strip()
+        # Skip empty or very short fragments
+        if len(stripped) < 10:
+            return True
+        # Skip raw JSON fragments (starts with JSON syntax or contains escape sequences)
+        if stripped.startswith(("{", "[", "\\")):
+            return True
+        # Skip snippets that are mostly escaped JSON (common in failed case storage)
+        escaped_ratio = stripped.count("\\\\") + stripped.count('\\"')
+        if escaped_ratio > len(stripped) / 10:
+            return True
+        # Skip snippets that look like truncated output_contract or similar boilerplate
+        if any(boilerplate in stripped for boilerplate in (
+            "output_contract",
+            "required_shape",
+            "max_react_iterations",
+        )):
+            return True
+        return False
 
     def remember_failure(self, finding: ReflectionFinding, failed_case: dict[str, Any]) -> None:
         if self.vector_store is None or not hasattr(self.vector_store, "add_text"):

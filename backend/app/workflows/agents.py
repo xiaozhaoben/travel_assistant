@@ -700,8 +700,38 @@ class PlannerAgent:
             guidance_days,
             guidance_per_day,
         )
+        # Build a compact user_request payload, omitting empty optional fields
+        compact_request = {
+            "prompt": requirement.prompt,
+            "city": requirement.city,
+            "days": requirement.days,
+            "preferences": requirement.preferences,
+            "budget_level": requirement.budget_level,
+            "start_date": str(requirement.start_date),
+        }
+        if requirement.must_visit:
+            compact_request["must_visit"] = requirement.must_visit
+        if requirement.avoid_places:
+            compact_request["avoid_places"] = requirement.avoid_places
+        if requirement.low_intensity:
+            compact_request["low_intensity"] = True
+        if requirement.companions and requirement.companions != "未指定":
+            compact_request["companions"] = requirement.companions
+        if requirement.food_preferences:
+            compact_request["food_preferences"] = requirement.food_preferences
+
+        # Limit research context to 3 snippets and truncate summaries
+        trimmed_research = [
+            {
+                "title": item.title[:60],
+                "summary": item.summary[:150],
+                "keywords": item.keywords[:4],
+            }
+            for item in research_context[:3]
+        ]
+
         payload = {
-            "user_request": requirement.model_dump(mode="json"),
+            "user_request": compact_request,
             "attractions": [
                 {
                     "id": item.id,
@@ -711,7 +741,7 @@ class PlannerAgent:
                     "location": item.location.model_dump(mode="json"),
                     "visit_duration_minutes": item.visit_duration_minutes,
                     "ticket_price": item.ticket_price,
-                    "description": item.description[:80],
+                    "description": item.description[:60],
                 }
                 for item in selected_attractions
             ],
@@ -725,7 +755,6 @@ class PlannerAgent:
                     "type": item.type,
                     "rating": item.rating,
                     "nightly_price": item.nightly_price,
-                    "description": item.description,
                 }
                 for item in selected_hotels
             ],
@@ -739,12 +768,7 @@ class PlannerAgent:
                 for index, group in enumerate(daily_groups)
                 if group
             ],
-            "research_context": [item.model_dump(mode="json") for item in research_context[:6]],
-            "output_contract": {
-                "validator": "PlannerLLMOutput",
-                "required_shape": "Return JSON with options[].plan.days or top-level days. Include thought as one short repair note.",
-                "max_react_iterations": self.max_iterations,
-            },
+            "research_context": trimmed_research,
         }
         return (
             "请根据资料生成完整旅行计划。返回 JSON，顶层字段为 selected_option_id, options, clarifying_suggestions。"
