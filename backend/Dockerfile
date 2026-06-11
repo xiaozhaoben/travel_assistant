@@ -17,6 +17,7 @@ RUN if [ "$INSTALL_NODE" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+COPY constraints.txt .
 COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt

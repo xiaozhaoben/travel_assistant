@@ -101,22 +101,28 @@ class TravelQuestionAnsweringAgent:
         if not context:
             return ""
         prompt_payload = {"input": question, "context": context}
-        try:
-            if self.chain is not None:
-                return str(self.chain.invoke(prompt_payload)).strip()
-            if self.langchain_agent is not None:
+        rendered_prompt = TRAVEL_RAG_PROMPT.format(**prompt_payload)
+        if self.langchain_agent is not None:
+            try:
                 response = self.langchain_agent.invoke(
                     {
                         "messages": [
                             {
                                 "role": "user",
-                                "content": TRAVEL_RAG_PROMPT.format(**prompt_payload),
+                                "content": rendered_prompt,
                             }
                         ]
                     }
                 )
-                return extract_agent_content(response).strip()
-            response = self.llm.invoke(TRAVEL_RAG_PROMPT.format(**prompt_payload))
+                answer = extract_agent_content(response).strip()
+                if answer:
+                    return answer
+            except Exception as exc:
+                logger.warning("Travel QA LangChain agent answer failed, trying fallback chain: %s", exc)
+        try:
+            if self.chain is not None:
+                return str(self.chain.invoke(prompt_payload)).strip()
+            response = self.llm.invoke(rendered_prompt)
             return str(getattr(response, "content", response)).strip()
         except Exception as exc:
             logger.warning("Travel QA LLM answer failed, using fallback: %s", exc)

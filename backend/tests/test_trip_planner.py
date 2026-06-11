@@ -292,6 +292,41 @@ def test_travel_qa_agent_uses_realtime_search_for_time_sensitive_questions():
     assert "实名预约" in result.answer
 
 
+def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    class QAAgentRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, state):
+            self.calls.append(state)
+            return {"messages": [FakeMessage("请优先查看官方渠道并提前预约。")]}
+
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="北京预约提醒",
+        content="热门场馆需要提前预约。",
+        summary="热门场馆需要提前预约。",
+        source_url="https://example.test/beijing",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    runtime = QAAgentRuntime()
+    monkeypatch.setattr("app.knowledge.qa_agent.create_agent", lambda *args, **kwargs: runtime)
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=FakeLLM("chain should not be first"), web_client=WebSearchMCPClient(command=""))
+    agent.chain = SimpleNamespace(invoke=lambda payload: (_ for _ in ()).throw(AssertionError("chain should be fallback only")))
+
+    result = agent.ask("北京热门场馆怎么预约？")
+
+    assert runtime.calls
+    assert result.generation_mode == "llm"
+    assert "提前预约" in result.answer
+
+
 def test_settings_support_reference_env_names(monkeypatch):
     monkeypatch.setenv("LLM_MODEL_ID", "qwen3.6-plus")
     monkeypatch.setenv("LLM_API_KEY", "test-key")
@@ -632,6 +667,56 @@ def test_orchestrator_creates_langchain_agents_with_prompt_class(monkeypatch):
     assert middleware_by_agent["planner_agent"] == {"monitor_tool", "log_before_model"}
 
 
+def test_dockerfile_copies_constraints_before_pip_install():
+    dockerfile = (os.path.dirname(os.path.dirname(__file__)) + "/Dockerfile")
+    with open(dockerfile, encoding="utf-8") as handle:
+        content = handle.read()
+
+    assert "COPY constraints.txt" in content
+    assert content.index("COPY constraints.txt") < content.index("pip install -r requirements.txt")
+
+
+def test_orchestrator_configures_structured_response_formats(monkeypatch):
+    calls = []
+
+    def fake_create_agent(model, tools=None, system_prompt=None, name=None, **kwargs):
+        calls.append({"name": name, "response_format": kwargs.get("response_format")})
+        return object()
+
+    monkeypatch.setattr("app.workflows.agents.create_agent", fake_create_agent)
+
+    TravelAgentOrchestrator(llm=FakeLLM("{}"), disable_external_api=True)
+
+    formats = {call["name"]: call["response_format"] for call in calls}
+    assert formats["attraction_search_agent"].__name__ == "AttractionSearchOutput"
+    assert formats["weather_query_agent"].__name__ == "WeatherQueryOutput"
+    assert formats["hotel_agent"].__name__ == "HotelSearchOutput"
+    assert formats["planner_agent"].__name__ == "PlannerLLMOutput"
+
+
+def test_extract_agent_content_prefers_structured_response():
+    from app.workflows.agents import AttractionSearchOutput, _extract_agent_content
+
+    payload = AttractionSearchOutput(
+        attractions=[
+            Attraction(
+                id="poi-1",
+                name="故宫博物院",
+                category="历史文化",
+                address="北京市东城区景山前街4号",
+                location=Location(longitude=116.397, latitude=39.916),
+                visit_duration_minutes=240,
+                description="明清皇家宫殿建筑群。",
+                ticket_price=60,
+            )
+        ]
+    )
+
+    content = _extract_agent_content({"structured_response": payload, "messages": [FakeMessage("ignored")]})
+
+    assert json.loads(content)["attractions"][0]["name"] == "故宫博物院"
+
+
 def test_tool_middleware_tolerates_missing_runtime_context():
     from app.tools.middleware import log_before_model, monitor_tool
 
@@ -645,6 +730,28 @@ def test_tool_middleware_tolerates_missing_runtime_context():
         )
         == "ok"
     )
+
+
+def test_tool_middleware_tracks_errors_in_runtime_context():
+    from app.tools.middleware import MAX_CONSECUTIVE_TOOL_ERRORS, log_before_model, monitor_tool
+
+    runtime = SimpleNamespace(context={})
+    request = SimpleNamespace(tool_call={"name": "search_meals", "args": {}, "id": "tool-call-1"}, runtime=runtime)
+
+    for _ in range(MAX_CONSECUTIVE_TOOL_ERRORS - 1):
+        try:
+            monitor_tool.wrap_tool_call(request, lambda request: (_ for _ in ()).throw(ValueError("boom")))
+        except ValueError:
+            pass
+
+    assert runtime.context["consecutive_tool_errors"]["search_meals"] == MAX_CONSECUTIVE_TOOL_ERRORS - 1
+    tool_message = monitor_tool.wrap_tool_call(request, lambda request: (_ for _ in ()).throw(ValueError("boom")))
+    assert "Do NOT retry" in tool_message.content
+    assert runtime.context["consecutive_tool_errors"]["search_meals"] == 0
+
+    isolated_runtime = SimpleNamespace(context={})
+    assert log_before_model.before_model({"messages": []}, isolated_runtime) is None
+    assert isolated_runtime.context.get("consecutive_tool_errors") is None
 
 
 def test_orchestrator_uses_configured_llm_for_planner_agent(monkeypatch):

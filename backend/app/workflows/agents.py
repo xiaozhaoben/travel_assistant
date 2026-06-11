@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any, List
 
 from langchain.agents import create_agent
+from pydantic import BaseModel, Field
 
 try:
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -52,7 +53,25 @@ from app.workflows.reflection_memory import FailedCaseNotebook, ReflectionMemory
 logger = logging.getLogger(__name__)
 
 
-def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, name: str):
+class AttractionSearchOutput(BaseModel):
+    attractions: List[Attraction] = Field(default_factory=list)
+
+
+class WeatherQueryOutput(BaseModel):
+    weather: List[WeatherInfo] = Field(default_factory=list)
+
+
+class HotelSearchOutput(BaseModel):
+    hotels: List[Hotel] = Field(default_factory=list)
+
+
+def _safe_create_agent(
+    model: Any | None,
+    tools: list[Any],
+    system_prompt: str,
+    name: str,
+    response_format: Any | None = None,
+):
     if model is None:
         return None
     try:
@@ -62,6 +81,7 @@ def _safe_create_agent(model: Any | None, tools: list[Any], system_prompt: str, 
             system_prompt=system_prompt,
             name=name,
             middleware=[monitor_tool, log_before_model],
+            response_format=response_format,
         )
     except Exception as exc:
         logger.warning("LangChain create_agent failed for %s: %s", name, exc)
@@ -87,6 +107,11 @@ def _extract_agent_content(response: Any) -> str:
     if isinstance(response, tuple) and response:
         return _extract_agent_content(response[0])
     if isinstance(response, dict):
+        if "structured_response" in response and response["structured_response"] is not None:
+            structured = response["structured_response"]
+            if isinstance(structured, BaseModel):
+                return structured.model_dump_json()
+            return json.dumps(structured, ensure_ascii=False)
         if response.get("messages"):
             return _extract_message_content(response["messages"][-1])
         for value in response.values():
@@ -191,6 +216,7 @@ class AttractionSearchAgent:
             self.tools,
             AgentPrompts.ATTRACTION_SEARCH,
             "attraction_search_agent",
+            response_format=AttractionSearchOutput,
         )
 
     def run(self, requirement: TravelRequirement) -> List[Attraction]:
@@ -421,6 +447,7 @@ class WeatherQueryAgent:
             self.tools,
             AgentPrompts.WEATHER_QUERY,
             "weather_query_agent",
+            response_format=WeatherQueryOutput,
         )
 
     def run(self, requirement: TravelRequirement):
@@ -465,6 +492,7 @@ class HotelAgent:
             self.tools,
             AgentPrompts.HOTEL,
             "hotel_agent",
+            response_format=HotelSearchOutput,
         )
 
     def run(self, requirement: TravelRequirement) -> List[Hotel]:
@@ -528,6 +556,7 @@ class PlannerAgent:
             self.tools,
             AgentPrompts.PLANNER,
             "planner_agent",
+            response_format=PlannerLLMOutput,
         )
 
     def run(
@@ -555,38 +584,6 @@ class PlannerAgent:
     ) -> TripPlanningResult | None:
         prompt = self._build_prompt(requirement, attractions, weather, hotels, research_context)
         return self._try_llm_plan_with_react(prompt, requirement, attractions, weather, hotels, research_context)
-        try:
-            if SystemMessage is not None and HumanMessage is not None:
-                messages = [
-                    SystemMessage(content="你是专业行程规划专家，只返回符合要求的 JSON。"),
-                    HumanMessage(content=prompt),
-                ]
-            else:
-                messages = prompt
-            if self.langchain_agent is not None:
-                content = _stream_agent_content(
-                    self.langchain_agent,
-                    {"messages": [{"role": "user", "content": prompt}]},
-                    self.name,
-                )
-            elif self.llm is not None:
-                start = time.perf_counter()
-                response = self.llm.invoke(messages)
-                content = getattr(response, "content", response)
-                record_llm_call(
-                    component=self.name,
-                    operation="invoke",
-                    request_payload={"messages": messages},
-                    response_payload={"content": content},
-                    duration_ms=elapsed_ms(start),
-                )
-            else:
-                return None
-            data = self._extract_json(str(content))
-            return self._normalize_llm_result(data, requirement, attractions, weather, hotels, research_context)
-        except Exception as exc:
-            logger.warning("PlannerAgent LLM planning failed, falling back to local planner: %s", exc)
-            return None
 
     def _try_llm_plan_with_react(
         self,
