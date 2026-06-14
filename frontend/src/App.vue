@@ -17,6 +17,10 @@
           <FileTextOutlined />
           <span>历史报表</span>
         </router-link>
+        <router-link to="/qa" class="nav-link" active-class="nav-link-active">
+          <MessageOutlined />
+          <span>智能问答</span>
+        </router-link>
       </nav>
     </header>
     <a-layout-content class="app-content">
@@ -35,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { CompassOutlined, FileTextOutlined } from '@ant-design/icons-vue'
+import { CompassOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/icons-vue'
 </script>
 
 <style>

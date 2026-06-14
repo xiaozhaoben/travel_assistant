@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import json
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from .core.config import get_settings
 from .core.logging_config import setup_logging
@@ -14,6 +16,8 @@ from .domain.models import (
     PlanEditRequest,
     TravelNewsIngestRequest,
     TravelNewsIngestResult,
+    TravelQAConversationDetail,
+    TravelQAConversationSummary,
     TravelQARequest,
     TravelQAResponse,
     TripPlan,
@@ -27,6 +31,7 @@ from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_fe
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.vector_store import create_travel_vector_store
 from .storage.plan_log import PlanLogRecorder
+from .storage.qa_store import create_qa_conversation_store
 from .storage.report_store import create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
@@ -40,6 +45,7 @@ class AppResources:
     orchestrator: TravelAgentOrchestrator
     report_store: object | None
     travel_vector_store: object | None
+    qa_store: object | None
     news_agent: TravelNewsIngestionAgent
     qa_agent: TravelQuestionAnsweringAgent
     image_provider: UnsplashMCPClient
@@ -48,6 +54,7 @@ class AppResources:
 orchestrator: TravelAgentOrchestrator | None = None
 report_store = None
 travel_vector_store = None
+qa_store = None
 news_agent: TravelNewsIngestionAgent | None = None
 qa_agent: TravelQuestionAnsweringAgent | None = None
 image_provider: UnsplashMCPClient | None = None
@@ -57,6 +64,7 @@ def create_app_resources() -> AppResources:
     resource_settings = get_settings()
     resource_report_store = create_report_store(resource_settings.database_url)
     resource_vector_store = create_travel_vector_store(resource_settings.database_url)
+    resource_qa_store = create_qa_conversation_store(resource_settings.database_url)
     resource_orchestrator = TravelAgentOrchestrator()
     resource_orchestrator.configure_reflection_memory(resource_vector_store)
     resource_news_agent = TravelNewsIngestionAgent(resource_vector_store)
@@ -73,6 +81,7 @@ def create_app_resources() -> AppResources:
         orchestrator=resource_orchestrator,
         report_store=resource_report_store,
         travel_vector_store=resource_vector_store,
+        qa_store=resource_qa_store,
         news_agent=resource_news_agent,
         qa_agent=resource_qa_agent,
         image_provider=resource_image_provider,
@@ -80,10 +89,11 @@ def create_app_resources() -> AppResources:
 
 
 def bind_app_resources(resources: AppResources) -> None:
-    global orchestrator, report_store, travel_vector_store, news_agent, qa_agent, image_provider
+    global orchestrator, report_store, travel_vector_store, qa_store, news_agent, qa_agent, image_provider
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
+    qa_store = resources.qa_store
     if hasattr(orchestrator, "configure_reflection_memory"):
         orchestrator.configure_reflection_memory(travel_vector_store)
     news_agent = resources.news_agent
@@ -98,6 +108,7 @@ def current_global_resources() -> AppResources | None:
         orchestrator=orchestrator,
         report_store=report_store,
         travel_vector_store=travel_vector_store,
+        qa_store=qa_store,
         news_agent=news_agent or TravelNewsIngestionAgent(travel_vector_store),
         qa_agent=qa_agent or TravelQuestionAnsweringAgent(travel_vector_store, llm=orchestrator.planner.llm),
         image_provider=image_provider or UnsplashMCPClient(),
@@ -110,6 +121,7 @@ def get_app_resources() -> AppResources:
     if state_resources is not None and (
         (news_agent is not None and news_agent is not state_resources.news_agent)
         or (qa_agent is not None and qa_agent is not state_resources.qa_agent)
+        or (qa_store is not None and qa_store is not state_resources.qa_store)
         or (image_provider is not None and image_provider is not state_resources.image_provider)
     ):
         resources = AppResources(
@@ -118,6 +130,7 @@ def get_app_resources() -> AppResources:
             travel_vector_store=travel_vector_store
             if travel_vector_store is not None
             else state_resources.travel_vector_store,
+            qa_store=qa_store if qa_store is not None else state_resources.qa_store,
             news_agent=news_agent or state_resources.news_agent,
             qa_agent=qa_agent or state_resources.qa_agent,
             image_provider=image_provider or state_resources.image_provider,
@@ -132,6 +145,7 @@ def get_app_resources() -> AppResources:
                 travel_vector_store is not None
                 and state_resources.travel_vector_store is not global_resources.travel_vector_store
             )
+            or (qa_store is not None and state_resources.qa_store is not global_resources.qa_store)
             or (news_agent is not None and state_resources.news_agent is not global_resources.news_agent)
             or (qa_agent is not None and state_resources.qa_agent is not global_resources.qa_agent)
             or (image_provider is not None and state_resources.image_provider is not global_resources.image_provider)
@@ -148,6 +162,7 @@ def get_app_resources() -> AppResources:
             travel_vector_store=travel_vector_store
             if travel_vector_store is not None
             else base_resources.travel_vector_store,
+            qa_store=qa_store if qa_store is not None else base_resources.qa_store,
             news_agent=news_agent or base_resources.news_agent,
             qa_agent=qa_agent or base_resources.qa_agent,
             image_provider=image_provider or base_resources.image_provider,
@@ -176,6 +191,7 @@ def close_app_resources(resources: AppResources) -> None:
     for candidate in (
         resources.report_store,
         resources.travel_vector_store,
+        resources.qa_store,
         resources.image_provider,
         resources.orchestrator.amap,
         resources.orchestrator.unsplash,
@@ -318,6 +334,7 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     resources = get_app_resources()
+    resource_qa_store = getattr(resources, "qa_store", None)
     return {
         "status": "ok",
         "service": "travel-assistant",
@@ -348,6 +365,9 @@ def health():
         else {"enabled": False, "ok": False},
         "travel_knowledge": resources.travel_vector_store.health()
         if resources.travel_vector_store is not None
+        else {"enabled": False, "ok": False},
+        "qa_memory": resource_qa_store.health()
+        if resource_qa_store is not None
         else {"enabled": False, "ok": False},
         "web_search": {
             "enabled": bool(settings.web_search_mcp_command),
@@ -403,8 +423,150 @@ def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
 @app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])
 def ask_travel_question(request: TravelQARequest):
     resources = get_app_resources()
-    result = resources.qa_agent.ask(request.question, top_k=request.top_k)
+    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+
+    result = resources.qa_agent.ask(
+        request.question,
+        top_k=request.top_k,
+        conversation_history=conversation_history,
+    )
+    result = _persist_qa_exchange(resource_qa_store, conversation, request.question, result)
     return ApiResponse[TravelQAResponse](success=True, message="智能问答完成", data=result)
+
+
+@app.post("/api/qa/ask/stream")
+def stream_travel_question(request: TravelQARequest):
+    resources = get_app_resources()
+    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+
+    def event_stream():
+        answer_parts: list[str] = []
+        final_response: TravelQAResponse | None = None
+        try:
+            yield _sse_event(
+                "start",
+                {
+                    "conversation_id": conversation["id"] if conversation else None,
+                    "question": request.question,
+                },
+            )
+            stream = getattr(resources.qa_agent, "stream", None)
+            if callable(stream):
+                events = stream(request.question, top_k=request.top_k, conversation_history=conversation_history)
+            else:
+                events = _response_to_stream_events(resources.qa_agent.ask(request.question, top_k=request.top_k))
+
+            for event in events:
+                event_name = str(event.get("event") or "message")
+                data = event.get("data")
+                if event_name == "answer_delta":
+                    content = str((data or {}).get("content") if isinstance(data, dict) else data or "")
+                    if content:
+                        answer_parts.append(content)
+                    yield _sse_event(event_name, data or {})
+                elif event_name == "done":
+                    final_response = data if isinstance(data, TravelQAResponse) else TravelQAResponse.model_validate(data)
+                else:
+                    yield _sse_event(event_name, data or {})
+
+            if final_response is None:
+                final_response = TravelQAResponse(answer="".join(answer_parts))
+            final_response = _persist_qa_exchange(resource_qa_store, conversation, request.question, final_response)
+            yield _sse_event("done", final_response.model_dump(mode="json"))
+        except Exception as exc:
+            logger.warning("Travel QA stream failed: %s", exc)
+            yield _sse_event("error", {"message": str(exc)})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _prepare_qa_memory(resources: AppResources, request: TravelQARequest):
+    resource_qa_store = getattr(resources, "qa_store", None)
+    conversation = None
+    conversation_history: list[dict[str, str]] = []
+    if resource_qa_store is None:
+        return resource_qa_store, conversation, conversation_history
+    try:
+        conversation = resource_qa_store.get_or_create_conversation(
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            anonymous_id=request.anonymous_id,
+            title=request.question,
+        )
+        conversation_history = resource_qa_store.get_recent_messages(conversation["id"], limit=8)
+    except Exception as exc:
+        logger.warning("QA conversation memory read failed, answering without history: %s", exc)
+        conversation = None
+        conversation_history = []
+    return resource_qa_store, conversation, conversation_history
+
+
+def _persist_qa_exchange(resource_qa_store, conversation, question: str, result: TravelQAResponse) -> TravelQAResponse:
+    if conversation is None or resource_qa_store is None:
+        return result
+    message_id = None
+    try:
+        resource_qa_store.append_message(conversation["id"], "user", question)
+        assistant_message = resource_qa_store.append_message(
+            conversation["id"],
+            "assistant",
+            result.answer,
+            sources=result.sources,
+            retrieved_count=result.retrieved_count,
+            generation_mode=result.generation_mode,
+        )
+        message_id = assistant_message.get("id") if isinstance(assistant_message, dict) else None
+    except Exception as exc:
+        logger.warning("QA conversation memory write failed: %s", exc)
+    return result.model_copy(update={"conversation_id": conversation["id"], "message_id": message_id})
+
+
+def _response_to_stream_events(response: TravelQAResponse):
+    for chunk in _chunk_text(response.answer):
+        yield {"event": "answer_delta", "data": {"content": chunk}}
+    yield {"event": "done", "data": response}
+
+
+def _chunk_text(text: str, size: int = 12):
+    for index in range(0, len(text), size):
+        yield text[index : index + size]
+
+
+def _sse_event(event: str, data) -> str:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@app.get("/api/qa/conversations", response_model=ApiResponse[list[TravelQAConversationSummary]])
+def list_qa_conversations(
+    user_id: str | None = Query(default=None, max_length=120),
+    anonymous_id: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    resources = get_app_resources()
+    resource_qa_store = getattr(resources, "qa_store", None)
+    if resource_qa_store is None:
+        return ApiResponse[list[TravelQAConversationSummary]](success=True, message="问答记忆未启用", data=[])
+    try:
+        conversations = resource_qa_store.list_conversations(user_id=user_id, anonymous_id=anonymous_id, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
+    return ApiResponse[list[TravelQAConversationSummary]](success=True, message="问答会话列表获取成功", data=conversations)
+
+
+@app.get("/api/qa/conversations/{conversation_id}", response_model=ApiResponse[TravelQAConversationDetail])
+def get_qa_conversation(conversation_id: str):
+    resources = get_app_resources()
+    resource_qa_store = getattr(resources, "qa_store", None)
+    if resource_qa_store is None:
+        raise HTTPException(status_code=503, detail="问答记忆未启用")
+    try:
+        conversation = resource_qa_store.get_conversation(conversation_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="问答会话不存在")
+    return ApiResponse[TravelQAConversationDetail](success=True, message="问答会话详情获取成功", data=conversation)
 
 
 @app.post("/api/news/ingest", response_model=ApiResponse[TravelNewsIngestResult])

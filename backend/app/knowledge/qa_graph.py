@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Literal, TypedDict
+from typing import Any, Callable, Iterable, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class TravelQAState(TypedDict, total=False):
     question: str
     top_k: int
+    conversation_history: list[dict[str, str]]
     needs_realtime: bool
     realtime_docs: list[KnowledgeDocument]
     vector_docs: list[KnowledgeDocument]
@@ -26,6 +27,7 @@ class TravelQAState(TypedDict, total=False):
 
 
 AnswerWithLLM = Callable[[str, str], str]
+AnswerWithLLMStream = Callable[[str, str], Iterable[str]]
 
 
 class TravelQAGraphRunner:
@@ -37,16 +39,91 @@ class TravelQAGraphRunner:
         llm: Any | None = None,
         web_client: WebSearchMCPClient | None = None,
         answer_with_llm: AnswerWithLLM | None = None,
+        answer_with_llm_stream: AnswerWithLLMStream | None = None,
     ):
         self.vector_store = vector_store
         self.llm = llm
         self.web_client = web_client or WebSearchMCPClient()
         self.answer_with_llm = answer_with_llm
+        self.answer_with_llm_stream = answer_with_llm_stream
         self.graph = self._build_graph()
 
-    def ask(self, question: str, top_k: int = 5) -> TravelQAResponse:
-        final_state = self.graph.invoke({"question": question, "top_k": top_k})
+    def ask(
+        self,
+        question: str,
+        top_k: int = 5,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> TravelQAResponse:
+        final_state = self.graph.invoke(
+            {
+                "question": question,
+                "top_k": top_k,
+                "conversation_history": conversation_history or [],
+            }
+        )
         return final_state["response"]
+
+    def stream(
+        self,
+        question: str,
+        top_k: int = 5,
+        conversation_history: list[dict[str, str]] | None = None,
+    ):
+        state = self._prepare_answer_state(question, top_k, conversation_history or [])
+        docs = state.get("docs", [])
+        answer_parts: list[str] = []
+
+        if self.llm is not None and self.answer_with_llm_stream is not None and state.get("context"):
+            for chunk in self.answer_with_llm_stream(question, state["context"]):
+                if not chunk:
+                    continue
+                answer_parts.append(chunk)
+                yield {"event": "answer_delta", "data": {"content": chunk}}
+            answer = "".join(answer_parts).strip()
+            if answer:
+                yield {"event": "done", "data": self._response_from_state(state, answer, "llm")}
+                return
+
+        from app.knowledge.qa_agent import fallback_answer
+
+        fallback = fallback_answer(question, docs)
+        for chunk in chunk_text(fallback):
+            yield {"event": "answer_delta", "data": {"content": chunk}}
+        yield {"event": "done", "data": self._response_from_state(state, fallback, "fallback")}
+
+    def _prepare_answer_state(
+        self,
+        question: str,
+        top_k: int,
+        conversation_history: list[dict[str, str]],
+    ) -> TravelQAState:
+        state: TravelQAState = {
+            "question": question,
+            "top_k": top_k,
+            "conversation_history": conversation_history,
+        }
+        state.update(self._classify_question(state))
+        if self._route_after_classify(state) == "retrieve_realtime":
+            state.update(self._retrieve_realtime(state))
+        state.update(self._retrieve_vector(state))
+        state.update(self._merge_and_rank(state))
+        return state
+
+    def _response_from_state(
+        self,
+        state: TravelQAState,
+        answer: str,
+        generation_mode: Literal["llm", "fallback"],
+    ) -> TravelQAResponse:
+        from app.knowledge.qa_agent import source_from_document
+
+        docs = state.get("docs", [])
+        return TravelQAResponse(
+            answer=answer,
+            sources=[source_from_document(doc) for doc in docs],
+            retrieved_count=len(docs),
+            generation_mode=generation_mode,
+        )
 
     def _build_graph(self):
         graph = StateGraph(TravelQAState)
@@ -119,7 +196,14 @@ class TravelQAGraphRunner:
             state.get("vector_docs", []),
             limit=max(1, top_k + 3),
         )
-        return {"docs": docs, "context": format_documents(docs)}
+        context_parts = []
+        history_context = format_conversation_history(state.get("conversation_history", []))
+        if history_context:
+            context_parts.append(history_context)
+        document_context = format_documents(docs)
+        if document_context:
+            context_parts.append(document_context)
+        return {"docs": docs, "context": "\n\n".join(context_parts)}
 
     def _answer_question(self, state: TravelQAState) -> dict[str, Any]:
         from app.knowledge.qa_agent import fallback_answer
@@ -147,3 +231,21 @@ class TravelQAGraphRunner:
                 generation_mode=state.get("generation_mode", "fallback"),
             )
         }
+
+
+def format_conversation_history(messages: list[dict[str, str]], limit: int = 8) -> str:
+    if not messages:
+        return ""
+    labels = {"user": "用户", "assistant": "助手"}
+    lines = ["[最近对话]"]
+    for item in messages[-limit:]:
+        role = labels.get(str(item.get("role") or ""), str(item.get("role") or "消息"))
+        content = str(item.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}：{content[:800]}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def chunk_text(text: str, size: int = 12):
+    for index in range(0, len(text), size):
+        yield text[index : index + size]

@@ -206,6 +206,12 @@ export interface ServiceHealth {
     table_ready?: boolean
     error?: string
   }
+  qa_memory?: {
+    enabled: boolean
+    ok: boolean
+    memory_only?: boolean
+    error?: string
+  }
   web_search?: {
     enabled: boolean
     tool: string
@@ -226,6 +232,32 @@ export interface TravelQAResponse {
   sources: TravelKnowledgeSource[]
   retrieved_count: number
   generation_mode: 'llm' | 'fallback'
+  conversation_id?: string | null
+  message_id?: string | null
+}
+
+export interface TravelQAChatMessage {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant'
+  content: string
+  sources: TravelKnowledgeSource[]
+  retrieved_count: number
+  generation_mode?: 'llm' | 'fallback' | null
+  created_at: string
+}
+
+export interface TravelQAConversationSummary {
+  id: string
+  title: string
+  user_id?: string | null
+  anonymous_id?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TravelQAConversationDetail extends TravelQAConversationSummary {
+  messages: TravelQAChatMessage[]
 }
 
 export interface TravelFeedIngestStats {

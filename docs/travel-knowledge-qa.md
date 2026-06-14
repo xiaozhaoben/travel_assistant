@@ -9,6 +9,7 @@
 - `WebSearchMCPClient`：可选实时搜索 MCP，遇到预约、开放时间、闭馆、限流、节假日、交通公告等问题时实时补充资料。
 - `TravelQuestionAnsweringAgent`：保持 `/api/qa/ask` 的兼容入口，内部委托给 LangGraph 问答流程。
 - `TravelQAGraphRunner`：用 LangGraph 编排问题分类、实时搜索、向量召回、资料合并排序、LLM 回答和本地兜底摘要。资料按“官方/高可信 > 地图资料 > 开放旅行指南 > 社区经验 > RSS”排序，再参考 RAG 总结约束生成中文回答。
+- `PostgresQAConversationStore`：使用 PostgreSQL 保存问答会话和消息历史。登录用户通过 `user_id` 读取个人历史，未登录用户通过前端生成的 `anonymous_id` 也可以保存访客历史。
 
 ## 数据库要求
 
@@ -48,7 +49,35 @@ curl -X POST http://127.0.0.1:8010/api/news/ingest ^
 ```bash
 curl -X POST http://127.0.0.1:8010/api/qa/ask ^
   -H "Content-Type: application/json" ^
-  -d "{\"question\":\"端午去南京三天有哪些预约和错峰建议？\",\"top_k\":5}"
+  -d "{\"question\":\"端午去南京三天有哪些预约和错峰建议？\",\"top_k\":5,\"anonymous_id\":\"anon-browser-1\"}"
+```
+
+继续同一会话时，把上一次响应中的 `conversation_id` 带回：
+
+```bash
+curl -X POST http://127.0.0.1:8010/api/qa/ask ^
+  -H "Content-Type: application/json" ^
+  -d "{\"question\":\"那博物馆怎么预约？\",\"conversation_id\":\"上一次返回的 conversation_id\",\"anonymous_id\":\"anon-browser-1\"}"
+```
+
+前端独立问答页使用流式接口：
+
+```bash
+curl -N -X POST http://127.0.0.1:8010/api/qa/ask/stream ^
+  -H "Content-Type: application/json" ^
+  -d "{\"question\":\"那博物馆怎么预约？\",\"conversation_id\":\"上一次返回的 conversation_id\",\"anonymous_id\":\"anon-browser-1\"}"
+```
+
+流式响应采用 SSE 格式，主要事件包括：
+
+- `start`：返回当前 `conversation_id`。
+- `answer_delta`：返回本次回答的增量文本片段。
+- `done`：返回完整 `TravelQAResponse`，包含来源、生成模式和消息 ID。
+
+查询历史会话：
+
+```bash
+curl "http://127.0.0.1:8010/api/qa/conversations?anonymous_id=anon-browser-1"
 ```
 
 ## 配置实时搜索 MCP

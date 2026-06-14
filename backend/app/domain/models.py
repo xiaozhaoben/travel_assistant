@@ -306,6 +306,9 @@ class TravelKnowledgeSource(BaseModel):
 class TravelQARequest(BaseModel):
     question: str = Field(..., min_length=2, max_length=500)
     top_k: int = Field(default=5, ge=1, le=12)
+    conversation_id: Optional[str] = None
+    user_id: Optional[str] = None
+    anonymous_id: Optional[str] = None
 
 
 class TravelQAResponse(BaseModel):
@@ -313,6 +316,32 @@ class TravelQAResponse(BaseModel):
     sources: List[TravelKnowledgeSource] = Field(default_factory=list)
     retrieved_count: int = 0
     generation_mode: Literal["llm", "fallback"] = "fallback"
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
+
+
+class TravelQAChatMessage(BaseModel):
+    id: str
+    conversation_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    sources: List[TravelKnowledgeSource] = Field(default_factory=list)
+    retrieved_count: int = 0
+    generation_mode: Optional[Literal["llm", "fallback"]] = None
+    created_at: datetime
+
+
+class TravelQAConversationSummary(BaseModel):
+    id: str
+    title: str
+    user_id: Optional[str] = None
+    anonymous_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TravelQAConversationDetail(TravelQAConversationSummary):
+    messages: List[TravelQAChatMessage] = Field(default_factory=list)
 
 
 class TravelNewsIngestRequest(BaseModel):

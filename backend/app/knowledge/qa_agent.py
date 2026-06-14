@@ -59,10 +59,24 @@ class TravelQuestionAnsweringAgent:
             llm=llm,
             web_client=self.web_client,
             answer_with_llm=self._answer_with_llm,
+            answer_with_llm_stream=self._answer_with_llm_stream,
         )
 
-    def ask(self, question: str, top_k: int = 5) -> TravelQAResponse:
-        return self.graph_runner.ask(question, top_k=top_k)
+    def ask(
+        self,
+        question: str,
+        top_k: int = 5,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> TravelQAResponse:
+        return self.graph_runner.ask(question, top_k=top_k, conversation_history=conversation_history)
+
+    def stream(
+        self,
+        question: str,
+        top_k: int = 5,
+        conversation_history: list[dict[str, str]] | None = None,
+    ):
+        yield from self.graph_runner.stream(question, top_k=top_k, conversation_history=conversation_history)
 
     def _retrieve(self, question: str, top_k: int) -> list[KnowledgeDocument]:
         if self.vector_store is None:
@@ -123,6 +137,46 @@ class TravelQuestionAnsweringAgent:
         except Exception as exc:
             logger.warning("Travel QA LLM answer failed, using fallback: %s", exc)
             return ""
+
+    def _answer_with_llm_stream(self, question: str, context: str):
+        if not context:
+            return
+        prompt_payload = {"input": question, "context": context}
+        rendered_prompt = TRAVEL_RAG_PROMPT.format(**prompt_payload)
+        if self.langchain_agent is not None and hasattr(self.langchain_agent, "stream"):
+            try:
+                try:
+                    chunks = self.langchain_agent.stream(
+                        {"messages": [{"role": "user", "content": rendered_prompt}]},
+                        stream_mode="messages",
+                    )
+                except TypeError:
+                    chunks = self.langchain_agent.stream({"messages": [{"role": "user", "content": rendered_prompt}]})
+                for chunk in chunks:
+                    content = extract_stream_content(chunk)
+                    if content:
+                        yield content
+                return
+            except Exception as exc:
+                logger.warning("Travel QA LangChain agent stream failed, trying fallback stream: %s", exc)
+        try:
+            if self.chain is not None and hasattr(self.chain, "stream"):
+                for chunk in self.chain.stream(prompt_payload):
+                    content = str(getattr(chunk, "content", chunk))
+                    if content:
+                        yield content
+                return
+            if self.llm is not None and hasattr(self.llm, "stream"):
+                for chunk in self.llm.stream(rendered_prompt):
+                    content = str(getattr(chunk, "content", chunk))
+                    if content:
+                        yield content
+                return
+            answer = self._answer_with_llm(question, context)
+            for index in range(0, len(answer), 12):
+                yield answer[index : index + 12]
+        except Exception as exc:
+            logger.warning("Travel QA LLM stream failed, using fallback: %s", exc)
 
     def _safe_create_agent(self):
         if self.llm is None or create_agent is None:
@@ -281,4 +335,17 @@ def extract_agent_content(response: Any) -> str:
         message = response["messages"][-1]
         return str(getattr(message, "content", message))
     return str(getattr(response, "content", response))
+
+
+def extract_stream_content(chunk: Any) -> str:
+    if isinstance(chunk, tuple) and chunk:
+        return extract_stream_content(chunk[0])
+    if isinstance(chunk, dict):
+        if chunk.get("messages"):
+            return extract_agent_content({"messages": chunk["messages"]})
+        for value in chunk.values():
+            if isinstance(value, dict) and value.get("messages"):
+                return extract_agent_content({"messages": value["messages"]})
+        return str(chunk.get("content") or "")
+    return str(getattr(chunk, "content", chunk))
 

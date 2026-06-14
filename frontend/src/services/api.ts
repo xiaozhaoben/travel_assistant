@@ -6,6 +6,8 @@ import type {
   ResearchSnippet,
   ServiceHealth,
   TravelNewsIngestResult,
+  TravelQAConversationDetail,
+  TravelQAConversationSummary,
   TravelQAResponse,
   TripFormData,
   TripPlan,
@@ -27,6 +29,11 @@ const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+function apiUrl(path: string): string {
+  if (!API_BASE_URL) return path
+  return `${API_BASE_URL.replace(/\/$/, '')}${path}`
+}
 
 const apiEnvelopeSchema = z
   .object({
@@ -380,12 +387,111 @@ export async function healthCheck(): Promise<ServiceHealth> {
   return response.data
 }
 
-export async function askTravelQuestion(question: string, topK = 5): Promise<TravelQAResponse> {
+export async function askTravelQuestion(
+  question: string,
+  topK = 5,
+  options: { conversation_id?: string | null; user_id?: string | null; anonymous_id?: string | null } = {},
+): Promise<TravelQAResponse> {
   const response = await apiClient.post('/api/qa/ask', {
     question,
     top_k: topK,
+    conversation_id: options.conversation_id || undefined,
+    user_id: options.user_id || undefined,
+    anonymous_id: options.anonymous_id || undefined,
   })
   return requireApiData<TravelQAResponse>(response.data, 'Travel QA request failed')
+}
+
+export async function streamTravelQuestion(
+  question: string,
+  options: {
+    topK?: number
+    conversation_id?: string | null
+    user_id?: string | null
+    anonymous_id?: string | null
+    onStart?: (data: { conversation_id?: string | null; question?: string }) => void
+    onDelta?: (content: string) => void
+    onDone?: (response: TravelQAResponse) => void
+  } = {},
+): Promise<TravelQAResponse> {
+  const response = await fetch(apiUrl('/api/qa/ask/stream'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      question,
+      top_k: options.topK || 5,
+      conversation_id: options.conversation_id || undefined,
+      user_id: options.user_id || undefined,
+      anonymous_id: options.anonymous_id || undefined,
+    }),
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Travel QA stream failed: ${response.status}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let finalResponse: TravelQAResponse | null = null
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const rawEvent of parts) {
+      const parsed = parseSseEvent(rawEvent)
+      if (!parsed) continue
+      if (parsed.event === 'start') {
+        options.onStart?.(parsed.data as { conversation_id?: string | null; question?: string })
+      } else if (parsed.event === 'answer_delta') {
+        const content = String((parsed.data as { content?: unknown }).content || '')
+        if (content) options.onDelta?.(content)
+      } else if (parsed.event === 'done') {
+        finalResponse = parsed.data as TravelQAResponse
+        options.onDone?.(finalResponse)
+      } else if (parsed.event === 'error') {
+        const message = String((parsed.data as { message?: unknown }).message || 'Travel QA stream failed')
+        throw new Error(message)
+      }
+    }
+  }
+
+  if (!finalResponse) {
+    throw new Error('Travel QA stream ended without final response')
+  }
+  return finalResponse
+}
+
+function parseSseEvent(rawEvent: string): { event: string; data: unknown } | null {
+  const lines = rawEvent.split('\n')
+  const eventLine = lines.find((line) => line.startsWith('event:'))
+  const dataLine = lines.find((line) => line.startsWith('data:'))
+  if (!eventLine || !dataLine) return null
+  const event = eventLine.slice('event:'.length).trim()
+  const dataText = dataLine.slice('data:'.length).trim()
+  return { event, data: dataText ? JSON.parse(dataText) : {} }
+}
+
+export async function listQAConversations(options: {
+  user_id?: string | null
+  anonymous_id?: string | null
+  limit?: number
+} = {}): Promise<TravelQAConversationSummary[]> {
+  const response = await apiClient.get('/api/qa/conversations', {
+    params: {
+      user_id: options.user_id || undefined,
+      anonymous_id: options.anonymous_id || undefined,
+      limit: options.limit || 50,
+    },
+  })
+  return requireApiData<TravelQAConversationSummary[]>(response.data, 'Travel QA conversation list failed')
+}
+
+export async function getQAConversation(conversationId: string): Promise<TravelQAConversationDetail> {
+  const response = await apiClient.get(`/api/qa/conversations/${conversationId}`)
+  return requireApiData<TravelQAConversationDetail>(response.data, 'Travel QA conversation detail failed')
 }
 
 export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelNewsIngestResult> {

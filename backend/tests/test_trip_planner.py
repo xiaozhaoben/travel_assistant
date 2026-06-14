@@ -358,6 +358,49 @@ def _assert_travel_qa_graph_merges_realtime_and_vector_documents():
     assert "夫子庙" in result.answer
 
 
+def test_travel_qa_graph_includes_conversation_history_in_context():
+    from app.knowledge.qa_graph import TravelQAGraphRunner
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    captured = {}
+
+    def answer_with_llm(question, context):
+        captured["question"] = question
+        captured["context"] = context
+        return "可以继续安排南京的预约和夜游。"
+
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="南京预约资料",
+        content="南京博物院建议提前预约。",
+        summary="南京博物院建议提前预约。",
+        source_url="https://example.test/nanjing",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    runner = TravelQAGraphRunner(
+        FakeTravelVectorStore([doc]),
+        llm=FakeLLM("unused"),
+        web_client=WebSearchMCPClient(command=""),
+        answer_with_llm=answer_with_llm,
+    )
+
+    result = runner.ask(
+        "那博物馆怎么预约？",
+        conversation_history=[
+            {"role": "user", "content": "端午去南京三天怎么安排？"},
+            {"role": "assistant", "content": "建议重点关注夫子庙夜游和南京博物院预约。"},
+        ],
+    )
+
+    assert result.generation_mode == "llm"
+    assert "端午去南京三天" in captured["context"]
+    assert "南京博物院预约" in captured["context"]
+    assert "南京预约资料" in captured["context"]
+
+
 def test_travel_qa_agent_delegates_to_langgraph_runner():
     if _called_by_unittest_loader():
         return unittest.FunctionTestCase(_assert_travel_qa_agent_delegates_to_langgraph_runner)
@@ -372,7 +415,7 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
     class FakeGraphRunner:
         constructions = []
 
-        def __init__(self, vector_store, llm=None, web_client=None, answer_with_llm=None):
+        def __init__(self, vector_store, llm=None, web_client=None, answer_with_llm=None, answer_with_llm_stream=None):
             self.calls = []
             FakeGraphRunner.constructions.append(
                 {
@@ -381,11 +424,12 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
                     "llm": llm,
                     "web_client": web_client,
                     "answer_with_llm": answer_with_llm,
+                    "answer_with_llm_stream": answer_with_llm_stream,
                 }
             )
 
-        def ask(self, question, top_k=5):
-            self.calls.append({"question": question, "top_k": top_k})
+        def ask(self, question, top_k=5, conversation_history=None):
+            self.calls.append({"question": question, "top_k": top_k, "conversation_history": conversation_history})
             return TravelQAResponse(answer="graph answer", sources=[], retrieved_count=0, generation_mode="fallback")
 
     vector_store = FakeTravelVectorStore()
@@ -402,7 +446,10 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
     assert result.answer == "graph answer"
     assert FakeGraphRunner.constructions[0]["vector_store"] is vector_store
     assert FakeGraphRunner.constructions[0]["web_client"] is web_client
-    assert FakeGraphRunner.constructions[0]["runner"].calls == [{"question": "南京怎么预约热门景点？", "top_k": 3}]
+    assert FakeGraphRunner.constructions[0]["answer_with_llm_stream"] is not None
+    assert FakeGraphRunner.constructions[0]["runner"].calls == [
+        {"question": "南京怎么预约热门景点？", "top_k": 3, "conversation_history": None}
+    ]
 
 
 def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):
@@ -3065,7 +3112,7 @@ def test_api_health_plan_and_recalculate_endpoints():
 
 def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
     class FakeQAAgent:
-        def ask(self, question, top_k=5):
+        def ask(self, question, top_k=5, conversation_history=None):
             return TravelQAResponse(
                 answer=f"回答：{question}",
                 sources=[
@@ -3102,6 +3149,175 @@ def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
     ingest_response = client.post("/api/news/ingest", json={"feed_urls": ["https://feeds.example.test/travel"]})
     assert ingest_response.status_code == 200
     assert ingest_response.json()["data"]["total_added"] == 2
+
+
+def test_api_qa_persists_conversation_history():
+    class FakeQAAgent:
+        def __init__(self):
+            self.calls = []
+
+        def ask(self, question, top_k=5, conversation_history=None):
+            self.calls.append(
+                {
+                    "question": question,
+                    "top_k": top_k,
+                    "conversation_history": conversation_history or [],
+                }
+            )
+            return TravelQAResponse(
+                answer="南京博物院可以在官方渠道提前预约。",
+                sources=[],
+                retrieved_count=0,
+                generation_mode="fallback",
+            )
+
+    class FakeQAStore:
+        def __init__(self):
+            self.messages = [
+                {"role": "user", "content": "端午去南京三天怎么安排？"},
+                {"role": "assistant", "content": "建议关注夫子庙和南京博物院。"},
+            ]
+            self.saved = []
+
+        def health(self):
+            return {"enabled": True, "ok": True}
+
+        def get_or_create_conversation(self, conversation_id=None, user_id=None, anonymous_id=None, title=None):
+            return {
+                "id": conversation_id or "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "user_id": user_id,
+                "anonymous_id": anonymous_id,
+                "title": title or "端午去南京三天怎么安排？",
+                "created_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
+            }
+
+        def get_recent_messages(self, conversation_id, limit=8):
+            return self.messages[-limit:]
+
+        def append_message(self, conversation_id, role, content, **kwargs):
+            self.saved.append(
+                {
+                    "conversation_id": conversation_id,
+                    "role": role,
+                    "content": content,
+                    **kwargs,
+                }
+            )
+
+    fake_agent = FakeQAAgent()
+    fake_store = FakeQAStore()
+    original_qa_agent = main_module.qa_agent
+    original_qa_store = getattr(main_module, "qa_store", None)
+    main_module.qa_agent = fake_agent
+    main_module.qa_store = fake_store
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/qa/ask",
+            json={
+                "question": "那博物馆怎么预约？",
+                "conversation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "anonymous_id": "anon-browser-1",
+            },
+        )
+    finally:
+        main_module.qa_agent = original_qa_agent
+        main_module.qa_store = original_qa_store
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["conversation_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert fake_agent.calls[0]["conversation_history"] == fake_store.messages
+    assert [item["role"] for item in fake_store.saved] == ["user", "assistant"]
+    assert fake_store.saved[0]["content"] == "那博物馆怎么预约？"
+    assert fake_store.saved[1]["content"] == "南京博物院可以在官方渠道提前预约。"
+
+
+def test_api_qa_stream_returns_incremental_answer_events():
+    class FakeQAAgent:
+        def stream(self, question, top_k=5, conversation_history=None):
+            yield {"event": "answer_delta", "data": {"content": "南京"}}
+            yield {"event": "answer_delta", "data": {"content": "需要提前预约。"}}
+            yield {
+                "event": "done",
+                "data": TravelQAResponse(
+                    answer="南京需要提前预约。",
+                    sources=[],
+                    retrieved_count=0,
+                    generation_mode="fallback",
+                ),
+            }
+
+    class FakeQAStore:
+        def __init__(self):
+            self.saved = []
+
+        def get_or_create_conversation(self, conversation_id=None, user_id=None, anonymous_id=None, title=None):
+            return {
+                "id": conversation_id or "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "title": title or "新的旅行问答",
+                "created_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
+            }
+
+        def get_recent_messages(self, conversation_id, limit=8):
+            return []
+
+        def append_message(self, conversation_id, role, content, **kwargs):
+            self.saved.append({"role": role, "content": content, **kwargs})
+            return {"id": f"{role}-message-id"}
+
+    fake_store = FakeQAStore()
+    original_qa_agent = main_module.qa_agent
+    original_qa_store = getattr(main_module, "qa_store", None)
+    main_module.qa_agent = FakeQAAgent()
+    main_module.qa_store = fake_store
+    try:
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/qa/ask/stream",
+            json={"question": "南京博物馆怎么预约？", "anonymous_id": "anon-browser-1"},
+        ) as response:
+            body = response.read().decode("utf-8")
+    finally:
+        main_module.qa_agent = original_qa_agent
+        main_module.qa_store = original_qa_store
+
+    assert "event: answer_delta" in body
+    assert body.count("event: answer_delta") == 2
+    assert "data: {\"content\":\"南京\"}" in body
+    assert "event: done" in body
+    assert "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in body
+    assert [item["role"] for item in fake_store.saved] == ["user", "assistant"]
+    assert fake_store.saved[1]["content"] == "南京需要提前预约。"
+
+
+def test_in_memory_qa_store_returns_conversation_history_and_detail():
+    from app.storage.qa_store import InMemoryQAConversationStore
+
+    store = InMemoryQAConversationStore()
+    conversation = store.get_or_create_conversation(
+        user_id="user-1",
+        anonymous_id="anon-1",
+        title="端午去南京三天有哪些预约建议？",
+    )
+    store.append_message(conversation["id"], "user", "端午去南京三天有哪些预约建议？")
+    store.append_message(conversation["id"], "assistant", "热门场馆建议提前预约。", generation_mode="fallback")
+
+    recent = store.get_recent_messages(conversation["id"])
+    summaries = store.list_conversations(user_id="user-1")
+    detail = store.get_conversation(conversation["id"])
+
+    assert recent == [
+        {"role": "user", "content": "端午去南京三天有哪些预约建议？"},
+        {"role": "assistant", "content": "热门场馆建议提前预约。"},
+    ]
+    assert summaries[0].id == conversation["id"]
+    assert detail is not None
+    assert detail.messages[1].role == "assistant"
+    assert detail.messages[1].content == "热门场馆建议提前预约。"
 
 
 def test_api_plan_persists_report_and_returns_report_id():
