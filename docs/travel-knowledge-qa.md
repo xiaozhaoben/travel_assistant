@@ -7,7 +7,8 @@
 - `TravelNewsIngestionAgent`：使用 `feedparser` 抓取 `TRAVEL_FEEDS` 或请求体中的 RSS 源，清洗标题、摘要、正文并写入知识库。RSS 只作为长期知识库补充。
 - `PostgresTravelVectorStore`：使用当前项目 PostgreSQL 作为向量数据库，表为 `travel_knowledge_documents`，向量字段默认使用百炼 `tongyi-embedding-vision-plus-2026-03-06` 的 `vector(512)`。
 - `WebSearchMCPClient`：可选实时搜索 MCP，遇到预约、开放时间、闭馆、限流、节假日、交通公告等问题时实时补充资料。
-- `TravelQuestionAnsweringAgent`：合并实时搜索和向量召回资料，按“官方/高可信 > 地图资料 > 开放旅行指南 > 社区经验 > RSS”排序，再参考 RAG 总结约束生成中文回答。
+- `TravelQuestionAnsweringAgent`：保持 `/api/qa/ask` 的兼容入口，内部委托给 LangGraph 问答流程。
+- `TravelQAGraphRunner`：用 LangGraph 编排问题分类、实时搜索、向量召回、资料合并排序、LLM 回答和本地兜底摘要。资料按“官方/高可信 > 地图资料 > 开放旅行指南 > 社区经验 > RSS”排序，再参考 RAG 总结约束生成中文回答。
 
 ## 数据库要求
 

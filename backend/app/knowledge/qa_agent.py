@@ -3,7 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain.agents import create_agent
+try:
+    from langchain.agents import create_agent
+except Exception:  # pragma: no cover - supports fallback mode with partial LangChain installs
+    create_agent = None
 
 try:
     from langchain_core.output_parsers import StrOutputParser
@@ -49,24 +52,17 @@ class TravelQuestionAnsweringAgent:
         self.web_client = web_client or WebSearchMCPClient()
         self.langchain_agent = self._safe_create_agent()
         self.chain = self._build_chain()
+        from app.knowledge import qa_graph
+
+        self.graph_runner = qa_graph.TravelQAGraphRunner(
+            vector_store,
+            llm=llm,
+            web_client=self.web_client,
+            answer_with_llm=self._answer_with_llm,
+        )
 
     def ask(self, question: str, top_k: int = 5) -> TravelQAResponse:
-        docs = merge_documents(
-            self._retrieve_realtime(question, top_k),
-            self._retrieve(question, top_k),
-            limit=max(1, top_k + 3),
-        )
-        context = format_documents(docs)
-        answer = self._answer_with_llm(question, context) if self.llm is not None else ""
-        generation_mode = "llm" if answer else "fallback"
-        if not answer:
-            answer = fallback_answer(question, docs)
-        return TravelQAResponse(
-            answer=answer,
-            sources=[source_from_document(doc) for doc in docs],
-            retrieved_count=len(docs),
-            generation_mode=generation_mode,
-        )
+        return self.graph_runner.ask(question, top_k=top_k)
 
     def _retrieve(self, question: str, top_k: int) -> list[KnowledgeDocument]:
         if self.vector_store is None:
@@ -129,7 +125,7 @@ class TravelQuestionAnsweringAgent:
             return ""
 
     def _safe_create_agent(self):
-        if self.llm is None:
+        if self.llm is None or create_agent is None:
             return None
         try:
             return create_agent(

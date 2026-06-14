@@ -3,11 +3,29 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from langchain.agents.middleware import before_model, wrap_tool_call
-from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
-from langgraph.runtime import Runtime
-from langgraph.types import Command
+
+try:
+    from langchain.agents.middleware import before_model, wrap_tool_call
+    from langchain.tools.tool_node import ToolCallRequest
+except Exception:  # pragma: no cover - supports fallback mode with partial LangChain installs
+    ToolCallRequest = Any
+
+    def before_model(func):
+        return func
+
+    def wrap_tool_call(func):
+        return func
+
+try:
+    from langgraph.runtime import Runtime
+except Exception:  # pragma: no cover - optional typing only
+    Runtime = Any
+
+try:
+    from langgraph.types import Command
+except Exception:  # pragma: no cover - optional typing only
+    Command = Any
 
 logger = logging.getLogger(__name__)
 

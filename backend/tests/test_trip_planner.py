@@ -3,8 +3,24 @@ import logging
 import os
 import sys
 import time
+import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+
+def _called_by_unittest_loader() -> bool:
+    frame = sys._getframe()
+    while frame is not None:
+        filename = frame.f_code.co_filename.replace("\\", "/")
+        if filename.endswith("/unittest/loader.py"):
+            return True
+        frame = frame.f_back
+    return False
 
 from fastapi.testclient import TestClient
 
@@ -290,6 +306,103 @@ def test_travel_qa_agent_uses_realtime_search_for_time_sensitive_questions():
     assert result.retrieved_count >= 2
     assert result.sources[0].source == "web-official"
     assert "实名预约" in result.answer
+
+
+def test_travel_qa_graph_merges_realtime_and_vector_documents():
+    if _called_by_unittest_loader():
+        return unittest.FunctionTestCase(_assert_travel_qa_graph_merges_realtime_and_vector_documents)
+    _assert_travel_qa_graph_merges_realtime_and_vector_documents()
+
+
+def _assert_travel_qa_graph_merges_realtime_and_vector_documents():
+    from app.knowledge.qa_graph import TravelQAGraphRunner
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    class RealtimeCaller:
+        def __init__(self):
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments):
+            self.calls.append({"tool_name": tool_name, "arguments": arguments})
+            return {
+                "results": [
+                    {
+                        "title": "南京市文旅局端午预约公告",
+                        "url": "https://wlj.nanjing.gov.cn/notice",
+                        "content": "端午期间热门景区实行实名预约，建议错峰前往夫子庙和博物馆。",
+                    }
+                ]
+            }
+
+    vector_doc = KnowledgeDocument(
+        id="doc-1",
+        title="南京夜游提醒",
+        content="夫子庙夜游适合晚间错峰，秦淮河沿线周末人流较多。",
+        summary="夫子庙夜游适合晚间错峰。",
+        source_url="https://example.test/nanjing-night",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    caller = RealtimeCaller()
+    web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
+    runner = TravelQAGraphRunner(FakeTravelVectorStore([vector_doc]), llm=None, web_client=web)
+
+    result = runner.ask("端午去南京三天有哪些预约和交通注意事项？", top_k=5)
+
+    assert caller.calls
+    assert result.retrieved_count == 2
+    assert result.sources[0].source == "web-official"
+    assert "实名预约" in result.answer
+    assert "夫子庙" in result.answer
+
+
+def test_travel_qa_agent_delegates_to_langgraph_runner():
+    if _called_by_unittest_loader():
+        return unittest.FunctionTestCase(_assert_travel_qa_agent_delegates_to_langgraph_runner)
+    _assert_travel_qa_agent_delegates_to_langgraph_runner()
+
+
+def _assert_travel_qa_agent_delegates_to_langgraph_runner():
+    from app.knowledge import qa_graph
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    class FakeGraphRunner:
+        constructions = []
+
+        def __init__(self, vector_store, llm=None, web_client=None, answer_with_llm=None):
+            self.calls = []
+            FakeGraphRunner.constructions.append(
+                {
+                    "runner": self,
+                    "vector_store": vector_store,
+                    "llm": llm,
+                    "web_client": web_client,
+                    "answer_with_llm": answer_with_llm,
+                }
+            )
+
+        def ask(self, question, top_k=5):
+            self.calls.append({"question": question, "top_k": top_k})
+            return TravelQAResponse(answer="graph answer", sources=[], retrieved_count=0, generation_mode="fallback")
+
+    vector_store = FakeTravelVectorStore()
+    web_client = WebSearchMCPClient(command="")
+
+    original_runner = qa_graph.TravelQAGraphRunner
+    qa_graph.TravelQAGraphRunner = FakeGraphRunner
+    try:
+        agent = TravelQuestionAnsweringAgent(vector_store, llm=None, web_client=web_client)
+        result = agent.ask("南京怎么预约热门景点？", top_k=3)
+    finally:
+        qa_graph.TravelQAGraphRunner = original_runner
+
+    assert result.answer == "graph answer"
+    assert FakeGraphRunner.constructions[0]["vector_store"] is vector_store
+    assert FakeGraphRunner.constructions[0]["web_client"] is web_client
+    assert FakeGraphRunner.constructions[0]["runner"].calls == [{"question": "南京怎么预约热门景点？", "top_k": 3}]
 
 
 def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):

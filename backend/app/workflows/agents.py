@@ -9,7 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any, List
 
-from langchain.agents import create_agent
+try:
+    from langchain.agents import create_agent
+except Exception:  # pragma: no cover - supports fallback mode with partial LangChain installs
+    create_agent = None
 from pydantic import BaseModel, Field
 
 try:
@@ -72,7 +75,7 @@ def _safe_create_agent(
     name: str,
     response_format: Any | None = None,
 ):
-    if model is None:
+    if model is None or create_agent is None:
         return None
     try:
         return create_agent(
