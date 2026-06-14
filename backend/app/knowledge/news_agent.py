@@ -16,15 +16,22 @@ logger = logging.getLogger(__name__)
 load_dotenv(ENV_PATH, override=False)
 
 
-DEFAULT_RSSHUB_BASE_URL = "https://rsshub.rssforever.com"
+DEFAULT_RSSHUB_BASE_URL = "https://rsshub.app"
 DEFAULT_FEED_TIMEOUT_SECONDS = 20.0
 DEFAULT_MAX_ENTRIES_PER_FEED = 5
 
 DEFAULT_RSSHUB_ROUTES = [
-    "https://www.yantian.gov.cn/rss/index.html",
-    "http://www.tianqiao.gov.cn/rss",
-    "http://www.people.com.cn/rss/politics.xml",
-    "http://guizeco.com/index.shtml"
+    # ── 官方文旅公告 ──────────────────────────────────────
+    "/mct/gkml",                          # 文化和旅游部 官方公告/政策
+    "/ncha/gkml",                         # 国家文物局 博物馆开放/文保信息
+    # ── 旅行攻略 & 目的地指南 ─────────────────────────────
+    "/mafengwo/hot",                      # 马蜂窝 热门目的地/游记
+    "/qyer/city",                         # 穷游网 城市攻略
+    "/ctrip/picks/tours",                 # 携程 精选旅游线路
+    # ── 旅行媒体 ──────────────────────────────────────────
+    "/chinanews/ly",                      # 中新网 旅游频道
+    # ── 国际开放指南（中文） ───────────────────────────────
+    "https://zh.wikivoyage.org/w/api.php?action=feedrecentchanges&feedformat=atom",
 ]
 
 
