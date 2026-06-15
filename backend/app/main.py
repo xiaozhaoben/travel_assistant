@@ -29,6 +29,7 @@ from .domain.models import (
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
+from .knowledge.qa_checkpointer import create_qa_checkpointer
 from .knowledge.vector_store import create_travel_vector_store
 from .storage.plan_log import PlanLogRecorder
 from .storage.qa_store import create_qa_conversation_store
@@ -46,6 +47,7 @@ class AppResources:
     report_store: object | None
     travel_vector_store: object | None
     qa_store: object | None
+    qa_checkpointer: object | None
     news_agent: TravelNewsIngestionAgent
     qa_agent: TravelQuestionAnsweringAgent
     image_provider: UnsplashMCPClient
@@ -55,6 +57,7 @@ orchestrator: TravelAgentOrchestrator | None = None
 report_store = None
 travel_vector_store = None
 qa_store = None
+qa_checkpointer = None
 news_agent: TravelNewsIngestionAgent | None = None
 qa_agent: TravelQuestionAnsweringAgent | None = None
 image_provider: UnsplashMCPClient | None = None
@@ -65,12 +68,14 @@ def create_app_resources() -> AppResources:
     resource_report_store = create_report_store(resource_settings.database_url)
     resource_vector_store = create_travel_vector_store(resource_settings.database_url)
     resource_qa_store = create_qa_conversation_store(resource_settings.database_url)
+    resource_qa_checkpointer = create_qa_checkpointer(resource_settings.database_url)
     resource_orchestrator = TravelAgentOrchestrator()
     resource_orchestrator.configure_reflection_memory(resource_vector_store)
     resource_news_agent = TravelNewsIngestionAgent(resource_vector_store)
     resource_qa_agent = TravelQuestionAnsweringAgent(
         resource_vector_store,
         llm=resource_orchestrator.planner.llm,
+        checkpointer=resource_qa_checkpointer,
     )
     resource_image_provider = (
         UnsplashMCPClient(access_key="", pexels_api_key="", pixabay_api_key="", enable_open_sources=False)
@@ -82,6 +87,7 @@ def create_app_resources() -> AppResources:
         report_store=resource_report_store,
         travel_vector_store=resource_vector_store,
         qa_store=resource_qa_store,
+        qa_checkpointer=resource_qa_checkpointer,
         news_agent=resource_news_agent,
         qa_agent=resource_qa_agent,
         image_provider=resource_image_provider,
@@ -89,11 +95,12 @@ def create_app_resources() -> AppResources:
 
 
 def bind_app_resources(resources: AppResources) -> None:
-    global orchestrator, report_store, travel_vector_store, qa_store, news_agent, qa_agent, image_provider
+    global orchestrator, report_store, travel_vector_store, qa_store, qa_checkpointer, news_agent, qa_agent, image_provider
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
     qa_store = resources.qa_store
+    qa_checkpointer = resources.qa_checkpointer
     if hasattr(orchestrator, "configure_reflection_memory"):
         orchestrator.configure_reflection_memory(travel_vector_store)
     news_agent = resources.news_agent
@@ -109,8 +116,13 @@ def current_global_resources() -> AppResources | None:
         report_store=report_store,
         travel_vector_store=travel_vector_store,
         qa_store=qa_store,
+        qa_checkpointer=qa_checkpointer,
         news_agent=news_agent or TravelNewsIngestionAgent(travel_vector_store),
-        qa_agent=qa_agent or TravelQuestionAnsweringAgent(travel_vector_store, llm=orchestrator.planner.llm),
+        qa_agent=qa_agent or TravelQuestionAnsweringAgent(
+            travel_vector_store,
+            llm=orchestrator.planner.llm,
+            checkpointer=qa_checkpointer,
+        ),
         image_provider=image_provider or UnsplashMCPClient(),
     )
 
@@ -122,6 +134,7 @@ def get_app_resources() -> AppResources:
         (news_agent is not None and news_agent is not state_resources.news_agent)
         or (qa_agent is not None and qa_agent is not state_resources.qa_agent)
         or (qa_store is not None and qa_store is not state_resources.qa_store)
+        or (qa_checkpointer is not None and qa_checkpointer is not state_resources.qa_checkpointer)
         or (image_provider is not None and image_provider is not state_resources.image_provider)
     ):
         resources = AppResources(
@@ -131,6 +144,7 @@ def get_app_resources() -> AppResources:
             if travel_vector_store is not None
             else state_resources.travel_vector_store,
             qa_store=qa_store if qa_store is not None else state_resources.qa_store,
+            qa_checkpointer=qa_checkpointer if qa_checkpointer is not None else state_resources.qa_checkpointer,
             news_agent=news_agent or state_resources.news_agent,
             qa_agent=qa_agent or state_resources.qa_agent,
             image_provider=image_provider or state_resources.image_provider,
@@ -146,6 +160,10 @@ def get_app_resources() -> AppResources:
                 and state_resources.travel_vector_store is not global_resources.travel_vector_store
             )
             or (qa_store is not None and state_resources.qa_store is not global_resources.qa_store)
+            or (
+                qa_checkpointer is not None
+                and state_resources.qa_checkpointer is not global_resources.qa_checkpointer
+            )
             or (news_agent is not None and state_resources.news_agent is not global_resources.news_agent)
             or (qa_agent is not None and state_resources.qa_agent is not global_resources.qa_agent)
             or (image_provider is not None and state_resources.image_provider is not global_resources.image_provider)
@@ -163,6 +181,7 @@ def get_app_resources() -> AppResources:
             if travel_vector_store is not None
             else base_resources.travel_vector_store,
             qa_store=qa_store if qa_store is not None else base_resources.qa_store,
+            qa_checkpointer=qa_checkpointer if qa_checkpointer is not None else base_resources.qa_checkpointer,
             news_agent=news_agent or base_resources.news_agent,
             qa_agent=qa_agent or base_resources.qa_agent,
             image_provider=image_provider or base_resources.image_provider,
@@ -192,6 +211,7 @@ def close_app_resources(resources: AppResources) -> None:
         resources.report_store,
         resources.travel_vector_store,
         resources.qa_store,
+        resources.qa_checkpointer,
         resources.image_provider,
         resources.orchestrator.amap,
         resources.orchestrator.unsplash,
@@ -199,6 +219,10 @@ def close_app_resources(resources: AppResources) -> None:
         close = getattr(candidate, "close", None)
         if callable(close):
             close()
+        connection_pool = getattr(candidate, "conn", None)
+        pool_close = getattr(connection_pool, "close", None)
+        if callable(pool_close):
+            pool_close()
 
 
 def asset_cache_key(asset_type: str, city: str | None, name: str, extra: str | None = None) -> str:
@@ -424,11 +448,14 @@ def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
 def ask_travel_question(request: TravelQARequest):
     resources = get_app_resources()
     resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+    config = _qa_thread_config(conversation["id"] if conversation else None)
 
-    result = resources.qa_agent.ask(
+    result = _call_qa_agent(
+        resources.qa_agent,
         request.question,
-        top_k=request.top_k,
-        conversation_history=conversation_history,
+        request.top_k,
+        conversation_history,
+        config,
     )
     result = _persist_qa_exchange(resource_qa_store, conversation, request.question, result)
     return ApiResponse[TravelQAResponse](success=True, message="智能问答完成", data=result)
@@ -438,6 +465,7 @@ def ask_travel_question(request: TravelQARequest):
 def stream_travel_question(request: TravelQARequest):
     resources = get_app_resources()
     resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+    config = _qa_thread_config(conversation["id"] if conversation else None)
 
     def event_stream():
         answer_parts: list[str] = []
@@ -452,9 +480,23 @@ def stream_travel_question(request: TravelQARequest):
             )
             stream = getattr(resources.qa_agent, "stream", None)
             if callable(stream):
-                events = stream(request.question, top_k=request.top_k, conversation_history=conversation_history)
+                events = _stream_qa_agent(
+                    resources.qa_agent,
+                    request.question,
+                    request.top_k,
+                    conversation_history,
+                    config,
+                )
             else:
-                events = _response_to_stream_events(resources.qa_agent.ask(request.question, top_k=request.top_k))
+                events = _response_to_stream_events(
+                    _call_qa_agent(
+                        resources.qa_agent,
+                        request.question,
+                        request.top_k,
+                        conversation_history,
+                        config,
+                    )
+                )
 
             for event in events:
                 event_name = str(event.get("event") or "message")
@@ -501,8 +543,45 @@ def _prepare_qa_memory(resources: AppResources, request: TravelQARequest):
     return resource_qa_store, conversation, conversation_history
 
 
+def _qa_thread_config(thread_id: str | None) -> dict[str, dict[str, str]] | None:
+    if not thread_id:
+        return None
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def _call_qa_agent(qa_agent_instance, question: str, top_k: int, conversation_history: list[dict[str, str]], config: dict | None):
+    try:
+        return qa_agent_instance.ask(
+            question,
+            top_k=top_k,
+            conversation_history=conversation_history,
+            config=config,
+        )
+    except TypeError:
+        return qa_agent_instance.ask(question, top_k=top_k, conversation_history=conversation_history)
+
+
+def _stream_qa_agent(
+    qa_agent_instance,
+    question: str,
+    top_k: int,
+    conversation_history: list[dict[str, str]],
+    config: dict | None,
+):
+    try:
+        return qa_agent_instance.stream(
+            question,
+            top_k=top_k,
+            conversation_history=conversation_history,
+            config=config,
+        )
+    except TypeError:
+        return qa_agent_instance.stream(question, top_k=top_k, conversation_history=conversation_history)
+
+
 def _persist_qa_exchange(resource_qa_store, conversation, question: str, result: TravelQAResponse) -> TravelQAResponse:
     if conversation is None or resource_qa_store is None:
+        logger.info("QA persist skipped: conversation=%s, qa_store=%s", conversation is not None, resource_qa_store is not None)
         return result
     message_id = None
     try:
@@ -514,8 +593,10 @@ def _persist_qa_exchange(resource_qa_store, conversation, question: str, result:
             sources=result.sources,
             retrieved_count=result.retrieved_count,
             generation_mode=result.generation_mode,
+            used_web_search=result.used_web_search,
         )
         message_id = assistant_message.get("id") if isinstance(assistant_message, dict) else None
+        logger.info("QA exchange persisted: conversation=%s, message_id=%s, answer_len=%d", conversation["id"], message_id, len(result.answer))
     except Exception as exc:
         logger.warning("QA conversation memory write failed: %s", exc)
     return result.model_copy(update={"conversation_id": conversation["id"], "message_id": message_id})

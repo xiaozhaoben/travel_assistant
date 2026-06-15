@@ -39,6 +39,15 @@ class FakeMessage:
         self.content = content
 
 
+class FakeToolMessage:
+    type = "tool"
+    name = "tavily_search"
+    tool_call_id = "tool-call-1"
+
+    def __init__(self, content):
+        self.content = content
+
+
 class FakeLLM:
     def __init__(self, content: str):
         self.content = content
@@ -270,8 +279,9 @@ def test_travel_qa_agent_answers_from_retrieved_vector_documents():
     assert result.sources[0].title == "南京端午预约提醒"
 
 
-def test_travel_qa_agent_uses_realtime_search_for_time_sensitive_questions():
+def test_travel_qa_agent_does_not_use_realtime_search_node_for_time_sensitive_questions():
     from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.knowledge.vector_store import KnowledgeDocument
     from app.researching.research import WebSearchMCPClient
 
     class RealtimeCaller:
@@ -280,41 +290,37 @@ def test_travel_qa_agent_uses_realtime_search_for_time_sensitive_questions():
 
         def call_tool(self, tool_name, arguments):
             self.calls.append({"tool_name": tool_name, "arguments": arguments})
-            return {
-                "results": [
-                    {
-                        "title": "南京市文旅局端午预约公告",
-                        "url": "https://wlj.nanjing.gov.cn/notice",
-                        "content": "端午期间热门景区实行实名预约，建议错峰前往夫子庙和博物馆。",
-                    },
-                    {
-                        "title": "南京旅行社区经验",
-                        "url": "https://www.mafengwo.cn/nanjing",
-                        "content": "游客分享夜游夫子庙体验，晚间人流较多。",
-                    },
-                ]
-            }
+            raise AssertionError("realtime MCP node should not run in the simplified QA graph")
 
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="南京端午预约提醒",
+        content="南京端午期间热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        summary="热门景区建议提前预约，夫子庙夜游适合晚间错峰。",
+        source_url="https://example.test/nanjing",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
     caller = RealtimeCaller()
     web = WebSearchMCPClient(tool_name="web_search", mcp_caller=caller)
-    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore(), llm=None, web_client=web)
+    agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=None, web_client=web)
 
     result = agent.ask("端午去南京三天有哪些预约和交通注意事项？")
 
-    assert caller.calls
-    assert "官方" in caller.calls[0]["arguments"]["query"]
-    assert result.retrieved_count >= 2
-    assert result.sources[0].source == "web-official"
-    assert "实名预约" in result.answer
+    assert caller.calls == []
+    assert result.retrieved_count == 1
+    assert result.sources[0].source == "rss"
+    assert "提前预约" in result.answer
 
 
-def test_travel_qa_graph_merges_realtime_and_vector_documents():
+def test_travel_qa_graph_uses_vector_documents_without_realtime_node():
     if _called_by_unittest_loader():
-        return unittest.FunctionTestCase(_assert_travel_qa_graph_merges_realtime_and_vector_documents)
-    _assert_travel_qa_graph_merges_realtime_and_vector_documents()
+        return unittest.FunctionTestCase(_assert_travel_qa_graph_uses_vector_documents_without_realtime_node)
+    _assert_travel_qa_graph_uses_vector_documents_without_realtime_node()
 
 
-def _assert_travel_qa_graph_merges_realtime_and_vector_documents():
+def _assert_travel_qa_graph_uses_vector_documents_without_realtime_node():
     from app.knowledge.qa_graph import TravelQAGraphRunner
     from app.knowledge.vector_store import KnowledgeDocument
     from app.researching.research import WebSearchMCPClient
@@ -325,15 +331,7 @@ def _assert_travel_qa_graph_merges_realtime_and_vector_documents():
 
         def call_tool(self, tool_name, arguments):
             self.calls.append({"tool_name": tool_name, "arguments": arguments})
-            return {
-                "results": [
-                    {
-                        "title": "南京市文旅局端午预约公告",
-                        "url": "https://wlj.nanjing.gov.cn/notice",
-                        "content": "端午期间热门景区实行实名预约，建议错峰前往夫子庙和博物馆。",
-                    }
-                ]
-            }
+            raise AssertionError("realtime MCP node should not run in the simplified QA graph")
 
     vector_doc = KnowledgeDocument(
         id="doc-1",
@@ -351,10 +349,9 @@ def _assert_travel_qa_graph_merges_realtime_and_vector_documents():
 
     result = runner.ask("端午去南京三天有哪些预约和交通注意事项？", top_k=5)
 
-    assert caller.calls
-    assert result.retrieved_count == 2
-    assert result.sources[0].source == "web-official"
-    assert "实名预约" in result.answer
+    assert caller.calls == []
+    assert result.retrieved_count == 1
+    assert result.sources[0].source == "rss"
     assert "夫子庙" in result.answer
 
 
@@ -415,7 +412,15 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
     class FakeGraphRunner:
         constructions = []
 
-        def __init__(self, vector_store, llm=None, web_client=None, answer_with_llm=None, answer_with_llm_stream=None):
+        def __init__(
+            self,
+            vector_store,
+            llm=None,
+            web_client=None,
+            answer_with_llm=None,
+            answer_with_llm_stream=None,
+            checkpointer=None,
+        ):
             self.calls = []
             FakeGraphRunner.constructions.append(
                 {
@@ -425,11 +430,14 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
                     "web_client": web_client,
                     "answer_with_llm": answer_with_llm,
                     "answer_with_llm_stream": answer_with_llm_stream,
+                    "checkpointer": checkpointer,
                 }
             )
 
-        def ask(self, question, top_k=5, conversation_history=None):
-            self.calls.append({"question": question, "top_k": top_k, "conversation_history": conversation_history})
+        def ask(self, question, top_k=5, conversation_history=None, config=None):
+            self.calls.append(
+                {"question": question, "top_k": top_k, "conversation_history": conversation_history, "config": config}
+            )
             return TravelQAResponse(answer="graph answer", sources=[], retrieved_count=0, generation_mode="fallback")
 
     vector_store = FakeTravelVectorStore()
@@ -448,11 +456,48 @@ def _assert_travel_qa_agent_delegates_to_langgraph_runner():
     assert FakeGraphRunner.constructions[0]["web_client"] is web_client
     assert FakeGraphRunner.constructions[0]["answer_with_llm_stream"] is not None
     assert FakeGraphRunner.constructions[0]["runner"].calls == [
-        {"question": "南京怎么预约热门景点？", "top_k": 3, "conversation_history": None}
+        {"question": "南京怎么预约热门景点？", "top_k": 3, "conversation_history": None, "config": None}
     ]
 
 
-def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):
+def test_travel_qa_agent_builds_react_agent_with_checkpointer_and_summary_hook(monkeypatch):
+    from app.knowledge import qa_agent as qa_agent_module
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    captured = {}
+
+    class FakeSummaryNode:
+        def __init__(self, **kwargs):
+            captured["summary_kwargs"] = kwargs
+
+    runtime = object()
+
+    def fake_create_react_agent(**kwargs):
+        captured["react_kwargs"] = kwargs
+        return runtime
+
+    monkeypatch.setattr(qa_agent_module, "create_react_agent", fake_create_react_agent)
+    monkeypatch.setattr(qa_agent_module, "SummarizationNode", FakeSummaryNode)
+
+    checkpointer = object()
+    agent = TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore(),
+        llm=FakeLLM("unused"),
+        web_client=WebSearchMCPClient(command=""),
+        checkpointer=checkpointer,
+    )
+
+    assert agent.langgraph_agent is runtime
+    assert captured["react_kwargs"]["model"] is agent.llm
+    assert captured["react_kwargs"]["tools"] == []
+    assert captured["react_kwargs"]["checkpointer"] is checkpointer
+    assert captured["react_kwargs"]["pre_model_hook"] is not None
+    assert captured["summary_kwargs"]["model"] is agent.llm
+    assert captured["summary_kwargs"]["output_messages_key"] == "summarized_messages"
+
+
+def test_travel_qa_agent_prefers_create_react_agent_runtime(monkeypatch):
     from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
     from app.knowledge.vector_store import KnowledgeDocument
     from app.researching.research import WebSearchMCPClient
@@ -461,8 +506,8 @@ def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def invoke(self, state):
-            self.calls.append(state)
+        def invoke(self, state, config=None):
+            self.calls.append({"state": state, "config": config})
             return {"messages": [FakeMessage("请优先查看官方渠道并提前预约。")]}
 
     doc = KnowledgeDocument(
@@ -476,15 +521,249 @@ def test_travel_qa_agent_prefers_create_agent_runtime(monkeypatch):
         score=0.91,
     )
     runtime = QAAgentRuntime()
-    monkeypatch.setattr("app.knowledge.qa_agent.create_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr("app.knowledge.qa_agent.create_react_agent", lambda *args, **kwargs: runtime)
     agent = TravelQuestionAnsweringAgent(FakeTravelVectorStore([doc]), llm=FakeLLM("chain should not be first"), web_client=WebSearchMCPClient(command=""))
     agent.chain = SimpleNamespace(invoke=lambda payload: (_ for _ in ()).throw(AssertionError("chain should be fallback only")))
 
-    result = agent.ask("北京热门场馆怎么预约？")
+    result = agent.ask("北京热门场馆怎么预约？", config={"configurable": {"thread_id": "qa-thread-1"}})
 
     assert runtime.calls
+    assert runtime.calls[0]["config"]["configurable"]["thread_id"] == "qa-thread-1"
     assert result.generation_mode == "llm"
     assert "提前预约" in result.answer
+
+
+def test_travel_qa_agent_adds_tavily_tool_when_configured(monkeypatch):
+    from app.knowledge import qa_agent as qa_agent_module
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    captured = {}
+
+    class FakeTavilySearch:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = []
+            self.name = "tavily_search"
+
+        def invoke(self, payload):
+            self.calls.append(payload)
+            return {
+                "results": [
+                    {
+                        "title": "珠海天气官方预报",
+                        "url": "https://example.gov.cn/zhuhai-weather",
+                        "content": "珠海18号多云，有阵雨概率，请关注气象台预警。",
+                        "score": 0.92,
+                        }
+                    ]
+                }
+
+    def fake_create_react_agent(**kwargs):
+        captured["react_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(qa_agent_module, "TavilySearch", FakeTavilySearch)
+    monkeypatch.setattr(qa_agent_module, "create_react_agent", fake_create_react_agent)
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-key")
+    monkeypatch.setenv("TAVILY_MAX_RESULTS", "7")
+
+    TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore(),
+        llm=FakeLLM("unused"),
+        web_client=WebSearchMCPClient(command=""),
+    )
+
+    tools = captured["react_kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0].name == "tavily_search"
+    assert tools[0].kwargs["max_results"] == 7
+
+
+def test_travel_qa_agent_uses_react_agent_when_knowledge_context_is_empty(monkeypatch):
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    class FakeTavilySearch:
+        name = "tavily_search"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = []
+
+        def invoke(self, payload):
+            self.calls.append(payload)
+            return {
+                "results": [
+                    {
+                        "title": "珠海天气官方预报",
+                        "url": "https://example.gov.cn/zhuhai-weather",
+                        "content": "珠海18号多云，有阵雨概率，请关注气象台预警。",
+                        "score": 0.92,
+                    }
+                ]
+            }
+
+    class QAAgentRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, state, config=None):
+            self.calls.append({"state": state, "config": config})
+            return {
+                "messages": [
+                    FakeToolMessage(
+                        {
+                            "query": "广州夜游 官方 预约",
+                            "results": [
+                                {
+                                    "title": "广州珠江夜游官方预约",
+                                    "url": "https://example.gov.cn/pearl-river-night",
+                                    "content": "珠江夜游可通过官方渠道预约，建议关注实时班次。",
+                                    "score": 0.93,
+                                }
+                            ],
+                        }
+                    ),
+                    FakeMessage("已联网查询到：广州夜游建议关注珠江夜游官方预约。"),
+                ]
+            }
+
+    runtime = QAAgentRuntime()
+    monkeypatch.setattr("app.knowledge.qa_agent.TavilySearch", FakeTavilySearch)
+    monkeypatch.setattr("app.knowledge.qa_agent.create_react_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-key")
+    agent = TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore([]),
+        llm=FakeLLM("chain should not be first"),
+        web_client=WebSearchMCPClient(command=""),
+    )
+    agent.chain = SimpleNamespace(invoke=lambda payload: (_ for _ in ()).throw(AssertionError("chain should be fallback only")))
+
+    result = agent.ask("广州夜游现在怎么预约？", config={"configurable": {"thread_id": "qa-empty-context"}})
+
+    assert runtime.calls
+    assert "联网搜索结果" in runtime.calls[0]["state"]["messages"][0]["content"]
+    assert runtime.calls[0]["config"]["configurable"]["thread_id"] == "qa-empty-context"
+    assert result.generation_mode == "llm"
+    assert result.used_web_search is True
+    assert result.retrieved_count >= 1
+    assert result.sources[0].source == "web-official"
+    assert "珠江夜游" in result.answer
+
+
+def test_travel_qa_agent_prompts_web_search_when_user_explicitly_requests_it(monkeypatch):
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    class FakeTavilySearch:
+        name = "tavily_search"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = []
+
+        def invoke(self, payload):
+            self.calls.append(payload)
+            return {
+                "results": [
+                    {
+                        "title": "珠海天气官方预报",
+                        "url": "https://example.gov.cn/zhuhai-weather",
+                        "content": "珠海18号多云，有阵雨概率，请关注气象台预警。",
+                        "score": 0.92,
+                    }
+                ]
+            }
+
+    class QAAgentRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, state, config=None):
+            self.calls.append({"state": state, "config": config})
+            return {"messages": [FakeMessage("珠海18号天气建议以气象台最新预报为准。")]}
+
+    doc = KnowledgeDocument(
+        id="doc-1",
+        title="无关铁路公告",
+        content="铁路部门近期加开部分旅客列车，与珠海天气无关。",
+        summary="铁路加开公告。",
+        source_url="https://example.test/railway",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.91,
+    )
+    runtime = QAAgentRuntime()
+    monkeypatch.setattr("app.knowledge.qa_agent.TavilySearch", FakeTavilySearch)
+    monkeypatch.setattr("app.knowledge.qa_agent.create_react_agent", lambda *args, **kwargs: runtime)
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-key")
+    agent = TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore([doc]),
+        llm=FakeLLM("chain should not be first"),
+        web_client=WebSearchMCPClient(command=""),
+    )
+
+    result = agent.ask("请联网查询一下珠海18号的天气情况")
+
+    prompt = runtime.calls[0]["state"]["messages"][0]["content"]
+    assert "用户明确要求联网或问题涉及时效信息" in prompt
+    assert "必须先调用联网搜索工具" in prompt
+    assert result.used_web_search is True
+    assert result.sources[0].title == "珠海天气官方预报"
+
+
+def test_travel_qa_agent_stream_includes_tavily_sources_from_tool_messages(monkeypatch):
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    class FakeTavilySearch:
+        name = "tavily_search"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class QAAgentRuntime:
+        def stream(self, state, config=None, stream_mode=None):
+            yield (
+                FakeToolMessage(
+                    json.dumps(
+                        {
+                            "results": [
+                                {
+                                    "title": "广州塔官方购票",
+                                    "url": "https://example.gov.cn/canton-tower",
+                                    "content": "广州塔夜间登塔需通过官方渠道购票预约。",
+                                    "score": 0.91,
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+                {},
+            )
+            yield (FakeMessage("广州夜景建议优先预约广州塔和珠江夜游。"), {})
+
+    monkeypatch.setattr("app.knowledge.qa_agent.TavilySearch", FakeTavilySearch)
+    monkeypatch.setattr("app.knowledge.qa_agent.create_react_agent", lambda *args, **kwargs: QAAgentRuntime())
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-key")
+    agent = TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore([]),
+        llm=FakeLLM("chain should not be first"),
+        web_client=WebSearchMCPClient(command=""),
+    )
+
+    events = list(agent.stream("广州夜景怎么预约？", config={"configurable": {"thread_id": "qa-stream-web"}}))
+
+    deltas = [event["data"]["content"] for event in events if event["event"] == "answer_delta"]
+    done = next(event["data"] for event in events if event["event"] == "done")
+    assert deltas == ["广州夜景建议优先预约广州塔和珠江夜游。"]
+    assert done.used_web_search is True
+    assert done.retrieved_count == 1
+    assert done.sources[0].title == "广州塔官方购票"
+    assert done.sources[0].source == "web-official"
 
 
 def test_settings_support_reference_env_names(monkeypatch):
@@ -494,6 +773,8 @@ def test_settings_support_reference_env_names(monkeypatch):
     monkeypatch.setenv("LLM_TIMEOUT", "45")
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174")
     monkeypatch.setenv("AMAP_API_KEY", "amap-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
+    monkeypatch.setenv("TAVILY_MAX_RESULTS", "8")
 
     settings = get_settings()
 
@@ -503,6 +784,8 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.llm_timeout == 45
     assert settings.cors_origins == ["http://localhost:5173", "http://localhost:5174"]
     assert settings.amap_api_key == "amap-key"
+    assert settings.tavily_api_key == "tavily-key"
+    assert settings.tavily_max_results == 8
     assert settings.has_llm_credentials is True
 
 
@@ -3156,12 +3439,13 @@ def test_api_qa_persists_conversation_history():
         def __init__(self):
             self.calls = []
 
-        def ask(self, question, top_k=5, conversation_history=None):
+        def ask(self, question, top_k=5, conversation_history=None, config=None):
             self.calls.append(
                 {
                     "question": question,
                     "top_k": top_k,
                     "conversation_history": conversation_history or [],
+                    "config": config,
                 }
             )
             return TravelQAResponse(
@@ -3169,6 +3453,7 @@ def test_api_qa_persists_conversation_history():
                 sources=[],
                 retrieved_count=0,
                 generation_mode="fallback",
+                used_web_search=True,
             )
 
     class FakeQAStore:
@@ -3229,14 +3514,27 @@ def test_api_qa_persists_conversation_history():
     data = response.json()["data"]
     assert data["conversation_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     assert fake_agent.calls[0]["conversation_history"] == fake_store.messages
+    assert fake_agent.calls[0]["config"]["configurable"]["thread_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     assert [item["role"] for item in fake_store.saved] == ["user", "assistant"]
     assert fake_store.saved[0]["content"] == "那博物馆怎么预约？"
     assert fake_store.saved[1]["content"] == "南京博物院可以在官方渠道提前预约。"
+    assert fake_store.saved[1]["used_web_search"] is True
 
 
 def test_api_qa_stream_returns_incremental_answer_events():
     class FakeQAAgent:
-        def stream(self, question, top_k=5, conversation_history=None):
+        def __init__(self):
+            self.calls = []
+
+        def stream(self, question, top_k=5, conversation_history=None, config=None):
+            self.calls.append(
+                {
+                    "question": question,
+                    "top_k": top_k,
+                    "conversation_history": conversation_history or [],
+                    "config": config,
+                }
+            )
             yield {"event": "answer_delta", "data": {"content": "南京"}}
             yield {"event": "answer_delta", "data": {"content": "需要提前预约。"}}
             yield {
@@ -3246,6 +3544,7 @@ def test_api_qa_stream_returns_incremental_answer_events():
                     sources=[],
                     retrieved_count=0,
                     generation_mode="fallback",
+                    used_web_search=True,
                 ),
             }
 
@@ -3269,9 +3568,10 @@ def test_api_qa_stream_returns_incremental_answer_events():
             return {"id": f"{role}-message-id"}
 
     fake_store = FakeQAStore()
+    fake_agent = FakeQAAgent()
     original_qa_agent = main_module.qa_agent
     original_qa_store = getattr(main_module, "qa_store", None)
-    main_module.qa_agent = FakeQAAgent()
+    main_module.qa_agent = fake_agent
     main_module.qa_store = fake_store
     try:
         client = TestClient(app)
@@ -3290,8 +3590,10 @@ def test_api_qa_stream_returns_incremental_answer_events():
     assert "data: {\"content\":\"南京\"}" in body
     assert "event: done" in body
     assert "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in body
+    assert fake_agent.calls[0]["config"]["configurable"]["thread_id"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
     assert [item["role"] for item in fake_store.saved] == ["user", "assistant"]
     assert fake_store.saved[1]["content"] == "南京需要提前预约。"
+    assert fake_store.saved[1]["used_web_search"] is True
 
 
 def test_in_memory_qa_store_returns_conversation_history_and_detail():
@@ -3304,7 +3606,13 @@ def test_in_memory_qa_store_returns_conversation_history_and_detail():
         title="端午去南京三天有哪些预约建议？",
     )
     store.append_message(conversation["id"], "user", "端午去南京三天有哪些预约建议？")
-    store.append_message(conversation["id"], "assistant", "热门场馆建议提前预约。", generation_mode="fallback")
+    store.append_message(
+        conversation["id"],
+        "assistant",
+        "热门场馆建议提前预约。",
+        generation_mode="fallback",
+        used_web_search=True,
+    )
 
     recent = store.get_recent_messages(conversation["id"])
     summaries = store.list_conversations(user_id="user-1")
@@ -3318,6 +3626,7 @@ def test_in_memory_qa_store_returns_conversation_history_and_detail():
     assert detail is not None
     assert detail.messages[1].role == "assistant"
     assert detail.messages[1].content == "热门场馆建议提前预约。"
+    assert detail.messages[1].used_web_search is True
 
 
 def test_api_plan_persists_report_and_returns_report_id():

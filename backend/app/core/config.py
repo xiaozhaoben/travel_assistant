@@ -47,6 +47,9 @@ class Settings:
     disable_llm: bool
     disable_external_api: bool
     database_url: str | None
+    tavily_api_key: str | None
+    tavily_max_results: int
+    tavily_search_depth: str
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -113,6 +116,9 @@ def get_settings() -> Settings:
         disable_llm=_env_bool("DISABLE_LLM"),
         disable_external_api=_env_bool("DISABLE_EXTERNAL_API"),
         database_url=_database_url_from_env(),
+        tavily_api_key=_env_str("TAVILY_API_KEY"),
+        tavily_max_results=max(1, min(_env_int("TAVILY_MAX_RESULTS", 5), 10)),
+        tavily_search_depth=_env_str("TAVILY_SEARCH_DEPTH", "basic") or "basic",
     )
 
 
@@ -121,6 +127,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
+def _env_str(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
 
 
 def _normalize_cors_origin(value: str) -> str:

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS travel_qa_messages (
     sources_payload jsonb NOT NULL DEFAULT '[]'::jsonb,
     retrieved_count integer NOT NULL DEFAULT 0,
     generation_mode text,
+    used_web_search boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -61,6 +62,10 @@ class PostgresQAConversationStore:
     def ensure_schema(self) -> None:
         with self.connections.connection() as conn:
             conn.execute(SCHEMA_SQL)
+            conn.execute(
+                "ALTER TABLE travel_qa_messages "
+                "ADD COLUMN IF NOT EXISTS used_web_search boolean NOT NULL DEFAULT false"
+            )
         self._schema_ready = True
 
     def _ensure_schema_once(self) -> None:
@@ -126,6 +131,7 @@ class PostgresQAConversationStore:
         sources: list[TravelKnowledgeSource] | None = None,
         retrieved_count: int = 0,
         generation_mode: str | None = None,
+        used_web_search: bool = False,
     ) -> dict[str, Any]:
         self._ensure_schema_once()
         message_id = str(uuid4())
@@ -135,11 +141,12 @@ class PostgresQAConversationStore:
                 row = cur.execute(
                     """
                     INSERT INTO travel_qa_messages (
-                        id, conversation_id, role, content, sources_payload, retrieved_count, generation_mode
+                        id, conversation_id, role, content, sources_payload, retrieved_count, generation_mode,
+                        used_web_search
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id::text, conversation_id::text, role, content, sources_payload,
-                              retrieved_count, generation_mode, created_at
+                              retrieved_count, generation_mode, used_web_search, created_at
                     """,
                     (
                         message_id,
@@ -149,6 +156,7 @@ class PostgresQAConversationStore:
                         Jsonb(source_payload),
                         retrieved_count,
                         generation_mode,
+                        used_web_search,
                     ),
                 ).fetchone()
                 cur.execute(
@@ -213,7 +221,7 @@ class PostgresQAConversationStore:
                 rows = cur.execute(
                     """
                     SELECT id::text, conversation_id::text, role, content, sources_payload,
-                           retrieved_count, generation_mode, created_at
+                           retrieved_count, generation_mode, used_web_search, created_at
                     FROM travel_qa_messages
                     WHERE conversation_id = %s
                     ORDER BY created_at ASC
@@ -262,6 +270,7 @@ class InMemoryQAConversationStore:
             "sources_payload": [source.model_dump(mode="json") for source in kwargs.get("sources") or []],
             "retrieved_count": kwargs.get("retrieved_count", 0),
             "generation_mode": kwargs.get("generation_mode"),
+            "used_web_search": bool(kwargs.get("used_web_search", False)),
             "created_at": now,
         }
         self.messages.setdefault(conversation_id, []).append(row)
@@ -309,6 +318,7 @@ def _message_from_row(row: dict[str, Any]) -> TravelQAChatMessage:
             "sources": row.get("sources_payload") or [],
             "retrieved_count": row.get("retrieved_count") or 0,
             "generation_mode": row.get("generation_mode"),
+            "used_web_search": bool(row.get("used_web_search", False)),
             "created_at": row["created_at"],
         }
     )

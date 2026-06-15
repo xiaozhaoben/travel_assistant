@@ -7,9 +7,10 @@
 - `TravelNewsIngestionAgent`：使用 `feedparser` 抓取 `TRAVEL_FEEDS` 或请求体中的 RSS 源，清洗标题、摘要、正文并写入知识库。RSS 只作为长期知识库补充。
 - `PostgresTravelVectorStore`：使用当前项目 PostgreSQL 作为向量数据库，表为 `travel_knowledge_documents`，向量字段默认使用百炼 `tongyi-embedding-vision-plus-2026-03-06` 的 `vector(512)`。
 - `WebSearchMCPClient`：可选实时搜索 MCP，遇到预约、开放时间、闭馆、限流、节假日、交通公告等问题时实时补充资料。
-- `TravelQuestionAnsweringAgent`：保持 `/api/qa/ask` 的兼容入口，内部委托给 LangGraph 问答流程。
+- `TravelQuestionAnsweringAgent`：保持 `/api/qa/ask` 的兼容入口，内部使用 LangGraph `create_react_agent` 创建回答智能体。
 - `TravelQAGraphRunner`：用 LangGraph 编排问题分类、实时搜索、向量召回、资料合并排序、LLM 回答和本地兜底摘要。资料按“官方/高可信 > 地图资料 > 开放旅行指南 > 社区经验 > RSS”排序，再参考 RAG 总结约束生成中文回答。
 - `PostgresQAConversationStore`：使用 PostgreSQL 保存问答会话和消息历史。登录用户通过 `user_id` 读取个人历史，未登录用户通过前端生成的 `anonymous_id` 也可以保存访客历史。
+- `PostgresSaver`：使用同一个 `conversation_id` 作为 LangGraph `thread_id`，在 PostgreSQL checkpoint 表中保存 ReAct agent 的短期会话状态；`SummarizationNode` 作为 `pre_model_hook` 在模型调用前压缩长上下文。
 
 ## 数据库要求
 
@@ -90,6 +91,18 @@ WEB_SEARCH_MCP_TOOL=web_search
 ```
 
 也可以换成 Brave Search 等兼容 `query -> results` 的 MCP。问答 Agent 会自动构造偏官方的查询，例如“目的地 + 官方 + 预约 + 开放时间 + 文旅 + 景区 + 博物馆”。
+
+## 配置问答联网兜底
+
+智能问答使用 `langchain_tavily.TavilySearch` 作为 ReAct agent 的联网搜索工具。当向量库和实时资料都没有召回内容时，问答提示词会要求 agent 先调用联网搜索，再基于官方/高可信结果回答。后端 `.env` 可配置：
+
+```env
+TAVILY_API_KEY=your-tavily-api-key
+TAVILY_MAX_RESULTS=5
+TAVILY_SEARCH_DEPTH=basic
+```
+
+`TAVILY_MAX_RESULTS` 会限制在 1 到 10 之间；未配置 `TAVILY_API_KEY` 或设置 `DISABLE_EXTERNAL_API=true` 时，不会注册 Tavily 工具，问答会退回本地资料或兜底回答。
 
 ## 配置 RSS
 

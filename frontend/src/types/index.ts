@@ -232,6 +232,7 @@ export interface TravelQAResponse {
   sources: TravelKnowledgeSource[]
   retrieved_count: number
   generation_mode: 'llm' | 'fallback'
+  used_web_search: boolean
   conversation_id?: string | null
   message_id?: string | null
 }
@@ -244,6 +245,7 @@ export interface TravelQAChatMessage {
   sources: TravelKnowledgeSource[]
   retrieved_count: number
   generation_mode?: 'llm' | 'fallback' | null
+  used_web_search?: boolean
   created_at: string
 }
 

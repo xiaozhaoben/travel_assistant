@@ -22,5 +22,8 @@ for key in (
     "DEEPSEEK_API_KEY",
     "EMBEDDING_API_KEY",
     "DASHSCOPE_API_KEY",
+    "TAVILY_API_KEY",
+    "TAVILY_MAX_RESULTS",
+    "TAVILY_SEARCH_DEPTH",
 ):
     os.environ[key] = ""

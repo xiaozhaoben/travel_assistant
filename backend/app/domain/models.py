@@ -316,6 +316,7 @@ class TravelQAResponse(BaseModel):
     sources: List[TravelKnowledgeSource] = Field(default_factory=list)
     retrieved_count: int = 0
     generation_mode: Literal["llm", "fallback"] = "fallback"
+    used_web_search: bool = False
     conversation_id: Optional[str] = None
     message_id: Optional[str] = None
 
@@ -328,6 +329,7 @@ class TravelQAChatMessage(BaseModel):
     sources: List[TravelKnowledgeSource] = Field(default_factory=list)
     retrieved_count: int = 0
     generation_mode: Optional[Literal["llm", "fallback"]] = None
+    used_web_search: bool = False
     created_at: datetime
 
 
