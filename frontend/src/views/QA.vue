@@ -297,10 +297,11 @@ function formatDate(value: string): string {
 
 <style scoped>
 .qa-page {
-  min-height: calc(100vh - 72px);
+  height: calc(100vh - 72px);
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
   background: var(--color-cream);
+  overflow: hidden;
 }
 
 .qa-sidebar {
@@ -310,6 +311,8 @@ function formatDate(value: string): string {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .qa-sidebar-header {
@@ -386,6 +389,8 @@ function formatDate(value: string): string {
   min-width: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  overflow: hidden;
 }
 
 .qa-thread {
