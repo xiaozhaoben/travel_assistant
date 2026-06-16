@@ -42,7 +42,7 @@
     </aside>
 
     <main class="qa-main">
-      <section class="qa-thread">
+      <section ref="threadRef" class="qa-thread">
         <div v-if="messages.length === 0" class="qa-empty-state">
           <MessageOutlined />
           <h2>问我目的地、预约、交通、避坑和路线取舍</h2>
@@ -55,7 +55,15 @@
 
         <div v-for="messageItem in messages" :key="messageItem.id" class="qa-message-row" :class="messageItem.role">
           <div class="qa-message-bubble">
-            <div class="qa-message-content">{{ messageItem.content }}</div>
+            <template v-if="messageItem.role === 'assistant' && extractSummary(messageItem.content).summary">
+              <a-collapse :bordered="false" class="qa-summary-collapse">
+                <a-collapse-panel key="summary" header="对话摘要">
+                  <div class="qa-summary-content">{{ extractSummary(messageItem.content).summary }}</div>
+                </a-collapse-panel>
+              </a-collapse>
+              <div class="qa-message-content">{{ extractSummary(messageItem.content).main }}</div>
+            </template>
+            <div v-else class="qa-message-content">{{ messageItem.content }}</div>
             <div v-if="messageItem.role === 'assistant'" class="qa-message-meta">
               <a-tag :color="generationModeColor(messageItem.generation_mode)">
                 {{ generationModeText(messageItem.generation_mode) }}
@@ -92,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { MessageOutlined, PlusOutlined, SendOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import {
@@ -115,6 +123,7 @@ const question = ref('')
 const asking = ref(false)
 const loadingConversations = ref(false)
 const newsIngesting = ref(false)
+const threadRef = ref<HTMLElement | null>(null)
 
 onMounted(() => {
   refreshConversations()
@@ -151,6 +160,8 @@ async function loadConversation(conversationId: string) {
     const detail = await getQAConversation(conversationId)
     activeConversationId.value = detail.id
     messages.value = detail.messages
+    await nextTick()
+    threadRef.value?.scrollTo({ top: threadRef.value.scrollHeight })
   } catch (error: any) {
     message.error(error.message || '会话详情加载失败')
   }
@@ -164,6 +175,26 @@ function startNewConversation() {
 
 function usePrompt(value: string) {
   question.value = value
+}
+
+const SUMMARY_PREFIX = '**Summary of the conversation so far'
+
+function extractSummary(content: string): { summary: string | null; main: string } {
+  if (!content.startsWith(SUMMARY_PREFIX)) {
+    return { summary: null, main: content }
+  }
+  const endMarkers = ['\n\n\n', '\n\n> ', '\n\n---\n']
+  let splitAt = -1
+  for (const marker of endMarkers) {
+    const idx = content.indexOf(marker, SUMMARY_PREFIX.length)
+    if (idx !== -1 && (splitAt === -1 || idx < splitAt)) splitAt = idx
+  }
+  if (splitAt === -1) {
+    return { summary: content.replace(/^\*\*/, '').replace(/\*\*$/, '').trim(), main: '' }
+  }
+  const rawSummary = content.slice(0, splitAt).replace(/^\*\*/, '').replace(/\*\*$/, '').trim()
+  const main = content.slice(splitAt).trim()
+  return { summary: rawSummary || null, main: main || content }
 }
 
 function generationModeText(mode: TravelQAChatMessage['generation_mode']): string {
@@ -453,6 +484,26 @@ function formatDate(value: string): string {
   white-space: pre-wrap;
   line-height: 1.7;
   word-break: break-word;
+}
+
+.qa-summary-collapse {
+  margin-bottom: 10px;
+  border-radius: var(--radius-sm) !important;
+  background: var(--color-sand-light) !important;
+  font-size: 13px;
+}
+
+.qa-summary-collapse :deep(.ant-collapse-header) {
+  padding: 6px 12px !important;
+  font-weight: 500;
+  color: var(--color-forest-dark);
+}
+
+.qa-summary-content {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 .qa-message-meta,
