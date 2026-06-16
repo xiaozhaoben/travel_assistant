@@ -580,6 +580,38 @@ def test_travel_qa_agent_adds_tavily_tool_when_configured(monkeypatch):
     assert tools[0].kwargs["max_results"] == 7
 
 
+def test_travel_qa_agent_adds_amap_tools_when_configured(monkeypatch):
+    from app.knowledge import qa_agent as qa_agent_module
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    captured = {}
+
+    class FakeAmapClient:
+        def search_pois(self, **kwargs):
+            raise AssertionError("tool construction should not call amap search")
+
+        def get_weather(self, **kwargs):
+            raise AssertionError("tool construction should not call amap weather")
+
+    def fake_create_react_agent(**kwargs):
+        captured["react_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(qa_agent_module, "create_react_agent", fake_create_react_agent)
+
+    TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore(),
+        llm=FakeLLM("unused"),
+        web_client=WebSearchMCPClient(command=""),
+        amap_client=FakeAmapClient(),
+    )
+
+    tool_names = {tool.name for tool in captured["react_kwargs"]["tools"]}
+    assert "query_weather" in tool_names
+    assert "search_attractions" in tool_names
+
+
 def test_travel_qa_agent_uses_react_agent_when_knowledge_context_is_empty(monkeypatch):
     from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
     from app.researching.research import WebSearchMCPClient

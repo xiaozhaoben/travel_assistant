@@ -45,9 +45,11 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
 
 from app.domain.models import TravelKnowledgeSource, TravelQAResponse
 from app.core.config import get_settings
+from app.integrations.services import AmapMCPClient
 from app.knowledge.prompts import TRAVEL_QA_SYSTEM_PROMPT, TRAVEL_RAG_PROMPT
 from app.knowledge.vector_store import KnowledgeDocument, PostgresTravelVectorStore, stable_hash, summarize_text
 from app.researching.research import WebSearchMCPClient
+from app.tools.amap_tools import create_attraction_search_tool, create_weather_query_tool
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +76,13 @@ class TravelQuestionAnsweringAgent:
         vector_store: PostgresTravelVectorStore | None,
         llm: Any | None = None,
         web_client: WebSearchMCPClient | None = None,
+        amap_client: AmapMCPClient | None = None,
         checkpointer: Any | None = None,
     ):
         self.vector_store = vector_store
         self.llm = llm
         self.web_client = web_client or WebSearchMCPClient()
+        self.amap_client = amap_client
         self.checkpointer = checkpointer
         self.tools = self._build_tools()
         self.langgraph_agent = self._safe_create_react_agent()
@@ -262,19 +266,32 @@ class TravelQuestionAnsweringAgent:
     def _build_tools(self) -> list[Any]:
         tools: list[Any] = []
         settings = get_settings()
-        if settings.disable_external_api or not settings.tavily_api_key or TavilySearch is None:
+        if settings.disable_external_api:
             return tools
-        try:
-            tools.append(
-                TavilySearch(
-                    max_results=settings.tavily_max_results,
-                    search_depth=settings.tavily_search_depth,
-                    include_answer=True,
-                    include_raw_content=False,
+
+        if settings.tavily_api_key and TavilySearch is not None:
+            try:
+                tools.append(
+                    TavilySearch(
+                        max_results=settings.tavily_max_results,
+                        search_depth=settings.tavily_search_depth,
+                        include_answer=True,
+                        include_raw_content=False,
+                    )
                 )
-            )
-        except Exception as exc:
-            logger.warning("Tavily search tool unavailable for travel QA: %s", exc)
+            except Exception as exc:
+                logger.warning("Tavily search tool unavailable for travel QA: %s", exc)
+
+        if self.amap_client is not None:
+            try:
+                tools.extend(
+                    [
+                        create_weather_query_tool(self.amap_client),
+                        create_attraction_search_tool(self.amap_client),
+                    ]
+                )
+            except Exception as exc:
+                logger.warning("Amap tools unavailable for travel QA: %s", exc)
         return tools
 
     def _build_summary_hook(self):

@@ -75,6 +75,7 @@ def create_app_resources() -> AppResources:
     resource_qa_agent = TravelQuestionAnsweringAgent(
         resource_vector_store,
         llm=resource_orchestrator.planner.llm,
+        amap_client=resource_orchestrator.amap,
         checkpointer=resource_qa_checkpointer,
     )
     resource_image_provider = (
@@ -121,6 +122,7 @@ def current_global_resources() -> AppResources | None:
         qa_agent=qa_agent or TravelQuestionAnsweringAgent(
             travel_vector_store,
             llm=orchestrator.planner.llm,
+            amap_client=orchestrator.amap,
             checkpointer=qa_checkpointer,
         ),
         image_provider=image_provider or UnsplashMCPClient(),
