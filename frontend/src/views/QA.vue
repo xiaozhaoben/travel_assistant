@@ -12,12 +12,13 @@
         </a-button>
       </div>
 
-      <div class="qa-identity">
-        <a-input v-model:value="userIdInput" placeholder="输入用户标识后保存到个人历史" @press-enter="applyUserId" />
-        <a-button @click="applyUserId">使用</a-button>
-      </div>
       <div class="qa-identity-caption">
-        当前：{{ activeUserId ? `用户 ${activeUserId}` : '访客会话' }}
+        <template v-if="auth.isAuthenticated.value">
+          已登录为 <strong>{{ auth.user.value?.username }}</strong>
+        </template>
+        <template v-else>
+          访客会话 · <router-link to="/login">登录同步历史</router-link>
+        </template>
       </div>
 
       <a-button block :loading="newsIngesting" class="qa-refresh-button" @click="handleIngestNews">
@@ -100,16 +101,15 @@ import {
   listQAConversations,
   streamTravelQuestion,
 } from '@/services/api'
+import { useAuth } from '@/services/auth'
 import type { TravelQAChatMessage, TravelQAConversationSummary } from '@/types'
 
 const ANON_KEY = 'travel_qa_anonymous_id'
-const USER_KEY = 'travel_qa_user_id'
+const auth = useAuth()
 
 const conversations = ref<TravelQAConversationSummary[]>([])
 const messages = ref<TravelQAChatMessage[]>([])
 const activeConversationId = ref<string | null>(null)
-const activeUserId = ref<string | null>(localStorage.getItem(USER_KEY))
-const userIdInput = ref(activeUserId.value || '')
 const anonymousId = ref(getAnonymousId())
 const question = ref('')
 const asking = ref(false)
@@ -129,9 +129,10 @@ function getAnonymousId(): string {
 }
 
 function identityParams() {
-  return activeUserId.value
-    ? { user_id: activeUserId.value, anonymous_id: null }
-    : { anonymous_id: anonymousId.value, user_id: null }
+  if (auth.isAuthenticated.value && auth.user.value) {
+    return { user_id: auth.user.value.user_id, anonymous_id: null }
+  }
+  return { anonymous_id: anonymousId.value, user_id: null }
 }
 
 async function refreshConversations() {
@@ -159,15 +160,6 @@ function startNewConversation() {
   activeConversationId.value = null
   messages.value = []
   question.value = ''
-}
-
-function applyUserId() {
-  const value = userIdInput.value.trim()
-  activeUserId.value = value || null
-  if (activeUserId.value) localStorage.setItem(USER_KEY, activeUserId.value)
-  else localStorage.removeItem(USER_KEY)
-  startNewConversation()
-  refreshConversations()
 }
 
 function usePrompt(value: string) {
@@ -336,10 +328,13 @@ function formatDate(value: string): string {
   font-size: 13px;
 }
 
-.qa-identity {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+.qa-identity-caption a {
+  color: var(--color-forest);
+  text-decoration: none;
+}
+
+.qa-identity-caption a:hover {
+  text-decoration: underline;
 }
 
 .qa-refresh-button {

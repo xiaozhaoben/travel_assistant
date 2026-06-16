@@ -274,3 +274,15 @@ export interface TravelNewsIngestResult {
   feeds: TravelFeedIngestStats[]
   errors: string[]
 }
+
+export interface AuthTokenResponse {
+  access_token: string
+  token_type: string
+  user_id: string
+  username: string
+}
+
+export interface AuthUser {
+  user_id: string
+  username: string
+}

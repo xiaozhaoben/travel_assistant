@@ -50,6 +50,9 @@ class Settings:
     tavily_api_key: str | None
     tavily_max_results: int
     tavily_search_depth: str
+    jwt_secret_key: str
+    jwt_algorithm: str
+    jwt_expire_minutes: int
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -119,6 +122,9 @@ def get_settings() -> Settings:
         tavily_api_key=_env_str("TAVILY_API_KEY"),
         tavily_max_results=max(1, min(_env_int("TAVILY_MAX_RESULTS", 5), 10)),
         tavily_search_depth=_env_str("TAVILY_SEARCH_DEPTH", "basic") or "basic",
+        jwt_secret_key=os.getenv("JWT_SECRET_KEY", "change-me-in-production"),
+        jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
+        jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "1440")),
     )
 
 

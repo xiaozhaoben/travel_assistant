@@ -22,6 +22,17 @@
           <span>智能问答</span>
         </router-link>
       </nav>
+      <div class="header-user">
+        <template v-if="auth.isAuthenticated.value">
+          <span class="user-name">{{ auth.user.value?.username }}</span>
+          <a-button size="small" ghost @click="handleLogout">退出</a-button>
+        </template>
+        <template v-else>
+          <router-link to="/login">
+            <a-button size="small" type="primary">登录</a-button>
+          </router-link>
+        </template>
+      </div>
     </header>
     <a-layout-content class="app-content">
       <router-view />
@@ -40,6 +51,16 @@
 
 <script setup lang="ts">
 import { CompassOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/icons-vue'
+import { useRouter } from 'vue-router'
+import { useAuth } from '@/services/auth'
+
+const auth = useAuth()
+const router = useRouter()
+
+function handleLogout() {
+  auth.logout()
+  router.push('/')
+}
 </script>
 
 <style>
@@ -137,6 +158,19 @@ import { CompassOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/
 
 .nav-link-active:hover {
   background: rgba(198, 122, 92, 0.3);
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: 20px;
+}
+
+.user-name {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .app-content {

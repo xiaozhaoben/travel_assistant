@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 import logging
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -13,6 +13,8 @@ from .core.config import get_settings
 from .core.logging_config import setup_logging
 from .domain.models import (
     ApiResponse,
+    AuthTokenResponse,
+    MergeAnonymousRequest,
     PlanEditRequest,
     TravelNewsIngestRequest,
     TravelNewsIngestResult,
@@ -25,6 +27,21 @@ from .domain.models import (
     TripPlanRequest,
     TripReportDetail,
     TripReportSummary,
+    UserLoginRequest,
+    UserRegisterRequest,
+)
+from .auth.service import (
+    configure_auth,
+    create_access_token,
+    create_user,
+    ensure_users_table,
+    get_auth_connections,
+    get_current_user,
+    get_current_user_optional,
+    get_user_by_username,
+    hash_password,
+    merge_anonymous_conversations,
+    verify_password,
 )
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
@@ -200,6 +217,10 @@ async def lifespan(fastapi_app: FastAPI):
     resources = current_global_resources() or create_app_resources()
     bind_app_resources(resources)
     fastapi_app.state.resources = resources
+    qa_store_for_auth = getattr(resources, "qa_store", None)
+    if qa_store_for_auth is not None and hasattr(qa_store_for_auth, "connections"):
+        ensure_users_table(qa_store_for_auth.connections)
+        configure_auth(qa_store_for_auth.connections, settings.jwt_secret_key, settings.jwt_algorithm)
     try:
         yield
     finally:
@@ -447,10 +468,17 @@ def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])
-def ask_travel_question(request: TravelQARequest):
+def ask_travel_question(
+    request: TravelQARequest,
+    auth_user: dict | None = Depends(get_current_user_optional),
+):
     resources = get_app_resources()
+    _apply_auth_identity(request, auth_user)
     resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
-    config = _qa_thread_config(conversation["id"] if conversation else None)
+    config = _qa_thread_config(
+        conversation["id"] if conversation else None,
+        user_id=auth_user["user_id"] if auth_user else request.user_id,
+    )
 
     result = _call_qa_agent(
         resources.qa_agent,
@@ -464,10 +492,17 @@ def ask_travel_question(request: TravelQARequest):
 
 
 @app.post("/api/qa/ask/stream")
-def stream_travel_question(request: TravelQARequest):
+def stream_travel_question(
+    request: TravelQARequest,
+    auth_user: dict | None = Depends(get_current_user_optional),
+):
     resources = get_app_resources()
+    _apply_auth_identity(request, auth_user)
     resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
-    config = _qa_thread_config(conversation["id"] if conversation else None)
+    config = _qa_thread_config(
+        conversation["id"] if conversation else None,
+        user_id=auth_user["user_id"] if auth_user else request.user_id,
+    )
 
     def event_stream():
         answer_parts: list[str] = []
@@ -545,10 +580,21 @@ def _prepare_qa_memory(resources: AppResources, request: TravelQARequest):
     return resource_qa_store, conversation, conversation_history
 
 
-def _qa_thread_config(thread_id: str | None) -> dict[str, dict[str, str]] | None:
-    if not thread_id:
+def _qa_thread_config(thread_id: str | None, user_id: str | None = None) -> dict[str, dict[str, str]] | None:
+    configurable: dict[str, str] = {}
+    if thread_id:
+        configurable["thread_id"] = thread_id
+    if user_id:
+        configurable["user_id"] = user_id
+    if not configurable:
         return None
-    return {"configurable": {"thread_id": thread_id}}
+    return {"configurable": configurable}
+
+
+def _apply_auth_identity(request: TravelQARequest, auth_user: dict | None) -> None:
+    if auth_user is not None:
+        request.user_id = auth_user["user_id"]
+        request.anonymous_id = None
 
 
 def _call_qa_agent(qa_agent_instance, question: str, top_k: int, conversation_history: list[dict[str, str]], config: dict | None):
@@ -800,4 +846,81 @@ def get_map_weather(
         "success": True,
         "message": "天气查询成功",
         "data": [item.model_dump(mode="json") for item in weather],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 认证端点
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/auth/register", response_model=ApiResponse[AuthTokenResponse])
+def register_user(request: UserRegisterRequest):
+    connections = get_auth_connections()
+    existing = get_user_by_username(connections, request.username)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    user = create_user(connections, request.username, hash_password(request.password))
+    token = create_access_token(
+        user["id"],
+        user["username"],
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        settings.jwt_expire_minutes,
+    )
+    return ApiResponse[AuthTokenResponse](
+        success=True,
+        message="注册成功",
+        data=AuthTokenResponse(
+            access_token=token,
+            user_id=user["id"],
+            username=user["username"],
+        ),
+    )
+
+
+@app.post("/api/auth/login", response_model=ApiResponse[AuthTokenResponse])
+def login_user(request: UserLoginRequest):
+    connections = get_auth_connections()
+    user = get_user_by_username(connections, request.username)
+    if user is None or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = create_access_token(
+        user["id"],
+        user["username"],
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        settings.jwt_expire_minutes,
+    )
+    return ApiResponse[AuthTokenResponse](
+        success=True,
+        message="登录成功",
+        data=AuthTokenResponse(
+            access_token=token,
+            user_id=user["id"],
+            username=user["username"],
+        ),
+    )
+
+
+@app.get("/api/auth/me")
+def get_current_auth_user(current_user: dict = Depends(get_current_user)):
+    return {
+        "success": True,
+        "message": "当前用户信息",
+        "data": {"user_id": current_user["user_id"], "username": current_user["username"]},
+    }
+
+
+@app.post("/api/auth/merge-anonymous")
+def merge_anonymous_sessions(
+    request: MergeAnonymousRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    connections = get_auth_connections()
+    merged_count = merge_anonymous_conversations(connections, current_user["user_id"], request.anonymous_id)
+    return {
+        "success": True,
+        "message": f"已合并 {merged_count} 个匿名会话",
+        "data": {"merged_count": merged_count},
     }
