@@ -135,12 +135,19 @@ class FakeTravelVectorStore:
     def __init__(self, docs=None):
         self.docs = docs or []
         self.saved = []
+        self.vector_queries = []
+        self.keyword_queries = []
 
     def add_text(self, **kwargs):
         self.saved.append(kwargs)
         return 1
 
     def similarity_search(self, query, k=5):
+        self.vector_queries.append(query)
+        return self.docs[:k]
+
+    def keyword_search(self, query, k=5):
+        self.keyword_queries.append(query)
         return self.docs[:k]
 
     def health(self):
@@ -396,6 +403,80 @@ def test_travel_qa_graph_includes_conversation_history_in_context():
     assert "端午去南京三天" in captured["context"]
     assert "南京博物院预约" in captured["context"]
     assert "南京预约资料" in captured["context"]
+
+
+def test_travel_qa_graph_expands_ambiguous_question_for_hybrid_retrieval():
+    from app.knowledge.qa_graph import TravelQAGraphRunner
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    keyword_doc = KnowledgeDocument(
+        id="doc-keyword",
+        title="南京博物院预约说明",
+        content="南京博物院需要在官方小程序提前预约，节假日建议尽早选择入馆时段。",
+        summary="南京博物院需要提前预约。",
+        source_url="https://example.test/nanjing-museum",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.35,
+    )
+
+    class HybridStore(FakeTravelVectorStore):
+        def similarity_search(self, query, k=5):
+            self.vector_queries.append(query)
+            return []
+
+        def keyword_search(self, query, k=5):
+            self.keyword_queries.append(query)
+            if "南京博物院" in query:
+                return [keyword_doc]
+            return []
+
+    store = HybridStore()
+    runner = TravelQAGraphRunner(store, llm=None, web_client=WebSearchMCPClient(command=""))
+
+    result = runner.ask(
+        "那怎么预约？",
+        conversation_history=[{"role": "user", "content": "我想去南京博物院"}],
+    )
+
+    assert any("南京博物院" in query for query in store.keyword_queries)
+    assert result.retrieved_count == 1
+    assert result.sources[0].title == "南京博物院预约说明"
+
+
+def test_travel_qa_graph_reranks_complex_question_results():
+    from app.knowledge.qa_graph import TravelQAGraphRunner
+    from app.knowledge.vector_store import KnowledgeDocument
+    from app.researching.research import WebSearchMCPClient
+
+    generic_doc = KnowledgeDocument(
+        id="generic",
+        title="成都概览",
+        content="成都适合城市休闲游，美食和街区体验丰富。",
+        summary="成都适合城市休闲游。",
+        source_url="https://example.test/chengdu-overview",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.95,
+    )
+    matched_doc = KnowledgeDocument(
+        id="matched",
+        title="成都亲子景点和交通",
+        content="成都亲子游可以安排熊猫基地、自然博物馆，地铁和景区直通车适合串联景点交通。",
+        summary="成都亲子景点和交通建议。",
+        source_url="https://example.test/chengdu-family-traffic",
+        source_name="rss",
+        published_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        score=0.35,
+    )
+
+    store = FakeTravelVectorStore([generic_doc, matched_doc])
+    runner = TravelQAGraphRunner(store, llm=None, web_client=WebSearchMCPClient(command=""))
+
+    state = runner._prepare_answer_state("成都亲子景点和交通怎么安排？预算有限", top_k=2, conversation_history=[])
+
+    assert state["docs"][0].id == "matched"
 
 
 def test_travel_qa_agent_delegates_to_langgraph_runner():

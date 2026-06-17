@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import logging
+import re
+import threading
+import uuid
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,11 +16,21 @@ from fastapi.responses import StreamingResponse
 
 from .core.config import get_settings
 from .core.logging_config import setup_logging
+from .core.llm_service import create_llm
 from .domain.models import (
     ApiResponse,
     AuthTokenResponse,
     MergeAnonymousRequest,
     PlanEditRequest,
+    TravelDocumentAutoIngestRequest,
+    TravelDocumentIngestJobResponse,
+    TravelDocumentIngestJobStatus,
+    TravelDocumentIngestRequest,
+    TravelDocumentIngestResult,
+    TravelDocumentUrlIngestRequest,
+    TravelDocumentSearchRequest,
+    TravelDocumentSearchResponse,
+    TravelDocumentSearchResult,
     TravelNewsIngestRequest,
     TravelNewsIngestResult,
     TravelQAConversationDetail,
@@ -47,7 +62,7 @@ from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.qa_checkpointer import create_qa_checkpointer
-from .knowledge.vector_store import create_travel_vector_store
+from .knowledge.vector_store import create_travel_vector_store, normalize_document_content
 from .storage.plan_log import PlanLogRecorder
 from .storage.qa_store import create_qa_conversation_store
 from .storage.report_store import create_report_store
@@ -70,6 +85,18 @@ class AppResources:
     image_provider: UnsplashMCPClient
 
 
+@dataclass
+class KnowledgeIngestJob:
+    job_id: str
+    status: str
+    message: str
+    source_type: str
+    result: dict | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 orchestrator: TravelAgentOrchestrator | None = None
 report_store = None
 travel_vector_store = None
@@ -78,6 +105,8 @@ qa_checkpointer = None
 news_agent: TravelNewsIngestionAgent | None = None
 qa_agent: TravelQuestionAnsweringAgent | None = None
 image_provider: UnsplashMCPClient | None = None
+knowledge_ingest_jobs: dict[str, KnowledgeIngestJob] = {}
+knowledge_ingest_jobs_lock = threading.Lock()
 
 
 def create_app_resources() -> AppResources:
@@ -706,6 +735,404 @@ def ingest_travel_news(request: TravelNewsIngestRequest):
     if result.errors and result.total_seen == 0:
         raise HTTPException(status_code=503, detail="; ".join(result.errors))
     return ApiResponse[TravelNewsIngestResult](success=True, message="旅行资讯入库完成", data=result)
+
+
+@app.post("/api/knowledge/documents", response_model=ApiResponse[TravelDocumentIngestResult])
+def ingest_travel_document(request: TravelDocumentIngestRequest):
+    store = travel_vector_store
+    if store is None:
+        resources = get_app_resources()
+        store = resources.travel_vector_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Travel knowledge vector store is not configured.")
+    try:
+        result = store.ingest_document(
+            title=request.title,
+            content=request.content,
+            source_name=request.source_name,
+            source_url=request.source_url,
+            source_type=request.source_type,
+            publish_date=request.publish_date,
+            province=request.province,
+            city=request.city,
+            data_type=request.data_type,
+            scenic_spot=request.scenic_spot,
+            metadata=request.metadata,
+        )
+    except Exception as exc:
+        logger.warning("Travel document ingest failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Travel document ingest failed: {exc}") from exc
+    return ApiResponse[TravelDocumentIngestResult](
+        success=True,
+        message="旅行文档入库完成",
+        data=TravelDocumentIngestResult.model_validate(result),
+    )
+
+
+@app.post("/api/knowledge/documents/from-url", response_model=ApiResponse[TravelDocumentIngestResult])
+def ingest_travel_document_from_url(request: TravelDocumentUrlIngestRequest):
+    store = travel_vector_store
+    if store is None:
+        resources = get_app_resources()
+        store = resources.travel_vector_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Travel knowledge vector store is not configured.")
+    try:
+        import httpx
+
+        response = httpx.get(
+            request.source_url,
+            follow_redirects=True,
+            timeout=httpx.Timeout(20.0, connect=8.0),
+            headers={
+                "User-Agent": "travel-assistant/1.0 (+https://localhost)",
+                "Accept": "text/html, text/plain, application/xhtml+xml, */*",
+            },
+        )
+        response.raise_for_status()
+        title = request.title or extract_html_title(response.text) or title_from_url(request.source_url)
+        content = normalize_document_content(response.text)
+        if not content:
+            raise ValueError("Fetched URL did not contain readable text.")
+        inferred = infer_travel_document_metadata(
+            content,
+            {
+                "title": title,
+                "source_url": request.source_url,
+                "source_name": request.source_name,
+                "source_type": request.source_type or "web",
+            },
+        )
+        result = store.ingest_document(
+            title=inferred["title"],
+            content=content,
+            source_name=inferred["source_name"],
+            source_url=request.source_url,
+            source_type=inferred["source_type"],
+            publish_date=inferred.get("publish_date") or request.publish_date,
+            province=inferred.get("province") or request.province,
+            city=inferred.get("city") or request.city,
+            data_type=inferred.get("data_type") or request.data_type,
+            scenic_spot=inferred.get("scenic_spot") or request.scenic_spot,
+            metadata={**request.metadata, **dict(inferred.get("metadata") or {}), "ingest_method": "url"},
+        )
+    except Exception as exc:
+        logger.warning("Travel document URL ingest failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Travel document URL ingest failed: {exc}") from exc
+    return ApiResponse[TravelDocumentIngestResult](
+        success=True,
+        message="网页旅行文档入库完成",
+        data=TravelDocumentIngestResult.model_validate(result),
+    )
+
+
+@app.post("/api/knowledge/documents/auto", response_model=ApiResponse[TravelDocumentIngestResult])
+def ingest_travel_document_auto(request: TravelDocumentAutoIngestRequest):
+    store = travel_vector_store
+    if store is None:
+        resources = get_app_resources()
+        store = resources.travel_vector_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Travel knowledge vector store is not configured.")
+    try:
+        content = normalize_document_content(request.content)
+        if not content:
+            raise ValueError("Uploaded file did not contain readable text.")
+        inferred = infer_travel_document_metadata(
+            content,
+            {
+                "title": request.file_name or title_from_url(request.source_url or ""),
+                "source_url": request.source_url,
+                "source_name": request.file_name or "上传文件",
+                "source_type": request.source_type or "upload",
+            },
+        )
+        result = store.ingest_document(
+            title=inferred["title"],
+            content=content,
+            source_name=inferred["source_name"],
+            source_url=request.source_url,
+            source_type=inferred["source_type"],
+            publish_date=inferred.get("publish_date"),
+            province=inferred.get("province"),
+            city=inferred.get("city"),
+            data_type=inferred.get("data_type"),
+            scenic_spot=inferred.get("scenic_spot"),
+            metadata={**dict(inferred.get("metadata") or {}), "ingest_method": request.source_type or "upload"},
+        )
+    except Exception as exc:
+        logger.warning("Travel document auto ingest failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Travel document auto ingest failed: {exc}") from exc
+    return ApiResponse[TravelDocumentIngestResult](
+        success=True,
+        message="旅行文档自动解析入库完成",
+        data=TravelDocumentIngestResult.model_validate(result),
+    )
+
+
+def create_knowledge_ingest_job(source_type: str, message: str) -> KnowledgeIngestJob:
+    now = datetime.now(timezone.utc)
+    job = KnowledgeIngestJob(
+        job_id=uuid.uuid4().hex,
+        status="queued",
+        message=message,
+        source_type=source_type,
+        result=None,
+        error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    with knowledge_ingest_jobs_lock:
+        knowledge_ingest_jobs[job.job_id] = job
+    return job
+
+
+def update_knowledge_ingest_job(job_id: str, **changes) -> KnowledgeIngestJob | None:
+    with knowledge_ingest_jobs_lock:
+        job = knowledge_ingest_jobs.get(job_id)
+        if job is None:
+            return None
+        for key, value in changes.items():
+            setattr(job, key, value)
+        job.updated_at = datetime.now(timezone.utc)
+        return job
+
+
+def knowledge_ingest_job_status(job: KnowledgeIngestJob) -> TravelDocumentIngestJobStatus:
+    result = TravelDocumentIngestResult.model_validate(job.result) if job.result else None
+    return TravelDocumentIngestJobStatus(
+        job_id=job.job_id,
+        status=job.status,
+        message=job.message,
+        result=result,
+        error=job.error,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
+
+
+def run_knowledge_ingest_job(job_id: str, request, runner) -> None:
+    update_knowledge_ingest_job(job_id, status="running", message="正在解析并写入向量库")
+    try:
+        response = runner(request)
+        result = getattr(response, "data", None)
+        result_payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+        update_knowledge_ingest_job(
+            job_id,
+            status="completed",
+            message="入库完成",
+            result=result_payload,
+            error=None,
+        )
+    except HTTPException as exc:
+        update_knowledge_ingest_job(job_id, status="failed", message="入库失败", error=str(exc.detail))
+    except Exception as exc:  # pragma: no cover - defensive background boundary
+        logger.exception("Knowledge ingest job failed: %s", exc)
+        update_knowledge_ingest_job(job_id, status="failed", message="入库失败", error=str(exc))
+
+
+@app.post("/api/knowledge/documents/from-url/jobs", response_model=ApiResponse[TravelDocumentIngestJobResponse])
+def create_travel_document_url_ingest_job(request: TravelDocumentUrlIngestRequest, background_tasks: BackgroundTasks):
+    job = create_knowledge_ingest_job("url", "网页入库任务已创建")
+    background_tasks.add_task(run_knowledge_ingest_job, job.job_id, request, ingest_travel_document_from_url)
+    return ApiResponse[TravelDocumentIngestJobResponse](
+        success=True,
+        message=job.message,
+        data=TravelDocumentIngestJobResponse(job_id=job.job_id, status=job.status, message=job.message),
+    )
+
+
+@app.post("/api/knowledge/documents/auto/jobs", response_model=ApiResponse[TravelDocumentIngestJobResponse])
+def create_travel_document_auto_ingest_job(request: TravelDocumentAutoIngestRequest, background_tasks: BackgroundTasks):
+    job = create_knowledge_ingest_job("upload", "文件入库任务已创建")
+    background_tasks.add_task(run_knowledge_ingest_job, job.job_id, request, ingest_travel_document_auto)
+    return ApiResponse[TravelDocumentIngestJobResponse](
+        success=True,
+        message=job.message,
+        data=TravelDocumentIngestJobResponse(job_id=job.job_id, status=job.status, message=job.message),
+    )
+
+
+@app.get("/api/knowledge/documents/jobs/{job_id}", response_model=ApiResponse[TravelDocumentIngestJobStatus])
+def get_travel_document_ingest_job(job_id: str):
+    with knowledge_ingest_jobs_lock:
+        job = knowledge_ingest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Knowledge ingest job not found.")
+    return ApiResponse[TravelDocumentIngestJobStatus](
+        success=True,
+        message=job.message,
+        data=knowledge_ingest_job_status(job),
+    )
+
+
+@app.post("/api/knowledge/search", response_model=ApiResponse[TravelDocumentSearchResponse])
+def search_travel_documents(request: TravelDocumentSearchRequest):
+    store = travel_vector_store
+    if store is None:
+        resources = get_app_resources()
+        store = resources.travel_vector_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Travel knowledge vector store is not configured.")
+    try:
+        results = store.search_chunks(
+            query=request.query,
+            top_k=request.top_k,
+            province=request.province,
+            city=request.city,
+            data_type=request.data_type,
+            source_type=request.source_type,
+            source_name=request.source_name,
+            publish_date_from=request.publish_date_from,
+            publish_date_to=request.publish_date_to,
+        )
+    except Exception as exc:
+        logger.warning("Travel document search failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Travel document search failed: {exc}") from exc
+    payload = TravelDocumentSearchResponse(
+        query=request.query,
+        results=[normalize_document_search_result(item) for item in results],
+    )
+    return ApiResponse[TravelDocumentSearchResponse](success=True, message="旅行文档检索完成", data=payload)
+
+
+def normalize_document_search_result(item) -> TravelDocumentSearchResult:
+    if isinstance(item, dict):
+        payload = dict(item)
+    else:
+        payload = {
+            "chunk_id": getattr(item, "chunk_id", ""),
+            "title": getattr(item, "title", ""),
+            "section": getattr(item, "section", ""),
+            "content": getattr(item, "content", ""),
+            "source_name": getattr(item, "source_name", ""),
+            "source_url": getattr(item, "source_url", None),
+            "publish_date": getattr(item, "publish_date", None),
+            "score": getattr(item, "score", 0.0),
+            "metadata": getattr(item, "metadata", None) or {},
+        }
+    payload["metadata"] = payload.get("metadata") or {}
+    return TravelDocumentSearchResult.model_validate(payload)
+
+
+DOCUMENT_DATA_TYPES = (
+    "城市旅游介绍",
+    "景点信息",
+    "交通信息",
+    "旅游政策公告",
+    "平台旅游趋势报告",
+    "文旅数据",
+    "行程路线推荐",
+)
+
+
+def infer_travel_document_metadata(content: str, hints: dict[str, object] | None = None) -> dict[str, object]:
+    hints = hints or {}
+    fallback = fallback_travel_document_metadata(content, hints)
+    llm = create_llm()
+    if llm is None:
+        return fallback
+    prompt = (
+        "你是旅行 RAG 知识库的文档编目助手。请从用户提供的资料中抽取 metadata，只返回 JSON，"
+        "不要输出解释。无法确认的字段返回 null，不要编造。\n"
+        f"允许的 data_type 只能是：{', '.join(DOCUMENT_DATA_TYPES)}。\n"
+        "JSON 字段：title, source_name, source_type, publish_date, province, city, scenic_spot, data_type, metadata。\n"
+        "publish_date 使用 YYYY-MM-DD；metadata 是对象，可包含 theme、authority_level、keywords。\n"
+        f"已知线索：{json.dumps(hints, ensure_ascii=False)}\n"
+        f"资料正文：\n{content[:6000]}"
+    )
+    try:
+        response = llm.invoke(prompt)
+        parsed = parse_json_object(str(getattr(response, "content", response)))
+        return normalize_inferred_metadata(parsed, fallback)
+    except Exception as exc:
+        logger.warning("Travel document metadata inference failed, using fallback: %s", exc)
+        return fallback
+
+
+def fallback_travel_document_metadata(content: str, hints: dict[str, object]) -> dict[str, object]:
+    source_url = str(hints.get("source_url") or "")
+    title_hint = str(hints.get("title") or "").strip()
+    source_name_hint = str(hints.get("source_name") or "").strip()
+    source_type = str(hints.get("source_type") or "upload").strip() or "upload"
+    title = title_hint or title_from_url(source_url) or "旅行文档"
+    source_name = source_name_hint or urlparse(source_url).netloc or "上传文件"
+    return {
+        "title": title[:240],
+        "source_name": source_name[:160],
+        "source_type": source_type[:80],
+        "publish_date": extract_first_date(content),
+        "province": None,
+        "city": None,
+        "scenic_spot": None,
+        "data_type": infer_data_type(content),
+        "metadata": {"inference": "fallback"},
+    }
+
+
+def normalize_inferred_metadata(parsed: dict[str, object], fallback: dict[str, object]) -> dict[str, object]:
+    data = dict(fallback)
+    for key in ("title", "source_name", "source_type", "publish_date", "province", "city", "scenic_spot", "data_type"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            data[key] = value.strip()
+    if data.get("data_type") not in DOCUMENT_DATA_TYPES:
+        data["data_type"] = fallback.get("data_type")
+    metadata = parsed.get("metadata")
+    if isinstance(metadata, dict):
+        data["metadata"] = {**dict(fallback.get("metadata") or {}), **metadata, "inference": "llm"}
+    else:
+        data["metadata"] = {**dict(fallback.get("metadata") or {}), "inference": "llm"}
+    return data
+
+
+def parse_json_object(text: str) -> dict[str, object]:
+    try:
+        value = json.loads(text.strip())
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if not match:
+            raise
+        value = json.loads(match.group(0))
+    if not isinstance(value, dict):
+        raise ValueError("Metadata inference response is not a JSON object.")
+    return value
+
+
+def infer_data_type(content: str) -> str:
+    text = content[:3000]
+    if any(word in text for word in ("政策", "公告", "通知", "预约", "开放时间")):
+        return "旅游政策公告"
+    if any(word in text for word in ("交通", "地铁", "机场", "高铁", "公交")):
+        return "交通信息"
+    if any(word in text for word in ("路线", "行程", "几日游", "一日游")):
+        return "行程路线推荐"
+    if any(word in text for word in ("趋势", "报告", "数据", "游客量")):
+        return "平台旅游趋势报告"
+    if any(word in text for word in ("景区", "景点", "博物馆", "公园")):
+        return "景点信息"
+    return "城市旅游介绍"
+
+
+def extract_first_date(content: str) -> str | None:
+    match = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})", content)
+    if not match:
+        return None
+    year, month, day = match.groups()
+    return f"{year}-{int(month):02d}-{int(day):02d}"
+
+
+def extract_html_title(html_text: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", flags=re.I | re.S)
+    if not match:
+        return ""
+    return normalize_document_content(match.group(1))[:240]
+
+
+def title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    path_name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+    return path_name or parsed.netloc or "网页旅行文档"
 
 
 @app.get("/api/news/status")

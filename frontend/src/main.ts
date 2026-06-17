@@ -36,6 +36,7 @@ import './styles.css'
 const Home = () => import('./views/Home.vue')
 const Login = () => import('./views/Login.vue')
 const QA = () => import('./views/QA.vue')
+const Knowledge = () => import('./views/Knowledge.vue')
 const Reports = () => import('./views/Reports.vue')
 const Result = () => import('./views/Result.vue')
 
@@ -45,6 +46,7 @@ const router = createRouter({
     { path: '/', name: 'Home', component: Home },
     { path: '/login', name: 'Login', component: Login, meta: { guest: true } },
     { path: '/qa', name: 'QA', component: QA },
+    { path: '/knowledge', name: 'Knowledge', component: Knowledge },
     { path: '/reports', name: 'Reports', component: Reports },
     { path: '/result', name: 'Result', component: Result },
   ],

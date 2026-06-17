@@ -363,6 +363,90 @@ class TravelNewsIngestResult(BaseModel):
     errors: List[str] = Field(default_factory=list)
 
 
+class TravelDocumentIngestRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=240)
+    content: str = Field(..., min_length=1)
+    source_name: str = Field(default="manual", max_length=160)
+    source_url: Optional[str] = None
+    source_type: str = Field(default="manual", max_length=80)
+    province: Optional[str] = Field(default=None, max_length=80)
+    city: Optional[str] = Field(default=None, max_length=80)
+    data_type: Optional[str] = Field(default=None, max_length=120)
+    scenic_spot: Optional[str] = Field(default=None, max_length=160)
+    publish_date: Optional[date] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TravelDocumentUrlIngestRequest(BaseModel):
+    source_url: str = Field(..., min_length=1, max_length=2000)
+    title: Optional[str] = Field(default=None, max_length=240)
+    source_name: str = Field(default="web", max_length=160)
+    source_type: str = Field(default="web", max_length=80)
+    province: Optional[str] = Field(default=None, max_length=80)
+    city: Optional[str] = Field(default=None, max_length=80)
+    data_type: Optional[str] = Field(default=None, max_length=120)
+    scenic_spot: Optional[str] = Field(default=None, max_length=160)
+    publish_date: Optional[date] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TravelDocumentAutoIngestRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    file_name: Optional[str] = Field(default=None, max_length=240)
+    source_url: Optional[str] = Field(default=None, max_length=2000)
+    source_type: str = Field(default="upload", max_length=80)
+
+
+class TravelDocumentIngestResult(BaseModel):
+    doc_id: str
+    chunks_added: int = 0
+
+
+class TravelDocumentIngestJobResponse(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    message: str = ""
+
+
+class TravelDocumentIngestJobStatus(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    message: str = ""
+    result: Optional[TravelDocumentIngestResult] = None
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TravelDocumentSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    province: Optional[str] = Field(default=None, max_length=80)
+    city: Optional[str] = Field(default=None, max_length=80)
+    data_type: Optional[str] = Field(default=None, max_length=120)
+    source_type: Optional[str] = Field(default=None, max_length=80)
+    source_name: Optional[str] = Field(default=None, max_length=160)
+    publish_date_from: Optional[date] = None
+    publish_date_to: Optional[date] = None
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class TravelDocumentSearchResult(BaseModel):
+    chunk_id: str
+    title: str
+    section: str = ""
+    content: str
+    source_name: str
+    source_url: Optional[str] = None
+    publish_date: Optional[date] = None
+    score: float = 0.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TravelDocumentSearchResponse(BaseModel):
+    query: str
+    results: List[TravelDocumentSearchResult] = Field(default_factory=list)
+
+
 T = TypeVar("T")
 
 

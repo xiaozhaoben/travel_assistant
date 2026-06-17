@@ -275,6 +275,90 @@ export interface TravelNewsIngestResult {
   errors: string[]
 }
 
+export interface TravelDocumentIngestPayload {
+  title: string
+  content: string
+  source_name: string
+  source_url?: string | null
+  source_type?: string
+  province?: string | null
+  city?: string | null
+  data_type?: string | null
+  scenic_spot?: string | null
+  publish_date?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface TravelDocumentUrlIngestPayload {
+  source_url: string
+  title?: string | null
+  source_name?: string
+  source_type?: string
+  province?: string | null
+  city?: string | null
+  data_type?: string | null
+  scenic_spot?: string | null
+  publish_date?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface TravelDocumentAutoIngestPayload {
+  content: string
+  file_name?: string | null
+  source_url?: string | null
+  source_type?: string
+}
+
+export interface TravelDocumentIngestResult {
+  doc_id: string
+  chunks_added: number
+}
+
+export interface TravelDocumentIngestJobResponse {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  message: string
+}
+
+export interface TravelDocumentIngestJobStatus {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  message: string
+  result?: TravelDocumentIngestResult | null
+  error?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TravelDocumentSearchPayload {
+  query: string
+  province?: string | null
+  city?: string | null
+  data_type?: string | null
+  source_type?: string | null
+  source_name?: string | null
+  publish_date_from?: string | null
+  publish_date_to?: string | null
+  top_k: number
+}
+
+export interface TravelDocumentSearchResult {
+  chunk_id: string
+  title: string
+  section: string
+  content: string
+  source_name: string
+  source_url?: string | null
+  publish_date?: string | null
+  score: number
+  metadata: Record<string, unknown>
+}
+
+export interface TravelDocumentSearchResponse {
+  query: string
+  results: TravelDocumentSearchResult[]
+}
+
 export interface AuthTokenResponse {
   access_token: string
   token_type: string

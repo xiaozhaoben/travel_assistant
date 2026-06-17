@@ -7,6 +7,14 @@ import type {
   DayPlan,
   ResearchSnippet,
   ServiceHealth,
+  TravelDocumentAutoIngestPayload,
+  TravelDocumentIngestJobResponse,
+  TravelDocumentIngestJobStatus,
+  TravelDocumentIngestPayload,
+  TravelDocumentIngestResult,
+  TravelDocumentSearchPayload,
+  TravelDocumentSearchResponse,
+  TravelDocumentUrlIngestPayload,
   TravelNewsIngestResult,
   TravelQAConversationDetail,
   TravelQAConversationSummary,
@@ -525,6 +533,51 @@ export async function ingestTravelNews(feedUrls: string[] = []): Promise<TravelN
     feed_urls: feedUrls,
   })
   return requireApiData<TravelNewsIngestResult>(response.data, 'Travel news ingest request failed')
+}
+
+export async function ingestTravelDocument(payload: TravelDocumentIngestPayload): Promise<TravelDocumentIngestResult> {
+  const response = await apiClient.post('/api/knowledge/documents', payload)
+  return requireApiData<TravelDocumentIngestResult>(response.data, 'Travel document ingest request failed')
+}
+
+export async function ingestTravelDocumentFromUrl(
+  payload: TravelDocumentUrlIngestPayload,
+): Promise<TravelDocumentIngestResult> {
+  const response = await apiClient.post('/api/knowledge/documents/from-url', payload)
+  return requireApiData<TravelDocumentIngestResult>(response.data, 'Travel document URL ingest request failed')
+}
+
+export async function ingestTravelDocumentAuto(
+  payload: TravelDocumentAutoIngestPayload,
+): Promise<TravelDocumentIngestResult> {
+  const response = await apiClient.post('/api/knowledge/documents/auto', payload)
+  return requireApiData<TravelDocumentIngestResult>(response.data, 'Travel document auto ingest request failed')
+}
+
+export async function createTravelDocumentUrlJob(
+  payload: TravelDocumentUrlIngestPayload,
+): Promise<TravelDocumentIngestJobResponse> {
+  const response = await apiClient.post('/api/knowledge/documents/from-url/jobs', payload)
+  return requireApiData<TravelDocumentIngestJobResponse>(response.data, 'Travel document URL job request failed')
+}
+
+export async function createTravelDocumentAutoJob(
+  payload: TravelDocumentAutoIngestPayload,
+): Promise<TravelDocumentIngestJobResponse> {
+  const response = await apiClient.post('/api/knowledge/documents/auto/jobs', payload)
+  return requireApiData<TravelDocumentIngestJobResponse>(response.data, 'Travel document auto job request failed')
+}
+
+export async function getTravelDocumentJob(jobId: string): Promise<TravelDocumentIngestJobStatus> {
+  const response = await apiClient.get(`/api/knowledge/documents/jobs/${encodeURIComponent(jobId)}`)
+  return requireApiData<TravelDocumentIngestJobStatus>(response.data, 'Travel document job status request failed')
+}
+
+export async function searchTravelDocuments(
+  payload: TravelDocumentSearchPayload,
+): Promise<TravelDocumentSearchResponse> {
+  const response = await apiClient.post('/api/knowledge/search', payload)
+  return requireApiData<TravelDocumentSearchResponse>(response.data, 'Travel document search request failed')
 }
 
 export async function getAttractionPhoto(

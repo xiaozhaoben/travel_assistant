@@ -95,7 +95,7 @@ set VITE_AMAP_SECURITY_JS_CODE=你的高德Web端安全密钥
 
 ## 旅行知识库与智能问答
 
-知识库复用当前项目的 PostgreSQL 配置，并要求数据库安装 `pgvector` 扩展。配置 `DATABASE_URL` 或 `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 后，首次调用资讯入库会自动创建 `travel_knowledge_documents` 表。
+知识库复用当前项目的 PostgreSQL 配置，并要求数据库安装 `pgvector` 扩展。配置 `DATABASE_URL` 或 `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 后，首次调用资讯或文档入库会自动创建 `documents` 与 `document_chunks` 表。
 
 智能问答优先使用实时搜索 MCP 处理预约、开放时间、闭馆、限流、节假日和交通公告类问题。可配置：
 

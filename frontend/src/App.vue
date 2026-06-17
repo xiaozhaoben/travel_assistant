@@ -21,6 +21,10 @@
           <MessageOutlined />
           <span>智能问答</span>
         </router-link>
+        <router-link to="/knowledge" class="nav-link" active-class="nav-link-active">
+          <DatabaseOutlined />
+          <span>知识库</span>
+        </router-link>
       </nav>
       <div class="header-user">
         <template v-if="auth.isAuthenticated.value">
@@ -50,7 +54,7 @@
 </template>
 
 <script setup lang="ts">
-import { CompassOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/icons-vue'
+import { CompassOutlined, DatabaseOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/icons-vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '@/services/auth'
 
