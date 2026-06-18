@@ -18,6 +18,8 @@ class Settings:
     llm_api_key: str | None
     llm_base_url: str | None
     llm_timeout: float
+    llm_connect_timeout: float
+    llm_max_retries: int
     llm_enable_thinking: bool
     model_provider: str
     host: str
@@ -85,6 +87,8 @@ def get_settings() -> Settings:
         llm_api_key=llm_api_key,
         llm_base_url=llm_base_url,
         llm_timeout=float(os.getenv("LLM_TIMEOUT", "60")),
+        llm_connect_timeout=float(os.getenv("LLM_CONNECT_TIMEOUT", "8")),
+        llm_max_retries=max(0, min(_env_int("LLM_MAX_RETRIES", 0), 5)),
         llm_enable_thinking=_env_bool("LLM_ENABLE_THINKING", default=False),
         model_provider=model_provider,
         host=os.getenv("HOST", "127.0.0.1"),

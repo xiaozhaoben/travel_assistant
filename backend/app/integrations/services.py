@@ -14,6 +14,7 @@ import httpx
 from app.core.config import get_settings
 from app.domain.models import Attraction, Budget, DayPlan, Hotel, Location, Meal, TravelRequirement, WeatherInfo
 from app.integrations.mcp_utils import is_broken_resource_cleanup_error, wait_for_stdio_transport_cleanup
+from app.prompts.agent_prompts import AgentPrompts
 from app.storage.plan_log import elapsed_ms, record_api_call
 
 logger = logging.getLogger(__name__)
@@ -1413,13 +1414,7 @@ class UnsplashMCPClient:
         if self.llm is None:
             return None
         allowed_urls = {str(candidate.get("image_url")) for candidate in candidates if candidate.get("image_url")}
-        prompt = (
-            "你是旅行景点图片筛选器。请只从候选图片中选择最适合用户查询的景点实拍或官方高可信图片。"
-            "优先具体景点、官方/百科/地图来源、真实照片；避开城市泛图、Logo、广告、无关配图。"
-            "只返回 JSON，例如 {\"image_url\":\"https://example.com/photo.jpg\"}；无法判断时返回 {\"image_url\":\"\"}。\n"
-            f"查询：{query}\n"
-            f"候选：{json.dumps(candidates, ensure_ascii=False)}"
-        )
+        prompt = AgentPrompts.render_image_selection(query, candidates)
         try:
             response = self.llm.invoke([("user", prompt)])
             content = getattr(response, "content", response)

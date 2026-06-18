@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 
 class AgentPrompts:
     ATTRACTION_SEARCH = (
@@ -63,3 +65,67 @@ class AgentPrompts:
         "Few-Shot 输入：1 天计划包含 3 个相距很远的景点。"
         "输出：{\"passed\":false,\"risks\":[\"单日跨区距离过大，容易导致游览时间不足。\"],\"fixes\":[\"保留同片区 2 个景点，将远郊景点改为备选或单独安排半天。\"]}。"
     )
+
+    ATTRACTION_RESULT_REQUEST = (
+        "请根据下面的旅行需求返回真实景点 JSON：{{\"attractions\":[...]}}，不要 Markdown。"
+        "如果没有可用结果，返回 {{\"attractions\":[]}}。\n"
+        "{requirement_json}"
+    )
+    ATTRACTION_QUERY_PLANNING = (
+        "请为高德地图 maps_text_search 生成 8-12 个中文 POI 搜索关键词。"
+        "优先输出你判断真实存在、可独立游览、可在地图中直接搜到的具体地点名称，例如陈家祠、沙面岛、南越王博物院、越秀公园这类 POI。"
+        "不要输出模板词或泛分类词，例如“广州历史街区”“广州特色街区”“广州城市公园”“广州城市地标”“广州历史文化景点”。"
+        "可以根据城市和偏好自由发挥，覆盖不同片区、不同类型和不同强度，但每个关键词都应尽量指向一个真实景点、街区、场馆或景区。"
+        "不要只围绕一个大景区生成入口、检票处、服务中心、讲解处、馆内小景点。"
+        "如果不确定具体名称，宁可输出更知名的真实地标，不要编造“xx历史街区”这种固定形式。"
+        "只返回 JSON：{{\"queries\":[\"...\"]}}。\n"
+        "{requirement_json}"
+    )
+    WEATHER_RESULT_REQUEST = (
+        "请根据下面的旅行需求返回天气 JSON：{{\"weather\":[...]}}，不要 Markdown。"
+        "如果没有可用结果，返回 {{\"weather\":[]}}。\n"
+        "{requirement_json}"
+    )
+    HOTEL_RESULT_REQUEST = (
+        "请根据下面的旅行需求返回酒店 JSON：{{\"hotels\":[...]}}，不要 Markdown。"
+        "如果没有可用结果，返回 {{\"hotels\":[]}}。\n"
+        "{requirement_json}"
+    )
+    IMAGE_SELECTION = (
+        "你是旅行景点图片筛选器。请只从候选图片中选择最适合用户查询的景点实拍或官方高可信图片。"
+        "优先具体景点、官方/百科/地图来源、真实照片；避开城市泛图、Logo、广告、无关配图。"
+        "只返回 JSON，例如 {{\"image_url\":\"https://example.com/photo.jpg\"}}；无法判断时返回 {{\"image_url\":\"\"}}。\n"
+        "查询：{query}\n"
+        "候选：{candidates_json}"
+    )
+
+    @staticmethod
+    def render_attraction_result_request(requirement_payload: dict) -> str:
+        return AgentPrompts.ATTRACTION_RESULT_REQUEST.format(
+            requirement_json=json.dumps(requirement_payload, ensure_ascii=False)
+        )
+
+    @staticmethod
+    def render_attraction_query_planning(requirement_payload: dict) -> str:
+        return AgentPrompts.ATTRACTION_QUERY_PLANNING.format(
+            requirement_json=json.dumps(requirement_payload, ensure_ascii=False)
+        )
+
+    @staticmethod
+    def render_weather_result_request(requirement_payload: dict) -> str:
+        return AgentPrompts.WEATHER_RESULT_REQUEST.format(
+            requirement_json=json.dumps(requirement_payload, ensure_ascii=False)
+        )
+
+    @staticmethod
+    def render_hotel_result_request(requirement_payload: dict) -> str:
+        return AgentPrompts.HOTEL_RESULT_REQUEST.format(
+            requirement_json=json.dumps(requirement_payload, ensure_ascii=False)
+        )
+
+    @staticmethod
+    def render_image_selection(query: str, candidates: list[dict]) -> str:
+        return AgentPrompts.IMAGE_SELECTION.format(
+            query=query,
+            candidates_json=json.dumps(candidates, ensure_ascii=False),
+        )

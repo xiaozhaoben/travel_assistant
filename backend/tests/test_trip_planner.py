@@ -884,6 +884,8 @@ def test_settings_support_reference_env_names(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("LLM_TIMEOUT", "45")
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT", "7")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174")
     monkeypatch.setenv("AMAP_API_KEY", "amap-key")
     monkeypatch.setenv("TAVILY_API_KEY", "tavily-key")
@@ -895,6 +897,8 @@ def test_settings_support_reference_env_names(monkeypatch):
     assert settings.llm_api_key == "test-key"
     assert settings.llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert settings.llm_timeout == 45
+    assert settings.llm_connect_timeout == 7
+    assert settings.llm_max_retries == 2
     assert settings.cors_origins == ["http://localhost:5173", "http://localhost:5174"]
     assert settings.amap_api_key == "amap-key"
     assert settings.tavily_api_key == "tavily-key"
@@ -1028,15 +1032,20 @@ def test_create_llm_passes_dashscope_thinking_toggle(monkeypatch):
     assert llm.extra_body == {"enable_thinking": False}
 
 
-def test_create_llm_disables_retries_for_fast_fallback(monkeypatch):
+def test_create_llm_uses_configurable_timeouts_and_retries(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_TIMEOUT", "45")
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT", "7")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
 
     from app.core.llm_service import create_llm
 
     llm = create_llm()
 
     assert llm is not None
-    assert llm.max_retries == 0
+    assert llm.max_retries == 2
+    assert llm.request_timeout.connect == 7
+    assert llm.request_timeout.read == 45
 
 
 def test_parser_extracts_city_days_preferences_and_budget():

@@ -60,6 +60,7 @@ from .auth.service import (
 )
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
+from .knowledge.prompts import render_travel_document_metadata_prompt
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.qa_checkpointer import create_qa_checkpointer
 from .knowledge.vector_store import create_travel_vector_store, normalize_document_content
@@ -1032,14 +1033,10 @@ def infer_travel_document_metadata(content: str, hints: dict[str, object] | None
     llm = create_llm()
     if llm is None:
         return fallback
-    prompt = (
-        "你是旅行 RAG 知识库的文档编目助手。请从用户提供的资料中抽取 metadata，只返回 JSON，"
-        "不要输出解释。无法确认的字段返回 null，不要编造。\n"
-        f"允许的 data_type 只能是：{', '.join(DOCUMENT_DATA_TYPES)}。\n"
-        "JSON 字段：title, source_name, source_type, publish_date, province, city, scenic_spot, data_type, metadata。\n"
-        "publish_date 使用 YYYY-MM-DD；metadata 是对象，可包含 theme、authority_level、keywords。\n"
-        f"已知线索：{json.dumps(hints, ensure_ascii=False)}\n"
-        f"资料正文：\n{content[:6000]}"
+    prompt = render_travel_document_metadata_prompt(
+        content=content,
+        hints=hints,
+        data_types=DOCUMENT_DATA_TYPES,
     )
     try:
         response = llm.invoke(prompt)

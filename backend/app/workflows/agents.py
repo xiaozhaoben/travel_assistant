@@ -247,11 +247,7 @@ class AttractionSearchAgent:
     def _try_agent_attractions(self, requirement: TravelRequirement) -> List[Attraction]:
         if self.langchain_agent is None:
             return []
-        prompt = (
-            "请根据下面的旅行需求返回真实景点 JSON：{\"attractions\":[...]}，不要 Markdown。"
-            "如果没有可用结果，返回 {\"attractions\":[]}。\n"
-            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
-        )
+        prompt = AgentPrompts.render_attraction_result_request(requirement.model_dump(mode="json"))
         try:
             response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
             data = _extract_json_payload(_extract_agent_content(response))
@@ -305,16 +301,7 @@ class AttractionSearchAgent:
 
     def _build_query_prompt(self, requirement: TravelRequirement) -> str:
         payload = requirement.model_dump(mode="json")
-        return (
-            "请为高德地图 maps_text_search 生成 8-12 个中文 POI 搜索关键词。"
-            "优先输出你判断真实存在、可独立游览、可在地图中直接搜到的具体地点名称，例如陈家祠、沙面岛、南越王博物院、越秀公园这类 POI。"
-            "不要输出模板词或泛分类词，例如“广州历史街区”“广州特色街区”“广州城市公园”“广州城市地标”“广州历史文化景点”。"
-            "可以根据城市和偏好自由发挥，覆盖不同片区、不同类型和不同强度，但每个关键词都应尽量指向一个真实景点、街区、场馆或景区。"
-            "不要只围绕一个大景区生成入口、检票处、服务中心、讲解处、馆内小景点。"
-            "如果不确定具体名称，宁可输出更知名的真实地标，不要编造“xx历史街区”这种固定形式。"
-            "只返回 JSON：{\"queries\":[\"...\"]}。\n"
-            f"{json.dumps(payload, ensure_ascii=False)}"
-        )
+        return AgentPrompts.render_attraction_query_planning(payload)
 
     def _extract_json(self, content: str) -> dict:
         if "```json" in content:
@@ -462,11 +449,7 @@ class WeatherQueryAgent:
     def _try_agent_weather(self, requirement: TravelRequirement) -> List[WeatherInfo]:
         if self.langchain_agent is None:
             return []
-        prompt = (
-            "请根据下面的旅行需求返回天气 JSON：{\"weather\":[...]}，不要 Markdown。"
-            "如果没有可用结果，返回 {\"weather\":[]}。\n"
-            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
-        )
+        prompt = AgentPrompts.render_weather_result_request(requirement.model_dump(mode="json"))
         try:
             response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
             data = _extract_json_payload(_extract_agent_content(response))
@@ -507,11 +490,7 @@ class HotelAgent:
     def _try_agent_hotels(self, requirement: TravelRequirement) -> List[Hotel]:
         if self.langchain_agent is None:
             return []
-        prompt = (
-            "请根据下面的旅行需求返回酒店 JSON：{\"hotels\":[...]}，不要 Markdown。"
-            "如果没有可用结果，返回 {\"hotels\":[]}。\n"
-            f"{json.dumps(requirement.model_dump(mode='json'), ensure_ascii=False)}"
-        )
+        prompt = AgentPrompts.render_hotel_result_request(requirement.model_dump(mode="json"))
         try:
             response = self.langchain_agent.invoke({"messages": [{"role": "user", "content": prompt}]})
             data = _extract_json_payload(_extract_agent_content(response))

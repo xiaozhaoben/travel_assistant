@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
+from dataclasses import replace
 from typing import Any, Callable, Iterable, Literal, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app.domain.models import TravelKnowledgeSource, TravelQAResponse
-from app.knowledge.vector_store import KnowledgeDocument, PostgresTravelVectorStore
+from app.knowledge.prompts import render_travel_query_expansion_prompt
+from app.knowledge.vector_store import KnowledgeDocument, PostgresTravelVectorStore, lexical_query_terms
 from app.researching.research import WebSearchMCPClient
+
+logger = logging.getLogger(__name__)
 
 
 class TravelQAState(TypedDict, total=False):
     question: str
     top_k: int
     conversation_history: list[dict[str, str]]
+    query_variants: list[str]
     vector_docs: list[KnowledgeDocument]
+    keyword_docs: list[KnowledgeDocument]
     docs: list[KnowledgeDocument]
     web_sources: list[TravelKnowledgeSource]
     used_web_search: bool
@@ -115,6 +124,7 @@ class TravelQAGraphRunner:
             "top_k": top_k,
             "conversation_history": conversation_history,
         }
+        state.update(self._expand_query(state))
         state.update(self._retrieve_vector(state))
         state.update(self._merge_and_rank(state))
         return state
@@ -141,32 +151,56 @@ class TravelQAGraphRunner:
 
     def _build_graph(self):
         graph = StateGraph(TravelQAState)
+        graph.add_node("expand_query", self._expand_query)
         graph.add_node("retrieve_vector", self._retrieve_vector)
         graph.add_node("merge_and_rank", self._merge_and_rank)
         graph.add_node("answer_question", self._answer_question)
         graph.add_node("build_response", self._build_response)
-        graph.add_edge(START, "retrieve_vector")
+        graph.add_edge(START, "expand_query")
+        graph.add_edge("expand_query", "retrieve_vector")
         graph.add_edge("retrieve_vector", "merge_and_rank")
         graph.add_edge("merge_and_rank", "answer_question")
         graph.add_edge("answer_question", "build_response")
         graph.add_edge("build_response", END)
         return graph.compile()
 
+    def _expand_query(self, state: TravelQAState) -> dict[str, Any]:
+        question = state["question"]
+        variants = expand_question_variants(
+            question,
+            state.get("conversation_history", []),
+            llm=self.llm,
+            max_variants=max(3, int(state.get("top_k", 5))),
+        )
+        return {"query_variants": variants}
+
     def _retrieve_vector(self, state: TravelQAState) -> dict[str, Any]:
         if self.vector_store is None:
-            return {"vector_docs": []}
+            return {"vector_docs": [], "keyword_docs": []}
+        queries = state.get("query_variants") or [state["question"]]
+        fetch_k = max(int(state.get("top_k", 5)) + 5, 8)
+        vector_docs: list[KnowledgeDocument] = []
+        keyword_docs: list[KnowledgeDocument] = []
         try:
-            return {"vector_docs": self.vector_store.similarity_search(state["question"], k=int(state.get("top_k", 5)))}
+            for query in queries:
+                vector_docs.extend(self.vector_store.similarity_search(query, k=fetch_k))
+                keyword_search = getattr(self.vector_store, "keyword_search", None)
+                if callable(keyword_search):
+                    keyword_docs.extend(keyword_search(query, k=fetch_k))
         except Exception as exc:
             logger.warning("Travel QA retrieval failed: %s", exc)
-            return {"vector_docs": []}
+            return {"vector_docs": dedupe_knowledge_documents(vector_docs), "keyword_docs": dedupe_knowledge_documents(keyword_docs)}
+        return {"vector_docs": dedupe_knowledge_documents(vector_docs), "keyword_docs": dedupe_knowledge_documents(keyword_docs)}
 
     def _merge_and_rank(self, state: TravelQAState) -> dict[str, Any]:
-        from app.knowledge.qa_agent import format_documents, merge_documents
+        from app.knowledge.qa_agent import format_documents
 
         top_k = int(state.get("top_k", 5))
-        docs = merge_documents(
+        docs = rerank_retrieved_documents(
+            state["question"],
+            state.get("query_variants") or [state["question"]],
             state.get("vector_docs", []),
+            state.get("keyword_docs", []),
             limit=max(1, top_k + 3),
         )
         context_parts = []
@@ -214,6 +248,143 @@ class TravelQAGraphRunner:
                 used_web_search=bool(state.get("used_web_search")),
             )
         }
+
+
+def expand_question_variants(
+    question: str,
+    conversation_history: list[dict[str, str]],
+    *,
+    llm: Any | None = None,
+    max_variants: int = 5,
+) -> list[str]:
+    variants = [question.strip()]
+    history_focus = latest_user_focus(conversation_history)
+    if history_focus and (is_ambiguous_question(question) or len(question.strip()) <= 20):
+        variants.append(f"{history_focus} {question}".strip())
+    if should_use_llm_query_expansion(question) and llm is not None:
+        prompt = render_travel_query_expansion_prompt(question, conversation_history)
+        try:
+            response = llm.invoke(prompt)
+            variants.extend(parse_query_expansion(str(getattr(response, "content", response))))
+        except Exception as exc:
+            logger.warning("Travel QA query expansion failed, using heuristic variants: %s", exc)
+    variants.extend(heuristic_hypothetical_questions(question, history_focus))
+    return unique_nonempty_texts(variants, max_items=max_variants)
+
+
+def parse_query_expansion(text: str) -> list[str]:
+    try:
+        value = json.loads(text.strip())
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}|\[.*\]", text, flags=re.S)
+        if not match:
+            return []
+        value = json.loads(match.group(0))
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if not isinstance(value, dict):
+        return []
+    items: list[str] = []
+    for key in ("queries", "hypothetical_questions", "questions"):
+        values = value.get(key)
+        if isinstance(values, list):
+            items.extend(str(item) for item in values)
+    return items
+
+
+def heuristic_hypothetical_questions(question: str, history_focus: str = "") -> list[str]:
+    base = f"{history_focus} {question}".strip() if history_focus and is_ambiguous_question(question) else question
+    variants = []
+    if any(word in question for word in ("预约", "门票", "开放", "闭馆")):
+        variants.append(f"{base} 官方公告 预约 门票 开放时间")
+    if any(word in question for word in ("交通", "怎么去", "路线", "地铁", "高铁")):
+        variants.append(f"{base} 交通 地铁 公交 高铁 景区直达")
+    if any(word in question for word in ("亲子", "孩子", "儿童", "家庭")):
+        variants.append(f"{base} 亲子游 儿童 家庭 景点 推荐")
+    if any(word in question for word in ("政策", "公告", "限制", "限流")):
+        variants.append(f"{base} 文旅政策 公告 限流 通知")
+    return variants
+
+
+def latest_user_focus(conversation_history: list[dict[str, str]]) -> str:
+    for item in reversed(conversation_history):
+        if str(item.get("role") or "") != "user":
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            return content[:120]
+    return ""
+
+
+def is_ambiguous_question(question: str) -> bool:
+    text = question.strip()
+    if len(text) <= 12:
+        return True
+    return any(marker in text for marker in ("那", "这个", "那里", "它", "他们", "怎么预约", "怎么去", "开放吗"))
+
+
+def should_use_llm_query_expansion(question: str) -> bool:
+    return is_ambiguous_question(question) or is_complex_question(question)
+
+
+def is_complex_question(question: str) -> bool:
+    text = question.strip()
+    if len(text) >= 28:
+        return True
+    return sum(1 for marker in ("和", "以及", "同时", "并且", "预算", "交通", "住宿", "政策", "门票") if marker in text) >= 2
+
+
+def unique_nonempty_texts(values: list[str], max_items: int) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def rerank_retrieved_documents(
+    question: str,
+    query_variants: list[str],
+    *groups: list[KnowledgeDocument],
+    limit: int,
+) -> list[KnowledgeDocument]:
+    docs = dedupe_knowledge_documents([doc for group in groups for doc in group])
+    if not docs:
+        return []
+    terms = lexical_query_terms(" ".join([question, *query_variants]), limit=32)
+    complex_query = is_complex_question(question)
+    scored = [score_retrieved_document(doc, terms, complex_query) for doc in docs]
+    return sorted(scored, key=lambda doc: float(doc.score or 0.0), reverse=True)[:limit]
+
+
+def score_retrieved_document(doc: KnowledgeDocument, terms: list[str], complex_query: bool) -> KnowledgeDocument:
+    haystack = f"{doc.title} {doc.summary} {doc.content}".lower()
+    matched = [term for term in terms if term.lower() in haystack]
+    coverage = len(set(matched)) / max(len(set(terms)), 1)
+    title_hits = sum(1 for term in set(matched) if term.lower() in (doc.title or "").lower())
+    source_bonus = {"rss": 0.08, "web-official": 0.16, "web-map": 0.12, "web-guide": 0.1}.get(doc.source_name, 0.06)
+    base = min(float(doc.score or 0.0), 1.0)
+    coverage_weight = 2.2 if complex_query else 1.15
+    score = base * 0.45 + coverage * coverage_weight + min(title_hits * 0.12, 0.36) + source_bonus
+    return replace(doc, score=round(score, 6))
+
+
+def dedupe_knowledge_documents(docs: list[KnowledgeDocument]) -> list[KnowledgeDocument]:
+    by_key: dict[str, KnowledgeDocument] = {}
+    for doc in docs:
+        key = (doc.source_url or doc.title or doc.id).strip().lower()
+        if not key:
+            continue
+        current = by_key.get(key)
+        if current is None or float(doc.score or 0.0) > float(current.score or 0.0):
+            by_key[key] = doc
+    return list(by_key.values())
 
 
 def format_conversation_history(messages: list[dict[str, str]], limit: int = 8) -> str:

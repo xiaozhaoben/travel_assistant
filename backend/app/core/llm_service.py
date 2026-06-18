@@ -19,15 +19,23 @@ def create_llm() -> Any | None:
 
     try:
         from langchain_openai import ChatOpenAI
+        import httpx
     except Exception:
         return None
 
+    request_timeout = httpx.Timeout(
+        timeout=settings.llm_timeout,
+        connect=min(settings.llm_connect_timeout, settings.llm_timeout),
+        read=settings.llm_timeout,
+        write=settings.llm_timeout,
+        pool=min(settings.llm_connect_timeout, settings.llm_timeout),
+    )
     kwargs: dict[str, Any] = {
         "api_key": settings.llm_api_key,
         "model": settings.llm_model_id,
         "temperature": 0.4,
-        "timeout": settings.llm_timeout,
-        "max_retries": 0,
+        "timeout": request_timeout,
+        "max_retries": settings.llm_max_retries,
         "extra_body": {"enable_thinking": settings.llm_enable_thinking},
     }
     if settings.llm_base_url:

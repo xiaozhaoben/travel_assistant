@@ -640,7 +640,7 @@ class PostgresTravelVectorStore:
                     """
                     WITH query_terms AS (
                         SELECT DISTINCT lower(term) AS term
-                        FROM unnest(%s::text[]) AS term
+                        FROM unnest(%s::text[]) AS t(term)
                         WHERE length(trim(term)) > 1
                     ),
                     filtered_chunks AS (
@@ -679,7 +679,7 @@ class PostgresTravelVectorStore:
                     idf AS (
                         SELECT
                             qt.term,
-                            ln(((corpus.total_docs - count(fc.*)::float + 0.5) / (count(fc.*)::float + 0.5)) + 1.0) AS value
+                            ln(((corpus.total_docs - count(fc.chunk_id)::float + 0.5) / (count(fc.chunk_id)::float + 0.5)) + 1.0) AS value
                         FROM query_terms qt
                         CROSS JOIN corpus
                         LEFT JOIN filtered_chunks fc ON position(qt.term in fc.haystack) > 0
