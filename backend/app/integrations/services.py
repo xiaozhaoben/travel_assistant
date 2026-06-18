@@ -24,6 +24,255 @@ AMAP_QPS_LIMIT_INFOCODE = "10021"
 AMAP_HTTP_QPS_RETRY_DELAYS = (1.0, 2.0)
 
 
+class RollingGoStreamableHTTPMCPToolCaller:
+    """Call RollingGo Hotel MCP over streamable HTTP."""
+
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        accept_language: str = "zh_CN",
+        timeout_seconds: float | None = None,
+    ):
+        self.url = url
+        self.api_key = api_key
+        self.accept_language = accept_language
+        self.timeout_seconds = timeout_seconds or get_settings().mcp_timeout_seconds
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        import anyio
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept-Language": self.accept_language,
+        }
+
+        async def _call() -> Any:
+            async with streamablehttp_client(
+                self.url,
+                headers=headers,
+                timeout=self.timeout_seconds,
+                sse_read_timeout=self.timeout_seconds,
+            ) as (read_stream, write_stream, _get_session_id):
+                async with ClientSession(read_stream, write_stream) as session:
+                    with anyio.fail_after(self.timeout_seconds):
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, arguments)
+                    return _mcp_call_result_payload(result)
+
+        return anyio.run(_call)
+
+
+class RollingGoHotelMCPClient:
+    """RollingGo Hotel MCP adapter for realtime hotel rates."""
+
+    tool_name = "searchHotels"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        url: str | None = None,
+        accept_language: str | None = None,
+        mcp_caller=None,
+    ):
+        settings = get_settings()
+        self.api_key = api_key if api_key is not None else settings.rollinggo_hotel_api_key
+        self.url = url if url is not None else settings.rollinggo_hotel_mcp_url
+        self.accept_language = accept_language or settings.rollinggo_hotel_accept_language
+        self.mcp_caller = mcp_caller or (
+            RollingGoStreamableHTTPMCPToolCaller(
+                self.url,
+                self.api_key,
+                accept_language=self.accept_language,
+            )
+            if self.url and self.api_key
+            else None
+        )
+
+    @property
+    def available(self) -> bool:
+        return bool(self.mcp_caller)
+
+    def search_hotels(
+        self,
+        *,
+        origin_query: str,
+        place: str,
+        check_in_date: str,
+        stay_nights: int = 1,
+        adult_count: int = 2,
+        room_count: int = 1,
+        child_count: int = 0,
+        star_level: int | None = None,
+        max_price_per_night: int | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if not self.mcp_caller:
+            return []
+        arguments: dict[str, Any] = {
+            "originQuery": origin_query,
+            "place": place,
+            "checkInParam": {
+                "checkInDate": check_in_date,
+                "stayNights": max(1, int(stay_nights or 1)),
+            },
+            "personParam": {
+                "adultCount": max(1, int(adult_count or 1)),
+                "roomCount": max(1, int(room_count or 1)),
+                "childCount": max(0, int(child_count or 0)),
+            },
+            "hotelTags": {},
+        }
+        if star_level is not None:
+            arguments["hotelTags"]["starLevel"] = int(star_level)
+        if max_price_per_night is not None:
+            arguments["hotelTags"]["maxPricePerNight"] = int(max_price_per_night)
+
+        start = perf_counter()
+        try:
+            payload = self.mcp_caller.call_tool(self.tool_name, arguments)
+            hotels = self._normalize_hotels(payload)[: max(1, int(limit or 5))]
+            record_api_call(
+                component="rollinggo_hotel_mcp",
+                operation=self.tool_name,
+                request_payload={**arguments, "api_key": self.api_key, "url": self.url},
+                response_payload={"hotels": hotels},
+                duration_ms=elapsed_ms(start),
+            )
+            return hotels
+        except Exception as exc:
+            record_api_call(
+                component="rollinggo_hotel_mcp",
+                operation=self.tool_name,
+                request_payload={**arguments, "api_key": self.api_key, "url": self.url},
+                error=str(exc),
+                duration_ms=elapsed_ms(start),
+            )
+            logger.warning("RollingGo Hotel MCP search failed: %s", exc)
+            return []
+
+    def _normalize_hotels(self, payload: Any) -> list[dict[str, Any]]:
+        data = _parse_mcp_payload(payload)
+        raw_items = _first_list_value(
+            data,
+            (
+                "hotelInformationList",
+                "hotel_information_list",
+                "hotels",
+                "hotelList",
+                "results",
+                "data",
+            ),
+        )
+        return [hotel for item in raw_items if isinstance(item, dict) for hotel in [self._normalize_hotel(item)] if hotel]
+
+    def _normalize_hotel(self, item: dict[str, Any]) -> dict[str, Any]:
+        price_payload = item.get("price") if isinstance(item.get("price"), dict) else {}
+        lowest_price = (
+            price_payload.get("lowestPrice")
+            or price_payload.get("amount")
+            or item.get("lowestPrice")
+            or item.get("minPrice")
+            or item.get("price")
+        )
+        return {
+            "id": str(item.get("hotelId") or item.get("id") or item.get("hotel_id") or item.get("name") or ""),
+            "name": str(item.get("name") or item.get("hotelName") or item.get("hotel_name") or ""),
+            "address": str(item.get("address") or item.get("hotelAddress") or ""),
+            "location": _normalize_location_dict(item),
+            "star_rating": _coerce_float(item.get("starRating") or item.get("star") or item.get("hotelStar")),
+            "rating": _coerce_float(item.get("rating") or item.get("score") or item.get("reviewScore")),
+            "lowest_price": _coerce_int(lowest_price),
+            "currency": str(price_payload.get("currency") or item.get("currency") or "CNY"),
+            "booking_url": str(item.get("bookingUrl") or item.get("url") or item.get("deeplink") or ""),
+            "tags": _normalize_string_list(item.get("tags") or item.get("amenities")),
+            "description": str(item.get("description") or item.get("summary") or ""),
+        }
+
+
+def _mcp_call_result_payload(result: Any) -> Any:
+    if isinstance(result, (dict, list, str)):
+        return result
+    content = getattr(result, "content", None)
+    if isinstance(content, list):
+        text_parts = [getattr(item, "text", "") for item in content if getattr(item, "text", "")]
+        if text_parts:
+            return "\n".join(text_parts)
+    structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None)
+    if structured is not None:
+        return structured
+    return result
+
+
+def _parse_mcp_payload(payload: Any) -> Any:
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"content": text}
+    return payload
+
+
+def _first_list_value(payload: Any, keys: tuple[str, ...]) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = _first_list_value(value, keys)
+            if nested:
+                return nested
+    return []
+
+
+def _normalize_location_dict(item: dict[str, Any]) -> dict[str, float] | None:
+    longitude = item.get("longitude") or item.get("lng") or item.get("lon")
+    latitude = item.get("latitude") or item.get("lat")
+    location = item.get("location")
+    if (longitude is None or latitude is None) and isinstance(location, dict):
+        longitude = location.get("longitude") or location.get("lng") or location.get("lon")
+        latitude = location.get("latitude") or location.get("lat")
+    if (longitude is None or latitude is None) and isinstance(location, str) and "," in location:
+        longitude, latitude = location.split(",", 1)
+    parsed_longitude = _coerce_float(longitude)
+    parsed_latitude = _coerce_float(latitude)
+    if parsed_longitude is None or parsed_latitude is None:
+        return None
+    return {"longitude": parsed_longitude, "latitude": parsed_latitude}
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:\.\d+)?", value)
+        if match:
+            return float(match.group(0))
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    number = _coerce_float(value)
+    return int(round(number)) if number is not None else None
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in re.split(r"[,，、|]", value) if item.strip()]
+    return []
+
+
 class TravelRequirementParser:
     """从中文自然语言里提取城市、天数、偏好和预算等级。"""
 

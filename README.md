@@ -104,6 +104,14 @@ WEB_SEARCH_MCP_COMMAND=["npx","-y","tavily-mcp"]
 WEB_SEARCH_MCP_TOOL=web_search
 ```
 
+如果需要在智能问答中查询酒店实时最低价，可配置 RollingGo Hotel MCP。配置后 QA Agent 会注册 `search_hotels` 工具，用于回答住宿推荐、酒店价格和预算内酒店筛选问题：
+
+```env
+ROLLINGGO_HOTEL_MCP_URL=你的RollingGo Hotel MCP地址
+ROLLINGGO_HOTEL_API_KEY=你的RollingGo MCP API Key
+ROLLINGGO_HOTEL_ACCEPT_LANGUAGE=zh_CN
+```
+
 RSS 源只作为长期知识库补充，可通过 `TRAVEL_FEEDS` 配置，多个 URL 用英文逗号分隔：
 
 ```env

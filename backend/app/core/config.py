@@ -52,6 +52,9 @@ class Settings:
     tavily_api_key: str | None
     tavily_max_results: int
     tavily_search_depth: str
+    rollinggo_hotel_mcp_url: str | None
+    rollinggo_hotel_api_key: str | None
+    rollinggo_hotel_accept_language: str
     jwt_secret_key: str
     jwt_algorithm: str
     jwt_expire_minutes: int
@@ -126,6 +129,9 @@ def get_settings() -> Settings:
         tavily_api_key=_env_str("TAVILY_API_KEY"),
         tavily_max_results=max(1, min(_env_int("TAVILY_MAX_RESULTS", 5), 10)),
         tavily_search_depth=_env_str("TAVILY_SEARCH_DEPTH", "basic") or "basic",
+        rollinggo_hotel_mcp_url=_env_str("ROLLINGGO_HOTEL_MCP_URL"),
+        rollinggo_hotel_api_key=_env_str("ROLLINGGO_HOTEL_API_KEY"),
+        rollinggo_hotel_accept_language=_env_str("ROLLINGGO_HOTEL_ACCEPT_LANGUAGE", "zh_CN") or "zh_CN",
         jwt_secret_key=os.getenv("JWT_SECRET_KEY", "change-me-in-production"),
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "1440")),

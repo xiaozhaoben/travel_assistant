@@ -45,11 +45,12 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
 
 from app.domain.models import TravelKnowledgeSource, TravelQAResponse
 from app.core.config import get_settings
-from app.integrations.services import AmapMCPClient
+from app.integrations.services import AmapMCPClient, RollingGoHotelMCPClient
 from app.knowledge.prompts import TRAVEL_QA_SYSTEM_PROMPT, TRAVEL_RAG_PROMPT
 from app.knowledge.vector_store import KnowledgeDocument, PostgresTravelVectorStore, stable_hash, summarize_text
 from app.researching.research import WebSearchMCPClient
 from app.tools.amap_tools import create_attraction_search_tool, create_weather_query_tool
+from app.tools.hotel_tools import create_rollinggo_hotel_search_tool
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +78,14 @@ class TravelQuestionAnsweringAgent:
         llm: Any | None = None,
         web_client: WebSearchMCPClient | None = None,
         amap_client: AmapMCPClient | None = None,
+        hotel_client: RollingGoHotelMCPClient | None = None,
         checkpointer: Any | None = None,
     ):
         self.vector_store = vector_store
         self.llm = llm
         self.web_client = web_client or WebSearchMCPClient()
         self.amap_client = amap_client
+        self.hotel_client = hotel_client or RollingGoHotelMCPClient()
         self.checkpointer = checkpointer
         self.tools = self._build_tools()
         self.langgraph_agent = self._safe_create_react_agent()
@@ -292,6 +295,11 @@ class TravelQuestionAnsweringAgent:
                 )
             except Exception as exc:
                 logger.warning("Amap tools unavailable for travel QA: %s", exc)
+        if self.hotel_client is not None and getattr(self.hotel_client, "available", False):
+            try:
+                tools.append(create_rollinggo_hotel_search_tool(self.hotel_client))
+            except Exception as exc:
+                logger.warning("RollingGo hotel tool unavailable for travel QA: %s", exc)
         return tools
 
     def _build_summary_hook(self):

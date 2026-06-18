@@ -1,5 +1,6 @@
-import sys
 import os
+import logging
+import sys
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -25,5 +26,20 @@ for key in (
     "TAVILY_API_KEY",
     "TAVILY_MAX_RESULTS",
     "TAVILY_SEARCH_DEPTH",
+    "ROLLINGGO_HOTEL_MCP_URL",
+    "ROLLINGGO_HOTEL_API_KEY",
+    "ROLLINGGO_HOTEL_ACCEPT_LANGUAGE",
 ):
     os.environ[key] = ""
+
+for logger_name in (
+    "langsmith",
+    "langsmith.client",
+    "langsmith._internal._background_thread",
+    "urllib3",
+    "urllib3.connectionpool",
+):
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+if os.getenv("RUN_LANGSMITH_EVAL", "").lower() not in {"1", "true", "yes", "on"}:
+    os.environ["LANGSMITH_TRACING"] = "false"

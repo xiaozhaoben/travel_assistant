@@ -693,6 +693,36 @@ def test_travel_qa_agent_adds_amap_tools_when_configured(monkeypatch):
     assert "search_attractions" in tool_names
 
 
+def test_travel_qa_agent_adds_rollinggo_hotel_tool_when_configured(monkeypatch):
+    from app.knowledge import qa_agent as qa_agent_module
+    from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
+    from app.researching.research import WebSearchMCPClient
+
+    captured = {}
+
+    class FakeRollingGoClient:
+        available = True
+
+        def search_hotels(self, *args, **kwargs):
+            raise AssertionError("tool construction should not call RollingGo search")
+
+    def fake_create_react_agent(**kwargs):
+        captured["react_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(qa_agent_module, "create_react_agent", fake_create_react_agent)
+
+    TravelQuestionAnsweringAgent(
+        FakeTravelVectorStore(),
+        llm=FakeLLM("unused"),
+        web_client=WebSearchMCPClient(command=""),
+        hotel_client=FakeRollingGoClient(),
+    )
+
+    tool_names = {tool.name for tool in captured["react_kwargs"]["tools"]}
+    assert "search_hotels" in tool_names
+
+
 def test_travel_qa_agent_uses_react_agent_when_knowledge_context_is_empty(monkeypatch):
     from app.knowledge.qa_agent import TravelQuestionAnsweringAgent
     from app.researching.research import WebSearchMCPClient
@@ -1782,6 +1812,54 @@ def test_amap_client_uses_city_hotel_keywords_for_hotel_search():
     assert hotels[0].name == "珠海中海铂尔曼酒店"
     assert caller.calls[0]["arguments"]["keywords"] == "珠海舒适型酒店"
     assert caller.calls[1]["arguments"]["keywords"] == "珠海酒店"
+
+
+def test_rollinggo_hotel_client_searches_hotels_with_realtime_price():
+    from app.integrations.services import RollingGoHotelMCPClient
+
+    caller = FakeMCPCaller(
+        [
+            {
+                "hotelInformationList": [
+                    {
+                        "hotelId": 43615,
+                        "name": "北京天伦王朝酒店",
+                        "address": "王府井大街50号",
+                        "latitude": 39.917748,
+                        "longitude": 116.412249,
+                        "starRating": 5.0,
+                        "price": {
+                            "hasPrice": True,
+                            "currency": "CNY",
+                            "lowestPrice": 626.0,
+                        },
+                        "bookingUrl": "https://rollinggo.cn/hotel/43615",
+                        "tags": ["近商圈", "免费 WiFi"],
+                    }
+                ]
+            }
+        ]
+    )
+    client = RollingGoHotelMCPClient(api_key="mcp_test", mcp_caller=caller)
+
+    hotels = client.search_hotels(
+        origin_query="北京王府井附近酒店多少钱",
+        place="北京王府井",
+        check_in_date="2026-06-20",
+        stay_nights=1,
+        adult_count=2,
+        max_price_per_night=800,
+        limit=3,
+    )
+
+    assert caller.calls[0]["tool_name"] == "searchHotels"
+    assert caller.calls[0]["arguments"]["place"] == "北京王府井"
+    assert caller.calls[0]["arguments"]["checkInParam"]["checkInDate"] == "2026-06-20"
+    assert caller.calls[0]["arguments"]["hotelTags"]["maxPricePerNight"] == 800
+    assert hotels[0]["name"] == "北京天伦王朝酒店"
+    assert hotels[0]["lowest_price"] == 626
+    assert hotels[0]["currency"] == "CNY"
+    assert hotels[0]["booking_url"] == "https://rollinggo.cn/hotel/43615"
 
 
 def test_plan_log_recorder_captures_api_calls_and_redacts_keys():
