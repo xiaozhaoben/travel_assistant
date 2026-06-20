@@ -108,41 +108,38 @@ function formatDate(value: string) {
 
 <style scoped>
 .reports-container {
-  min-height: calc(100vh - 80px);
-  max-width: 1320px;
+  min-height: calc(100vh - 64px);
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 32px 24px;
+  padding: 32px 32px;
   animation: fadeInUp 0.6s ease-out;
 }
 
 .reports-header {
-  margin-bottom: 28px;
+  margin-bottom: 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 16px;
 }
-
 .reports-header h1 {
   margin: 0;
-  color: var(--color-forest);
-  font-size: 36px;
+  color: var(--text-primary);
+  font-size: 30px;
   font-weight: 800;
   font-family: var(--font-display);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
-
 .reports-header p {
-  margin: 8px 0 0;
-  color: var(--color-text-secondary);
-  font-size: 15px;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 
 @media (max-width: 768px) {
   .reports-container {
-    padding: 20px 16px;
+    padding: 16px;
   }
-
   .reports-header {
     flex-direction: column;
     align-items: stretch;

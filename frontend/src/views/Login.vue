@@ -2,9 +2,11 @@
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <span class="login-brand-icon">◈</span>
-        <h1>旅行规划工作台</h1>
-        <p>登录后同步您的会话历史</p>
+        <div class="login-brand-badge">
+          <span class="login-brand-icon">T</span>
+        </div>
+        <h1>TravelPlanner</h1>
+        <p>登录后同步您的会话历史与行程</p>
       </div>
 
       <a-tabs v-model:activeKey="activeTab" centered>
@@ -25,7 +27,7 @@
               <a-input-password v-model:value="loginForm.password" placeholder="请输入密码" size="large" />
             </a-form-item>
             <a-form-item>
-              <a-button type="primary" html-type="submit" block size="large" :loading="loading">
+              <a-button type="primary" html-type="submit" block size="large" :loading="loading" class="login-submit-btn">
                 登录
               </a-button>
             </a-form-item>
@@ -66,7 +68,7 @@
               <a-input-password v-model:value="registerForm.confirmPassword" placeholder="再次输入密码" size="large" />
             </a-form-item>
             <a-form-item>
-              <a-button type="primary" html-type="submit" block size="large" :loading="loading">
+              <a-button type="primary" html-type="submit" block size="large" :loading="loading" class="login-submit-btn">
                 注册
               </a-button>
             </a-form-item>
@@ -134,63 +136,86 @@ async function handleRegister() {
 
 <style scoped>
 .login-page {
-  min-height: calc(100vh - 72px);
+  min-height: calc(100vh - 64px);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--color-cream);
+  background:
+    radial-gradient(ellipse 60% 50% at 30% 20%, rgba(249, 115, 22, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 40% at 80% 80%, rgba(6, 182, 212, 0.05) 0%, transparent 60%),
+    var(--surface);
   padding: 32px 16px;
 }
 
 .login-card {
   width: 100%;
-  max-width: 420px;
-  background: #fff;
-  border-radius: var(--radius-md, 12px);
+  max-width: 400px;
+  background: var(--card);
+  border-radius: var(--radius-2xl);
   padding: 40px 36px 28px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08);
-  border: 1px solid var(--color-border-light, #eee);
+  box-shadow: var(--shadow-xl);
+  border: 1px solid var(--border-light);
+  animation: scaleIn 0.4s ease-out;
 }
 
 .login-header {
   text-align: center;
-  margin-bottom: 28px;
+  margin-bottom: 32px;
 }
 
+.login-brand-badge {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(135deg, var(--accent), #F59E0B);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 24px rgba(249, 115, 22, 0.3);
+}
 .login-brand-icon {
-  font-size: 36px;
-  color: var(--color-terracotta, #c67a5c);
-  display: block;
-  margin-bottom: 8px;
+  font-size: 24px;
+  font-weight: 900;
+  color: #fff;
+  font-family: var(--font-display);
 }
 
 .login-header h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 800;
+  font-family: var(--font-display);
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.login-header p {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--color-forest-dark, #1a3a34);
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
-.login-header p {
-  margin: 6px 0 0;
-  color: var(--color-text-secondary, #888);
-  font-size: 14px;
+.login-submit-btn {
+  height: 48px !important;
+  border-radius: var(--radius-lg) !important;
+  font-weight: 700 !important;
+  font-size: 15px !important;
 }
 
 .login-footer {
   text-align: center;
   margin-top: 20px;
   padding-top: 16px;
-  border-top: 1px solid var(--color-border-light, #eee);
+  border-top: 1px solid var(--border-light);
 }
-
 .login-footer a {
-  color: var(--color-forest, #2d6a5a);
+  color: var(--text-secondary);
   text-decoration: none;
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: color var(--transition-fast);
 }
-
 .login-footer a:hover {
-  text-decoration: underline;
+  color: var(--accent);
 }
 </style>

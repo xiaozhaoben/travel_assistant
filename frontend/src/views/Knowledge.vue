@@ -306,9 +306,9 @@ onBeforeUnmount(clearIngestJobPolling)
 
 <style scoped>
 .knowledge-page {
-  min-height: calc(100vh - 72px);
-  background: var(--color-cream);
-  color: var(--color-text-primary);
+  min-height: calc(100vh - 64px);
+  background: var(--surface);
+  color: var(--text-primary);
 }
 
 .knowledge-header {
@@ -316,110 +316,114 @@ onBeforeUnmount(clearIngestJobPolling)
   justify-content: space-between;
   align-items: flex-end;
   gap: 24px;
-  padding: 36px 48px 24px;
-  background: var(--color-warm-white);
-  border-bottom: 1px solid var(--color-border);
+  padding: 32px 40px 20px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
 }
-
 .knowledge-eyebrow {
-  margin: 0 0 6px;
-  font-size: 12px;
+  margin: 0 0 4px;
+  font-size: 11px;
   font-weight: 700;
-  color: var(--color-terracotta);
+  color: var(--accent);
   text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
-
 .knowledge-header h1 {
   margin: 0;
-  font-size: 32px;
+  font-size: 28px;
   font-family: var(--font-display);
-  color: var(--color-forest-dark);
+  color: var(--text-primary);
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
-
 .knowledge-header p {
-  margin: 8px 0 0;
-  color: var(--color-text-secondary);
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13.5px;
 }
 
 .knowledge-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
-  gap: 24px;
-  padding: 24px 48px 40px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
+  gap: 20px;
+  padding: 24px 40px 40px;
 }
 
 .knowledge-ingest,
 .knowledge-search {
-  background: #fff;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
-  padding: 20px;
+  background: var(--card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xl);
+  padding: 22px;
   box-shadow: var(--shadow-sm);
 }
 
 .knowledge-dropzone {
   display: grid;
-  grid-template-columns: minmax(190px, 240px) 42px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: minmax(160px, 200px) 40px minmax(0, 1fr);
+  gap: 16px;
   align-items: center;
   padding: 20px;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-sand-light);
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  transition: border-color var(--transition-base);
 }
-
+.knowledge-dropzone:hover {
+  border-color: var(--accent);
+}
 .knowledge-dropzone > span {
-  font-size: 32px;
-  color: var(--color-terracotta);
+  font-size: 28px;
+  color: var(--accent);
 }
-
 .knowledge-dropzone h2 {
   margin: 0 0 4px;
-  font-size: 18px;
-  color: var(--color-forest-dark);
+  font-size: 16px;
+  font-family: var(--font-display);
+  color: var(--text-primary);
+  font-weight: 700;
 }
-
 .knowledge-dropzone p,
 .knowledge-note,
 .knowledge-search-header p {
   margin: 0;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
   line-height: 1.6;
+  font-size: 13px;
 }
 
 .knowledge-preview,
 .knowledge-note {
-  margin-top: 16px;
+  margin-top: 14px;
   padding: 14px;
-  border-radius: var(--radius-sm);
-  background: var(--color-sand-light);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border-light);
 }
-
 .knowledge-preview {
-  max-height: 180px;
+  max-height: 160px;
   overflow: auto;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
   white-space: pre-wrap;
   line-height: 1.65;
+  font-size: 13px;
 }
 
 .knowledge-url-field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
   font-weight: 600;
 }
-
 .knowledge-actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: 18px;
+  margin-top: 16px;
 }
-
 .knowledge-result-alert {
-  margin-top: 18px;
+  margin-top: 16px;
 }
 
 .knowledge-search-header,
@@ -428,79 +432,84 @@ onBeforeUnmount(clearIngestJobPolling)
 .knowledge-result-card footer {
   display: flex;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
 }
-
 .knowledge-search-header {
   align-items: flex-start;
   margin-bottom: 16px;
 }
-
 .knowledge-search-header h2 {
   margin: 0;
-  font-size: 22px;
-  color: var(--color-forest-dark);
+  font-size: 18px;
+  font-family: var(--font-display);
+  color: var(--text-primary);
+  font-weight: 700;
 }
-
 .knowledge-search-controls {
-  margin-top: 14px;
+  margin-top: 12px;
 }
-
 .knowledge-search-controls label {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 .knowledge-results {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 18px;
+  gap: 10px;
+  margin-top: 16px;
 }
 
 .knowledge-result-card {
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
   padding: 14px;
-  background: var(--color-warm-white);
+  background: var(--surface);
+  transition: box-shadow var(--transition-base);
 }
-
+.knowledge-result-card:hover {
+  box-shadow: var(--shadow-sm);
+}
+.knowledge-result-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 .knowledge-result-section {
-  margin: 6px 0;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
-
 .knowledge-result-content {
   margin: 0;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
   line-height: 1.65;
   white-space: pre-wrap;
+  font-size: 13px;
 }
-
 .knowledge-result-card footer {
   justify-content: flex-start;
-  margin-top: 10px;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  gap: 10px;
 }
 
 @media (max-width: 980px) {
   .knowledge-header {
-    padding: 24px 20px;
+    padding: 20px 16px;
     flex-direction: column;
     align-items: flex-start;
   }
-
   .knowledge-shell {
     grid-template-columns: 1fr;
-    padding: 18px 20px 32px;
+    padding: 16px 16px 32px;
   }
 }
-
 @media (max-width: 640px) {
   .knowledge-dropzone,
   .knowledge-search-controls {

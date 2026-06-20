@@ -2,8 +2,8 @@
   <div class="home-container">
     <div class="page-header">
       <div class="icon-wrapper"><CompassOutlined /></div>
-      <h1 class="page-title">旅行规划工作台</h1>
-      <p class="page-subtitle">规划行程 · 沉淀旅行资讯 · 回答目的地问题</p>
+      <h1 class="page-title">TravelPlanner</h1>
+      <p class="page-subtitle">多Agent协作 · 高德地图MCP · 智能行程规划</p>
     </div>
 
     <a-card class="form-card" :bordered="false">
@@ -344,3 +344,12 @@ async function handleSubmit() {
   }
 }
 </script>
+
+<style scoped>
+.form-card {
+  padding: 32px;
+}
+.form-card :deep(.ant-card-body) {
+  padding: 0;
+}
+</style>

@@ -21,11 +21,6 @@
         </template>
       </div>
 
-<!--      <a-button block :loading="newsIngesting" class="qa-refresh-button" @click="handleIngestNews">-->
-<!--        <template #icon><SyncOutlined /></template>-->
-<!--        更新旅行资讯-->
-<!--      </a-button>-->
-
       <div class="qa-conversation-list">
         <a-empty v-if="!loadingConversations && conversations.length === 0" description="暂无历史对话" />
         <button
@@ -44,12 +39,24 @@
     <main class="qa-main">
       <section ref="threadRef" class="qa-thread">
         <div v-if="messages.length === 0" class="qa-empty-state">
-          <MessageOutlined />
+          <div class="qa-empty-icon">
+            <MessageOutlined />
+          </div>
           <h2>问我目的地、预约、交通、避坑和路线取舍</h2>
+          <p class="qa-empty-hint">我会从知识库和实时搜索中为你找到最佳答案</p>
           <div class="qa-prompts">
-            <button @click="usePrompt('端午去南京三天，有哪些预约和错峰建议？')">南京端午预约</button>
-            <button @click="usePrompt('北京亲子三天，哪些博物馆适合提前安排？')">北京亲子博物馆</button>
-            <button @click="usePrompt('去广州看历史文化和夜景，怎么避开太奔波？')">广州慢节奏</button>
+            <button @click="usePrompt('端午去南京三天，有哪些预约和错峰建议？')">
+              <span class="qa-prompt-icon">🏛</span>
+              <span>南京端午预约</span>
+            </button>
+            <button @click="usePrompt('北京亲子三天，哪些博物馆适合提前安排？')">
+              <span class="qa-prompt-icon">🎨</span>
+              <span>北京亲子博物馆</span>
+            </button>
+            <button @click="usePrompt('去广州看历史文化和夜景，怎么避开太奔波？')">
+              <span class="qa-prompt-icon">🌃</span>
+              <span>广州慢节奏</span>
+            </button>
           </div>
         </div>
 
@@ -90,18 +97,20 @@
       </section>
 
       <section class="qa-composer">
-        <a-textarea
-          v-model:value="question"
-          :rows="3"
-          placeholder="继续追问，例如：那这些场馆分别怎么预约？"
-          @keydown="handleComposerKeydown"
-        />
-        <div class="qa-composer-actions">
-          <span>{{ activeConversationId ? '正在使用当前会话记忆' : '发送后会创建新会话' }}</span>
-          <a-button type="primary" :loading="asking" @click="handleAsk">
-            <template #icon><SendOutlined /></template>
-            发送
-          </a-button>
+        <div class="qa-composer-inner">
+          <a-textarea
+            v-model:value="question"
+            :rows="3"
+            placeholder="继续追问，例如：那这些场馆分别怎么预约？"
+            @keydown="handleComposerKeydown"
+          />
+          <div class="qa-composer-actions">
+            <span class="qa-composer-hint">{{ activeConversationId ? '正在使用当前会话记忆' : '发送后会创建新会话' }}</span>
+            <a-button type="primary" :loading="asking" @click="handleAsk">
+              <template #icon><SendOutlined /></template>
+              发送
+            </a-button>
+          </div>
         </div>
       </section>
     </main>
@@ -111,7 +120,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { MessageOutlined, PlusOutlined, SendOutlined, SyncOutlined } from '@ant-design/icons-vue'
+import { MessageOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons-vue'
 import {
   getQAConversation,
   ingestTravelNews,
@@ -170,7 +179,7 @@ async function loadConversation(conversationId: string) {
     activeConversationId.value = detail.id
     messages.value = detail.messages
     await nextTick()
-    threadRef.value?.scrollTo({ top: threadRef.value.scrollHeight })
+    threadRef.value?.scrollTo({ top: threadRef.value.scrollHeight, behavior: 'smooth' })
   } catch (error: any) {
     message.error(error.message || '会话详情加载失败')
   }
@@ -343,20 +352,21 @@ function formatDate(value: string): string {
 
 <style scoped>
 .qa-page {
-  height: calc(100vh - 72px);
+  height: calc(100vh - 64px);
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
-  background: var(--color-cream);
+  grid-template-columns: 320px minmax(0, 1fr);
+  background: var(--surface);
   overflow: hidden;
 }
 
+/* ─── Sidebar ──────────────────────────────────────────────── */
 .qa-sidebar {
-  border-right: 1px solid var(--color-border);
-  background: var(--color-warm-white);
-  padding: 24px;
+  border-right: 1px solid var(--border);
+  background: var(--card);
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   height: 100%;
   overflow-y: auto;
 }
@@ -365,81 +375,90 @@ function formatDate(value: string): string {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
-
 .qa-sidebar-header h1 {
   margin: 0;
-  font-size: 24px;
+  font-size: 20px;
   font-family: var(--font-display);
-  color: var(--color-forest-dark);
+  color: var(--text-primary);
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
-
-.qa-sidebar-header p,
-.qa-identity-caption {
+.qa-sidebar-header p {
   margin: 4px 0 0;
-  color: var(--color-text-secondary);
-  font-size: 13px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
+.qa-identity-caption {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-radius: var(--radius-md);
+}
 .qa-identity-caption a {
-  color: var(--color-forest);
+  color: var(--accent);
   text-decoration: none;
+  font-weight: 500;
 }
-
-.qa-identity-caption a:hover {
-  text-decoration: underline;
-}
-
-.qa-refresh-button {
-  border-color: var(--color-border);
-}
+.qa-identity-caption a:hover { text-decoration: underline; }
 
 .qa-conversation-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   overflow: auto;
+  flex: 1;
 }
 
 .qa-conversation-item {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--color-border-light);
-  background: #fff;
-  border-radius: var(--radius-sm);
-  padding: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
   cursor: pointer;
   transition: all var(--transition-fast);
+  font-family: var(--font-body);
 }
-
+.qa-conversation-item:hover {
+  background: var(--surface);
+  border-color: var(--border-light);
+}
 .qa-conversation-item span {
   display: block;
-  color: var(--color-text-primary);
+  color: var(--text-primary);
   font-weight: 600;
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .qa-conversation-item small {
   display: block;
   margin-top: 4px;
-  color: var(--color-text-tertiary);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+.qa-conversation-item.active {
+  background: var(--accent-bg);
+  border-color: rgba(249, 115, 22, 0.2);
+}
+.qa-conversation-item.active span {
+  color: var(--accent-hover);
 }
 
-.qa-conversation-item.active,
-.qa-conversation-item:hover {
-  border-color: var(--color-forest-light);
-  background: var(--color-sand-light);
-}
-
+/* ─── Main Area ────────────────────────────────────────────── */
 .qa-main {
   min-width: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   height: 100%;
   overflow: hidden;
+  background: var(--surface);
 }
 
 .qa-thread {
@@ -447,122 +466,167 @@ function formatDate(value: string): string {
   overflow: auto;
 }
 
+/* ─── Empty State ──────────────────────────────────────────── */
 .qa-empty-state {
-  max-width: 760px;
-  margin: 12vh auto 0;
+  max-width: 640px;
+  margin: 10vh auto 0;
   text-align: center;
-  color: var(--color-forest-dark);
 }
-
-.qa-empty-state > span {
-  font-size: 44px;
-  color: var(--color-terracotta);
+.qa-empty-icon {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 20px;
+  border-radius: var(--radius-2xl);
+  background: linear-gradient(135deg, var(--accent-bg), #FEF3C7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  color: var(--accent);
 }
-
 .qa-empty-state h2 {
-  margin: 16px 0 24px;
-  font-size: 28px;
+  margin: 0 0 8px;
+  font-size: 24px;
   font-family: var(--font-display);
+  color: var(--text-primary);
+  font-weight: 700;
 }
-
+.qa-empty-hint {
+  margin: 0 0 28px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
 .qa-prompts {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
-
 .qa-prompts button {
-  border: 1px solid var(--color-border);
-  background: #fff;
-  border-radius: var(--radius-sm);
-  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  border-radius: var(--radius-xl);
+  padding: 18px 14px;
   cursor: pointer;
-  color: var(--color-forest-dark);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 500;
+  transition: all var(--transition-base);
+  box-shadow: var(--shadow-xs);
+}
+.qa-prompts button:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+.qa-prompt-icon {
+  font-size: 24px;
+  line-height: 1;
 }
 
+/* ─── Messages ─────────────────────────────────────────────── */
 .qa-message-row {
   display: flex;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
+  animation: fadeInUp 0.3s ease-out;
 }
-
 .qa-message-row.user {
   justify-content: flex-end;
 }
 
 .qa-message-bubble {
-  max-width: min(760px, 82%);
-  border-radius: var(--radius-sm);
-  padding: 14px 16px;
-  background: #fff;
-  border: 1px solid var(--color-border-light);
-  box-shadow: var(--shadow-sm);
+  max-width: min(720px, 80%);
+  border-radius: var(--radius-xl);
+  padding: 14px 18px;
+  background: var(--card);
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-xs);
 }
-
 .qa-message-row.user .qa-message-bubble {
-  background: var(--color-forest);
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
   color: #fff;
+  border: none;
+}
+.qa-message-row.user .qa-message-content {
+  color: rgba(255, 255, 255, 0.95);
 }
 
 .qa-message-content {
   white-space: pre-wrap;
-  line-height: 1.7;
+  line-height: 1.75;
   word-break: break-word;
+  font-size: 14px;
 }
-
 .qa-message-content :deep(.qa-inline-link) {
-  color: #1677ff;
+  color: var(--secondary);
   text-decoration: underline;
   word-break: break-all;
 }
-
 .qa-message-content :deep(.qa-inline-link:hover) {
-  color: #4096ff;
+  color: var(--accent);
 }
 
 .qa-source-link {
   text-decoration: none;
   cursor: pointer;
 }
-
-.qa-source-link:hover :deep(.ant-tag) {
-  opacity: 0.8;
-}
+.qa-source-link:hover :deep(.ant-tag) { opacity: 0.8; }
 
 .qa-summary-collapse {
   margin-bottom: 10px;
-  border-radius: var(--radius-sm) !important;
-  background: var(--color-sand-light) !important;
-  font-size: 13px;
+  border-radius: var(--radius-md) !important;
+  background: var(--surface) !important;
+  font-size: 12.5px;
 }
-
 .qa-summary-collapse :deep(.ant-collapse-header) {
   padding: 6px 12px !important;
-  font-weight: 500;
-  color: var(--color-forest-dark);
+  font-weight: 600;
+  color: var(--text-primary);
 }
-
 .qa-summary-content {
   white-space: pre-wrap;
   line-height: 1.6;
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
 }
 
 .qa-message-meta,
 .qa-sources {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   margin-top: 10px;
   align-items: center;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
 
+/* ─── Composer ─────────────────────────────────────────────── */
 .qa-composer {
-  border-top: 1px solid var(--color-border);
-  padding: 18px 32px 24px;
-  background: var(--color-warm-white);
+  border-top: 1px solid var(--border);
+  padding: 16px 32px 24px;
+  background: var(--card);
+}
+.qa-composer-inner {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.qa-composer :deep(.ant-input) {
+  border-radius: var(--radius-xl) !important;
+  padding: 14px 18px !important;
+  font-size: 14px !important;
+  resize: none;
+  box-shadow: var(--shadow-sm);
+  border-color: var(--border) !important;
+}
+.qa-composer :deep(.ant-input:focus),
+.qa-composer :deep(.ant-input-focused) {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.1), var(--shadow-sm) !important;
 }
 
 .qa-composer-actions {
@@ -570,29 +634,29 @@ function formatDate(value: string): string {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  margin-top: 12px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
+  margin-top: 10px;
+}
+.qa-composer-hint {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {
   .qa-page {
     grid-template-columns: 1fr;
   }
-
   .qa-sidebar {
     border-right: none;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--border);
+    max-height: 200px;
   }
-
   .qa-prompts {
     grid-template-columns: 1fr;
   }
-
   .qa-thread,
   .qa-composer {
-    padding-left: 18px;
-    padding-right: 18px;
+    padding-left: 16px;
+    padding-right: 16px;
   }
 }
 </style>

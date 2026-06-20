@@ -751,13 +751,13 @@ function escapeHtml(value: string) {
 
 <style scoped>
 .result-container {
-  padding: 24px;
-  background: var(--color-cream);
+  padding: 24px 32px;
+  background: var(--surface);
 }
 
 .result-header {
-  max-width: 1440px;
-  margin: 0 auto 28px;
+  max-width: 1280px;
+  margin: 0 auto 24px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -765,14 +765,14 @@ function escapeHtml(value: string) {
 }
 
 .content-wrapper {
-  max-width: 1440px;
+  max-width: 1280px;
   margin: 0 auto;
   display: flex;
-  gap: 28px;
+  gap: 24px;
 }
 
 .side-nav {
-  width: 240px;
+  width: 220px;
   flex-shrink: 0;
 }
 
@@ -783,15 +783,15 @@ function escapeHtml(value: string) {
 
 .top-info-section {
   display: grid;
-  grid-template-columns: 420px minmax(0, 1fr);
-  gap: 24px;
-  margin-bottom: 24px;
+  grid-template-columns: 380px minmax(0, 1fr);
+  gap: 20px;
+  margin-bottom: 20px;
 }
 
 .left-info {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
 }
 
 @media (max-width: 1100px) {
@@ -806,7 +806,7 @@ function escapeHtml(value: string) {
 
   .left-info,
   .map-card {
-    margin-bottom: 24px;
+    margin-bottom: 20px;
   }
 }
 
@@ -818,7 +818,7 @@ function escapeHtml(value: string) {
   .result-header {
     flex-direction: column;
     align-items: stretch;
-    gap: 14px;
+    gap: 12px;
   }
 }
 </style>
