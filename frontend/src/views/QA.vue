@@ -21,10 +21,10 @@
         </template>
       </div>
 
-      <a-button block :loading="newsIngesting" class="qa-refresh-button" @click="handleIngestNews">
-        <template #icon><SyncOutlined /></template>
-        更新旅行资讯
-      </a-button>
+<!--      <a-button block :loading="newsIngesting" class="qa-refresh-button" @click="handleIngestNews">-->
+<!--        <template #icon><SyncOutlined /></template>-->
+<!--        更新旅行资讯-->
+<!--      </a-button>-->
 
       <div class="qa-conversation-list">
         <a-empty v-if="!loadingConversations && conversations.length === 0" description="暂无历史对话" />
