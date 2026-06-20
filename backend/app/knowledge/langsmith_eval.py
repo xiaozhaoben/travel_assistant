@@ -25,6 +25,10 @@ def quiet_langsmith_eval_loggers(level: int = logging.WARNING) -> None:
         logging.getLogger(logger_name).setLevel(level)
 
 
+def dataset_has_examples(client: Any, dataset_name: str) -> bool:
+    return next(client.list_examples(dataset_name=dataset_name, limit=1), None) is not None
+
+
 def create_travel_qa_target(qa_agent: Any, default_top_k: int = 5) -> Callable[[dict], dict]:
     def target(inputs: dict) -> dict:
         question = question_from_inputs(inputs)

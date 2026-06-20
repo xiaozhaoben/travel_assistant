@@ -4,7 +4,14 @@ import logging
 import pytest
 
 from app.domain.models import TravelQAResponse
-from app.knowledge.langsmith_eval import create_travel_qa_target, exact_match, quiet_langsmith_eval_loggers
+from app.knowledge.langsmith_eval import (
+    DEFAULT_DATASET_NAME,
+    DEFAULT_EXPERIMENT_PREFIX,
+    create_travel_qa_target,
+    dataset_has_examples,
+    exact_match,
+    quiet_langsmith_eval_loggers,
+)
 
 
 class FakeQAAgent:
@@ -34,6 +41,24 @@ def test_quiet_langsmith_eval_loggers_suppresses_third_party_debug_logs():
     assert logging.getLogger("langsmith.client").level == logging.WARNING
     assert logging.getLogger("langsmith._internal._background_thread").level == logging.WARNING
     assert logging.getLogger("urllib3.connectionpool").level == logging.WARNING
+
+
+def test_dataset_has_examples_checks_for_at_least_one_example():
+    class FakeClient:
+        def __init__(self, examples):
+            self.examples = examples
+            self.calls = []
+
+        def list_examples(self, **kwargs):
+            self.calls.append(kwargs)
+            return iter(self.examples)
+
+    populated = FakeClient([object()])
+    empty = FakeClient([])
+
+    assert dataset_has_examples(populated, "travel_eval") is True
+    assert dataset_has_examples(empty, "travel_eval") is False
+    assert populated.calls == [{"dataset_name": "travel_eval", "limit": 1}]
 
 
 def test_langsmith_target_calls_travel_qa_agent_with_question_inputs():
@@ -80,21 +105,25 @@ def test_langsmith_evaluates_travel_qa_system():
 
     from app.knowledge.langsmith_eval import create_default_travel_qa_target
 
-    dataset_name = os.getenv("LANGSMITH_TRAVEL_QA_DATASET", "travel_test")
-    experiment_prefix = os.getenv("LANGSMITH_TRAVEL_QA_EXPERIMENT_PREFIX", "travel_test experiment")
+    dataset_name = os.getenv("LANGSMITH_TRAVEL_QA_DATASET", DEFAULT_DATASET_NAME)
+    experiment_prefix = os.getenv("LANGSMITH_TRAVEL_QA_EXPERIMENT_PREFIX", DEFAULT_EXPERIMENT_PREFIX)
 
     quiet_langsmith_eval_loggers()
     client = Client()
     client.read_dataset(dataset_name=dataset_name)
+    if not dataset_has_examples(client, dataset_name):
+        pytest.skip(f"LangSmith dataset {dataset_name!r} has no examples to evaluate.")
 
-    results = evaluate(
-        create_default_travel_qa_target(),
-        data=dataset_name,
-        evaluators=[exact_match],
-        experiment_prefix=experiment_prefix,
-        client=client,
-    )
-    client.flush()
-    client.session.close()
+    try:
+        results = evaluate(
+            create_default_travel_qa_target(),
+            data=dataset_name,
+            evaluators=[exact_match],
+            experiment_prefix=experiment_prefix,
+            client=client,
+        )
+    finally:
+        client.flush()
+        client.session.close()
 
     assert results is not None
