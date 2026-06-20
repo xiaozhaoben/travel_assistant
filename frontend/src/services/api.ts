@@ -27,9 +27,10 @@ import type {
   TripReportSummary,
 } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+const _rtConfig = (window as any).__APP_CONFIG__ || {}
+const API_BASE_URL = _rtConfig.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || ''
 const DEFAULT_API_TIMEOUT_MS = 300000
-const API_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS || DEFAULT_API_TIMEOUT_MS)
+const API_TIMEOUT_MS = Number(_rtConfig.API_TIMEOUT_MS || import.meta.env.VITE_API_TIMEOUT_MS || DEFAULT_API_TIMEOUT_MS)
 const TRIP_PLAN_TIMEOUT_MESSAGE = '行程生成耗时较长，请稍后在历史报表获取。'
 
 const apiClient = axios.create({

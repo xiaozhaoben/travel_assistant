@@ -25,6 +25,9 @@ services:
         VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
         VITE_AMAP_WEB_JS_KEY: ${VITE_AMAP_WEB_JS_KEY:-}
         VITE_AMAP_SECURITY_JS_CODE: ${VITE_AMAP_SECURITY_JS_CODE:-}
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8010}
+      VITE_API_TIMEOUT_MS: ${VITE_API_TIMEOUT_MS:-300000}
     ports:
       - "8080:80"
     depends_on:
