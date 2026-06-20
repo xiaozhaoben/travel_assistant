@@ -66,7 +66,12 @@
           <a-list :data-source="planningResult.research_context" size="small">
             <template #renderItem="{ item }">
               <a-list-item>
-                <a-list-item-meta :title="item.title" :description="item.summary" />
+                <a-list-item-meta :description="item.summary">
+                  <template #title>
+                    <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+                    <span v-else>{{ item.title }}</span>
+                  </template>
+                </a-list-item-meta>
                 <a-tag>{{ item.source }}</a-tag>
               </a-list-item>
             </template>

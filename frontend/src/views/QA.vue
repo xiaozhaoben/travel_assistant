@@ -61,9 +61,9 @@
                   <div class="qa-summary-content">{{ extractSummary(messageItem.content).summary }}</div>
                 </a-collapse-panel>
               </a-collapse>
-              <div class="qa-message-content">{{ extractSummary(messageItem.content).main }}</div>
+              <div class="qa-message-content" v-html="linkifyContent(extractSummary(messageItem.content).main)"></div>
             </template>
-            <div v-else class="qa-message-content">{{ messageItem.content }}</div>
+            <div v-else class="qa-message-content" v-html="linkifyContent(messageItem.content)"></div>
             <div v-if="messageItem.role === 'assistant'" class="qa-message-meta">
               <a-tag :color="generationModeColor(messageItem.generation_mode)">
                 {{ generationModeText(messageItem.generation_mode) }}
@@ -72,9 +72,18 @@
               <span>{{ messageItem.retrieved_count }} 条资料</span>
             </div>
             <div v-if="messageItem.sources?.length" class="qa-sources">
-              <a-tag v-for="source in messageItem.sources.slice(0, 4)" :key="source.title" color="blue">
-                {{ source.title }}
-              </a-tag>
+              <template v-for="source in messageItem.sources.slice(0, 4)" :key="source.title">
+                <a
+                  v-if="source.url"
+                  :href="source.url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="qa-source-link"
+                >
+                  <a-tag color="blue">{{ source.title }}</a-tag>
+                </a>
+                <a-tag v-else color="blue">{{ source.title }}</a-tag>
+              </template>
             </div>
           </div>
         </div>
@@ -308,6 +317,20 @@ async function handleIngestNews() {
   }
 }
 
+function linkifyContent(text: string): string {
+  if (!text) return ''
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+  return escaped.replace(
+    /(https?:\/\/[^\s<>&"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer" class="qa-inline-link">$1</a>',
+  )
+}
+
 function formatDate(value: string): string {
   return new Date(value).toLocaleString('zh-CN', {
     month: '2-digit',
@@ -484,6 +507,25 @@ function formatDate(value: string): string {
   white-space: pre-wrap;
   line-height: 1.7;
   word-break: break-word;
+}
+
+.qa-message-content :deep(.qa-inline-link) {
+  color: #1677ff;
+  text-decoration: underline;
+  word-break: break-all;
+}
+
+.qa-message-content :deep(.qa-inline-link:hover) {
+  color: #4096ff;
+}
+
+.qa-source-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.qa-source-link:hover :deep(.ant-tag) {
+  opacity: 0.8;
 }
 
 .qa-summary-collapse {
