@@ -1,0 +1,490 @@
+import json
+from datetime import date
+
+from fastapi.testclient import TestClient
+
+import app.main as main_module
+from app.main import app
+
+
+class FakeEmbeddingService:
+    dimensions = 4
+
+    def __init__(self):
+        self.texts = []
+
+    def embed_query(self, text):
+        self.texts.append(text)
+        return [1.0, 0.0, 0.0, 0.0]
+
+
+class BatchEmbeddingService:
+    dimensions = 4
+
+    def __init__(self):
+        self.query_texts = []
+        self.document_batches = []
+
+    def embed_query(self, text):
+        self.query_texts.append(text)
+        return [1.0, 0.0, 0.0, 0.0]
+
+    def embed_documents(self, texts):
+        self.document_batches.append(list(texts))
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+class FakeCursor:
+    def __init__(self):
+        self.calls = []
+        self._next_row = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def execute(self, sql, params=None):
+        self.calls.append({"sql": sql, "params": params})
+        if "INSERT INTO documents" in sql:
+            self._next_row = {"id": 1}
+        elif "INSERT INTO document_chunks" in sql:
+            self._next_row = {"id": 10}
+        else:
+            self._next_row = None
+        return self
+
+    def fetchone(self):
+        return self._next_row
+
+    def fetchall(self):
+        return []
+
+
+class FakeConnection:
+    def __init__(self, cursor):
+        self.cursor_obj = cursor
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def execute(self, sql, params=None):
+        self.executed.append({"sql": sql, "params": params})
+        return self
+
+    def cursor(self, *args, **kwargs):
+        return self.cursor_obj
+
+
+class FakeConnectionManager:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    def connection(self):
+        return FakeConnection(self.cursor)
+
+    def close(self):
+        return None
+
+
+def test_split_markdown_document_keeps_section_path_and_metadata():
+    from app.knowledge.vector_store import split_markdown_document
+
+    content = """
+# 成都旅游信息
+
+成都适合城市休闲和亲子游。
+
+## 热门景点
+
+成都大熊猫繁育研究基地适合亲子游，建议上午入园。宽窄巷子适合城市漫步。
+
+## 交通提示
+
+地铁覆盖主要景区，节假日建议错峰出行。
+"""
+
+    chunks = split_markdown_document(
+        title="成都旅游信息",
+        content=content,
+        metadata={"province": "四川", "city": "成都", "data_type": "景点信息"},
+        chunk_size=80,
+        overlap=10,
+    )
+
+    assert chunks
+    assert any(chunk.section == "成都旅游信息 > 热门景点" for chunk in chunks)
+    assert all(chunk.metadata["city"] == "成都" for chunk in chunks)
+    assert all(chunk.title == "成都旅游信息" for chunk in chunks)
+    assert "大熊猫" in " ".join(chunk.content for chunk in chunks)
+
+
+def test_build_rag_context_deduplicates_chunks_and_keeps_sources():
+    from app.knowledge.vector_store import TravelChunkSearchResult, build_rag_context
+
+    first = TravelChunkSearchResult(
+        chunk_id="chunk-1",
+        title="成都旅游信息",
+        section="热门景点",
+        content="成都大熊猫繁育研究基地适合亲子游。",
+        source_name="四川省文化和旅游厅",
+        source_url="https://example.com/chengdu",
+        publish_date=date(2026, 6, 1),
+        score=0.87,
+    )
+    duplicate = first
+    second = TravelChunkSearchResult(
+        chunk_id="chunk-2",
+        title="成都交通提示",
+        section="交通",
+        content="地铁可到达主要景区，节假日建议错峰。",
+        source_name="成都文旅",
+        source_url=None,
+        publish_date=None,
+        score=0.81,
+    )
+
+    context = build_rag_context([first, duplicate, second], max_chars=500)
+
+    assert context.count("[来源1]") == 1
+    assert "四川省文化和旅游厅" in context
+    assert "https://example.com/chengdu" in context
+    assert "成都文旅" in context
+
+
+def test_vector_store_ingest_document_saves_document_and_chunks():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=FakeEmbeddingService(),
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    result = store.ingest_document(
+        title="成都旅游信息",
+        content="# 热门景点\n\n成都大熊猫繁育研究基地适合亲子游。",
+        source_name="四川省文化和旅游厅",
+        source_url="https://example.com/chengdu",
+        source_type="web",
+        province="四川",
+        city="成都",
+        data_type="景点信息",
+        publish_date=date(2026, 6, 1),
+        metadata={"theme": ["亲子游"]},
+    )
+
+    sql_text = "\n".join(call["sql"] for call in cursor.calls)
+    assert result["chunks_added"] >= 1
+    assert "INSERT INTO documents" in sql_text
+    assert "INSERT INTO document_chunks" in sql_text
+    assert store.embeddings.texts
+
+
+def test_vector_store_ingest_document_batches_chunk_embeddings():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    embeddings = BatchEmbeddingService()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=embeddings,
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    long_section = "Chengdu family travel information. " * 80
+    result = store.ingest_document(
+        title="Chengdu Travel",
+        content=f"# Attractions\n\n{long_section}\n\n# Transport\n\n{long_section}",
+        source_name="test",
+    )
+
+    assert result["chunks_added"] >= 2
+    assert len(embeddings.document_batches) == 1
+    assert len(embeddings.document_batches[0]) == result["chunks_added"]
+
+
+def test_vector_store_search_casts_nullable_filter_parameters():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=FakeEmbeddingService(),
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    store.search_chunks(query="Chengdu family attractions", top_k=5)
+
+    search_sql = next(call["sql"] for call in cursor.calls if "FROM document_chunks" in call["sql"])
+    assert "%s::text IS NULL OR c.city = %s::text" in search_sql
+    assert "%s::text IS NULL OR c.province = %s::text" in search_sql
+    assert "%s::text IS NULL OR c.data_type = %s::text" in search_sql
+    assert "%s::date IS NULL OR c.publish_date >= %s::date" in search_sql
+
+
+def test_vector_store_keyword_search_uses_bm25_scoring_sql():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=FakeEmbeddingService(),
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    store.keyword_search("Chengdu Panda Base family travel", k=5)
+
+    keyword_sql = next(call["sql"] for call in cursor.calls if "bm25_score" in call["sql"])
+    assert "query_terms AS" in keyword_sql
+    assert "idf AS" in keyword_sql
+    assert "bm25_score" in keyword_sql
+    assert "%s::text[]" in keyword_sql
+
+
+def test_api_ingests_and_searches_travel_documents():
+    class FakeStore:
+        def __init__(self):
+            self.ingested = None
+            self.search = None
+
+        def ingest_document(self, **kwargs):
+            self.ingested = kwargs
+            return {"doc_id": "doc-1", "chunks_added": 2}
+
+        def search_chunks(self, **kwargs):
+            self.search = kwargs
+            return [
+                {
+                    "chunk_id": "chunk-1",
+                    "title": "成都旅游信息",
+                    "section": "热门景点",
+                    "content": "成都大熊猫繁育研究基地适合亲子游。",
+                    "source_name": "四川省文化和旅游厅",
+                    "source_url": "https://example.com/chengdu",
+                    "publish_date": date(2026, 6, 1),
+                    "score": 0.87,
+                }
+            ]
+
+    store = FakeStore()
+    original_store = main_module.travel_vector_store
+    main_module.travel_vector_store = store
+    try:
+        client = TestClient(app)
+        ingest_response = client.post(
+            "/api/knowledge/documents",
+            json={
+                "title": "成都旅游信息",
+                "content": "文档正文",
+                "source_name": "四川省文化和旅游厅",
+                "source_url": "https://example.com/chengdu",
+                "province": "四川",
+                "city": "成都",
+                "data_type": "景点信息",
+                "publish_date": "2026-06-01",
+                "metadata": {"theme": ["亲子游"]},
+            },
+        )
+        search_response = client.post(
+            "/api/knowledge/search",
+            json={
+                "query": "成都有哪些适合亲子游的景点？",
+                "province": "四川",
+                "city": "成都",
+                "data_type": "景点信息",
+                "top_k": 5,
+            },
+        )
+    finally:
+        main_module.travel_vector_store = original_store
+
+    assert ingest_response.status_code == 200
+    assert ingest_response.json()["data"]["chunks_added"] == 2
+    assert store.ingested["city"] == "成都"
+    assert search_response.status_code == 200
+    assert search_response.json()["data"]["query"] == "成都有哪些适合亲子游的景点？"
+    assert search_response.json()["data"]["results"][0]["source_name"] == "四川省文化和旅游厅"
+    assert store.search["city"] == "成都"
+
+
+def test_api_ingests_travel_document_from_url(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.ingested = None
+
+        def ingest_document(self, **kwargs):
+            self.ingested = kwargs
+            return {"doc_id": "doc-url-1", "chunks_added": 1}
+
+    class FakeResponse:
+        text = "<html><head><title>成都亲子游公告</title></head><body><h1>热门景点</h1><p>熊猫基地适合亲子游。</p></body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return FakeResponse()
+
+    store = FakeStore()
+    original_store = main_module.travel_vector_store
+    main_module.travel_vector_store = store
+    monkeypatch.setattr("httpx.get", fake_get)
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/knowledge/documents/from-url",
+            json={
+                "source_url": "https://example.com/chengdu",
+                "source_name": "四川省文化和旅游厅",
+                "province": "四川",
+                "city": "成都",
+                "data_type": "景点信息",
+            },
+        )
+    finally:
+        main_module.travel_vector_store = original_store
+
+    assert response.status_code == 200
+    assert response.json()["data"]["chunks_added"] == 1
+    assert calls[0]["url"] == "https://example.com/chengdu"
+    assert store.ingested["title"] == "成都亲子游公告"
+    assert "熊猫基地适合亲子游" in store.ingested["content"]
+    assert store.ingested["source_type"] == "web"
+
+
+def test_api_auto_ingest_uses_llm_to_extract_metadata(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.ingested = None
+
+        def ingest_document(self, **kwargs):
+            self.ingested = kwargs
+            return {"doc_id": "doc-auto-1", "chunks_added": 3}
+
+    class FakeMessage:
+        content = json.dumps(
+            {
+                "title": "Chengdu Family Travel Guide",
+                "source_name": "uploaded-guide.md",
+                "source_type": "upload",
+                "publish_date": "2026-06-01",
+                "province": "Sichuan",
+                "city": "Chengdu",
+                "scenic_spot": "Panda Base",
+                "data_type": "景点信息",
+                "metadata": {"theme": ["family"], "keywords": ["panda"]},
+            }
+        )
+
+    class FakeLLM:
+        def invoke(self, prompt):
+            assert "Chengdu Panda Base" in prompt
+            return FakeMessage()
+
+    store = FakeStore()
+    original_store = main_module.travel_vector_store
+    main_module.travel_vector_store = store
+    monkeypatch.setattr(main_module, "create_llm", lambda: FakeLLM())
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/knowledge/documents/auto",
+            json={
+                "file_name": "uploaded-guide.md",
+                "content": "# Chengdu Panda Base\n\nFamily visitors should book morning tickets.",
+            },
+        )
+    finally:
+        main_module.travel_vector_store = original_store
+
+    assert response.status_code == 200
+    assert response.json()["data"]["chunks_added"] == 3
+    assert store.ingested["title"] == "Chengdu Family Travel Guide"
+    assert store.ingested["city"] == "Chengdu"
+    assert store.ingested["data_type"] == "景点信息"
+    assert store.ingested["metadata"]["inference"] == "llm"
+
+
+def test_api_url_ingest_accepts_only_url(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.ingested = None
+
+        def ingest_document(self, **kwargs):
+            self.ingested = kwargs
+            return {"doc_id": "doc-url-only", "chunks_added": 1}
+
+    class FakeResponse:
+        text = "<html><head><title>Chengdu Notice</title></head><body><p>Chengdu travel notice.</p></body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    store = FakeStore()
+    original_store = main_module.travel_vector_store
+    main_module.travel_vector_store = store
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(main_module, "create_llm", lambda: None)
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/knowledge/documents/from-url",
+            json={"source_url": "https://example.com/chengdu"},
+        )
+    finally:
+        main_module.travel_vector_store = original_store
+
+    assert response.status_code == 200
+    assert store.ingested["source_url"] == "https://example.com/chengdu"
+    assert store.ingested["source_type"] == "web"
+
+
+def test_api_auto_ingest_job_completes(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.ingested = None
+
+        def ingest_document(self, **kwargs):
+            self.ingested = kwargs
+            return {"doc_id": "doc-job-1", "chunks_added": 2}
+
+    store = FakeStore()
+    original_store = main_module.travel_vector_store
+    main_module.travel_vector_store = store
+    monkeypatch.setattr(main_module, "create_llm", lambda: None)
+    if hasattr(main_module, "knowledge_ingest_jobs"):
+        main_module.knowledge_ingest_jobs.clear()
+    try:
+        client = TestClient(app)
+        create_response = client.post(
+            "/api/knowledge/documents/auto/jobs",
+            json={
+                "file_name": "chengdu.md",
+                "content": "# Chengdu\n\nFamily travel guide.",
+            },
+        )
+        assert create_response.status_code == 200
+        job_id = create_response.json()["data"]["job_id"]
+        status_response = client.get(f"/api/knowledge/documents/jobs/{job_id}")
+    finally:
+        main_module.travel_vector_store = original_store
+
+    assert status_response.status_code == 200
+    payload = status_response.json()["data"]
+    assert payload["status"] == "completed"
+    assert payload["result"]["doc_id"] == "doc-job-1"
+    assert payload["result"]["chunks_added"] == 2
