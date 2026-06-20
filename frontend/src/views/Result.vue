@@ -347,7 +347,7 @@ watch(
 )
 
 function goBack() {
-  router.push('/')
+  router.push('/plan')
 }
 
 function scrollToSection({ key }: { key: string }) {

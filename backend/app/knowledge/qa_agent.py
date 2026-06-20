@@ -46,7 +46,12 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
 from app.domain.models import TravelKnowledgeSource, TravelQAResponse
 from app.core.config import get_settings
 from app.integrations.services import AmapMCPClient, RollingGoHotelMCPClient
-from app.knowledge.prompts import TRAVEL_QA_SYSTEM_PROMPT, TRAVEL_RAG_PROMPT
+from app.knowledge.prompts import (
+    TRAVEL_QA_SYSTEM_PROMPT,
+    TRAVEL_RAG_PROMPT,
+    TRAVEL_SUMMARY_INITIAL_PROMPT_TEXT,
+    TRAVEL_SUMMARY_EXISTING_PROMPT_TEXT,
+)
 from app.knowledge.vector_store import KnowledgeDocument, PostgresTravelVectorStore, stable_hash, summarize_text
 from app.researching.research import WebSearchMCPClient
 from app.tools.amap_tools import create_attraction_search_tool, create_weather_query_tool
@@ -306,12 +311,28 @@ class TravelQuestionAnsweringAgent:
         if self.llm is None or SummarizationNode is None:
             return None
         try:
+            from langchain_core.prompts.chat import ChatPromptTemplate
+
+            initial_summary_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("placeholder", "{messages}"),
+                    ("user", TRAVEL_SUMMARY_INITIAL_PROMPT_TEXT),
+                ]
+            )
+            existing_summary_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("placeholder", "{messages}"),
+                    ("user", TRAVEL_SUMMARY_EXISTING_PROMPT_TEXT),
+                ]
+            )
             summarization_node = SummarizationNode(
                 model=self.llm,
                 max_tokens=4096,
                 max_tokens_before_summary=3072,
                 max_summary_tokens=512,
                 output_messages_key="summarized_messages",
+                initial_summary_prompt=initial_summary_prompt,
+                existing_summary_prompt=existing_summary_prompt,
             )
             return ReactAgentSummarizationHook(summarization_node)
         except Exception as exc:
@@ -360,15 +381,15 @@ def qa_context_for_prompt(context: str, force_web_search: bool = False) -> str:
     text = context.strip()
     if force_web_search:
         instruction = (
-            "【联网要求】用户明确要求联网或问题涉及时效信息，必须先调用联网搜索工具"
-            "查询官方/高可信资料；不要仅根据下方参考资料或历史对话回答。"
+            "【联网要求】用户明确要求联网或问题涉及时效信息，"
+            "必须优先获取官方/高可信资料来回答；不要仅根据下方参考资料或历史对话回答。"
         )
         if text:
             return f"{instruction}\n\n{text}"
         return f"{instruction}\n\n知识库和实时资料暂未检索到结果。"
     if text:
         return text
-    return "知识库和实时资料暂未检索到结果。请先使用联网搜索工具查询官方/高可信资料，再基于搜索结果回答。"
+    return "知识库和实时资料暂未检索到结果。请基于已有知识回答，或告知用户暂时无法获取实时数据。"
 
 
 def append_web_sources_to_context(context: str, sources: list[TravelKnowledgeSource]) -> str:

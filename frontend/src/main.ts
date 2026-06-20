@@ -43,9 +43,9 @@ const Result = () => import('./views/Result.vue')
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: '/', name: 'Home', component: Home },
+    { path: '/', name: 'QA', component: QA },
     { path: '/login', name: 'Login', component: Login, meta: { guest: true } },
-    { path: '/qa', name: 'QA', component: QA },
+    { path: '/plan', name: 'Home', component: Home },
     { path: '/knowledge', name: 'Knowledge', component: Knowledge },
     { path: '/reports', name: 'Reports', component: Reports },
     { path: '/result', name: 'Result', component: Result },
@@ -55,7 +55,7 @@ const router = createRouter({
 router.beforeEach((to, _from, next) => {
   const token = localStorage.getItem('travel_auth_token')
   if (to.meta.guest && token) {
-    next({ name: 'Home' })
+    next({ name: 'QA' })
   } else {
     next()
   }

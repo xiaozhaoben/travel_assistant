@@ -10,20 +10,20 @@
       </router-link>
       <nav class="header-nav">
         <router-link to="/" class="nav-link" active-class="nav-link-active">
-          <CompassOutlined />
-          <span>规划行程</span>
-        </router-link>
-        <router-link to="/reports" class="nav-link" active-class="nav-link-active">
-          <FileTextOutlined />
-          <span>历史报表</span>
-        </router-link>
-        <router-link to="/qa" class="nav-link" active-class="nav-link-active">
           <MessageOutlined />
           <span>智能问答</span>
         </router-link>
         <router-link to="/knowledge" class="nav-link" active-class="nav-link-active">
           <DatabaseOutlined />
           <span>知识库</span>
+        </router-link>
+        <router-link to="/plan" class="nav-link" active-class="nav-link-active">
+          <CompassOutlined />
+          <span>规划行程</span>
+        </router-link>
+        <router-link to="/reports" class="nav-link" active-class="nav-link-active">
+          <FileTextOutlined />
+          <span>历史报表</span>
         </router-link>
       </nav>
       <div class="header-user">

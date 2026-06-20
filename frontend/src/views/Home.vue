@@ -184,7 +184,7 @@
     </a-card>
 
     <div class="side-action-buttons">
-      <a-button type="primary" class="side-action-button" @click="router.push('/qa')">
+      <a-button type="primary" class="side-action-button" @click="router.push('/')">
         <template #icon><MessageOutlined /></template>
         <span>智能问答</span>
       </a-button>

@@ -108,7 +108,7 @@ async function handleLogin() {
   try {
     await auth.login(loginForm.username, loginForm.password)
     message.success('登录成功')
-    router.push('/qa')
+    router.push('/')
   } catch (error: any) {
     const detail = error?.response?.data?.detail
     message.error(typeof detail === 'string' ? detail : error.message || '登录失败')
@@ -122,7 +122,7 @@ async function handleRegister() {
   try {
     await auth.register(registerForm.username, registerForm.password)
     message.success('注册成功，已自动登录')
-    router.push('/qa')
+    router.push('/')
   } catch (error: any) {
     const detail = error?.response?.data?.detail
     message.error(typeof detail === 'string' ? detail : error.message || '注册失败')
