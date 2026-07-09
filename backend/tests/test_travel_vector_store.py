@@ -38,6 +38,7 @@ class FakeCursor:
     def __init__(self):
         self.calls = []
         self._next_row = None
+        self.version_id = 0
 
     def __enter__(self):
         return self
@@ -47,7 +48,10 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.calls.append({"sql": sql, "params": params})
-        if "INSERT INTO documents" in sql:
+        if "SELECT version_id, content_hash FROM documents" in sql:
+            self._next_row = {"version_id": self.version_id, "content_hash": ""}
+        elif "INSERT INTO documents" in sql:
+            self.version_id = params[14] if params and len(params) > 14 else self.version_id
             self._next_row = {"id": 1}
         elif "INSERT INTO document_chunks" in sql:
             self._next_row = {"id": 10}
@@ -188,6 +192,67 @@ def test_vector_store_ingest_document_saves_document_and_chunks():
     assert store.embeddings.texts
 
 
+def test_vector_store_uses_stable_doc_identity_for_source_updates():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=FakeEmbeddingService(),
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    first = store.ingest_document(
+        title="Chengdu Travel Notice",
+        content="Original opening hours.",
+        source_name="official",
+        source_url="https://example.com/chengdu",
+        source_type="web",
+    )
+    second = store.ingest_document(
+        title="Chengdu Travel Notice",
+        content="Updated opening hours and ticket rules.",
+        source_name="official",
+        source_url="https://example.com/chengdu",
+        source_type="web",
+    )
+
+    assert first["doc_id"] == second["doc_id"]
+
+
+def test_vector_store_chunk_metadata_tracks_update_contract():
+    from app.knowledge.vector_store import PostgresTravelVectorStore
+
+    cursor = FakeCursor()
+    store = PostgresTravelVectorStore(
+        "postgresql://example/test",
+        embeddings=FakeEmbeddingService(),
+        connection_manager=FakeConnectionManager(cursor),
+    )
+    store._schema_ready = True
+
+    store.ingest_document(
+        title="Chengdu Travel",
+        content="# Attractions\n\nPanda Base works well for families.",
+        source_name="official",
+        source_url="https://example.com/chengdu",
+        source_type="web",
+    )
+
+    chunk_call = next(call for call in cursor.calls if "INSERT INTO document_chunks" in call["sql"])
+    chunk_metadata = jsonb_payload(chunk_call["params"][-1])
+
+    assert chunk_metadata["content_hash"].startswith("sha256:")
+    assert chunk_metadata["version_id"] == 1
+    assert chunk_metadata["chunk_strategy"] == "recursive_markdown_v1"
+    assert chunk_metadata["chunk_size"] == 700
+    assert chunk_metadata["chunk_overlap"] == 100
+    assert chunk_metadata["embedding_dimension"] == 4
+    assert chunk_metadata["embedding_model"]
+    assert chunk_metadata["is_deleted"] is False
+
+
 def test_vector_store_ingest_document_batches_chunk_embeddings():
     from app.knowledge.vector_store import PostgresTravelVectorStore
 
@@ -230,6 +295,8 @@ def test_vector_store_search_casts_nullable_filter_parameters():
     assert "%s::text IS NULL OR c.province = %s::text" in search_sql
     assert "%s::text IS NULL OR c.data_type = %s::text" in search_sql
     assert "%s::date IS NULL OR c.publish_date >= %s::date" in search_sql
+    assert "c.is_deleted = false" in search_sql
+    assert "d.is_deleted = false" in search_sql
 
 
 def test_vector_store_keyword_search_uses_bm25_scoring_sql():
@@ -250,6 +317,12 @@ def test_vector_store_keyword_search_uses_bm25_scoring_sql():
     assert "idf AS" in keyword_sql
     assert "bm25_score" in keyword_sql
     assert "%s::text[]" in keyword_sql
+    assert "c.is_deleted = false" in keyword_sql
+    assert "d.is_deleted = false" in keyword_sql
+
+
+def jsonb_payload(value):
+    return getattr(value, "obj", value)
 
 
 def test_api_ingests_and_searches_travel_documents():

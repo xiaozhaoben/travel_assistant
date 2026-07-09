@@ -128,6 +128,10 @@ TRAVEL_FEEDS=
 3. `POST /api/qa/ask` 对时效问题先走 Web Search MCP，再合并向量召回资料。
 4. 如果未配置大模型，会返回基于召回资料的本地摘要；如果未配置数据库，会明确提示先配置知识库。
 
+### RAG updatable metadata
+
+The travel knowledge base keeps `doc_id` stable across updates and tracks `content_hash`, `version_id`, chunk strategy, embedding model/dimension, and `is_deleted` on document chunks. Re-ingesting unchanged content is idempotent; changed content creates a new active version while older chunks are soft-deleted and excluded from retrieval.
+
 ## API
 
 - `GET /api/health`：查看大模型、高德地图、Unsplash 配置状态。

@@ -35,6 +35,19 @@ EMBEDDING_API_KEY=
 
 未单独配置 `EMBEDDING_API_KEY` 时会复用 `LLM_API_KEY`。如果已有表还是 `vector(384)`，后端启动并初始化 schema 时会清空旧知识库行并把 `embedding` 列改为 `vector(512)`，然后需要重新执行资讯入库。
 
+## Updatable Metadata
+
+Knowledge ingestion now uses a stable document identity and versioned chunks:
+
+- `doc_id` identifies the logical document. It prefers `metadata.doc_id`, then `source_type + source_url`, and finally `source_type + source_name + title`.
+- `content_hash` stores the SHA-256 hash of the normalized document or chunk content.
+- `version_id` increments when the same logical document is ingested with changed content.
+- `chunk_strategy`, `chunk_size`, `chunk_overlap`, `chunk_index`, and `chunk_count` record how chunks were produced.
+- `embedding_model` and `embedding_dimension` record the vector contract used for each chunk.
+- `is_deleted` is used for soft deletion. Searches only return rows where both the document and chunk are active.
+
+This lets repeated ingestion skip unchanged content, replace changed content without stale retrieval, and keep old chunk versions available for audit.
+
 ## API
 
 抓取默认 RSS：

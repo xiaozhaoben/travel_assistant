@@ -46,6 +46,9 @@ DEFAULT_TEXT_SEPARATORS = [
     " ",
     "",
 ]
+DEFAULT_CHUNK_SIZE = 700
+DEFAULT_CHUNK_OVERLAP = 100
+CHUNK_STRATEGY = "recursive_markdown_v1"
 
 
 SCHEMA_SQL = f"""
@@ -63,6 +66,10 @@ CREATE TABLE IF NOT EXISTS documents (
     province text,
     city text,
     data_type text,
+    content_hash text NOT NULL DEFAULT '',
+    version_id integer NOT NULL DEFAULT 1,
+    is_deleted boolean NOT NULL DEFAULT false,
+    deleted_at timestamptz,
     raw_content text NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -84,6 +91,17 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     source_name text NOT NULL DEFAULT '',
     source_url text,
     publish_date date,
+    content_hash text NOT NULL DEFAULT '',
+    version_id integer NOT NULL DEFAULT 1,
+    chunk_index integer NOT NULL DEFAULT 0,
+    chunk_count integer NOT NULL DEFAULT 0,
+    chunk_strategy text NOT NULL DEFAULT '{CHUNK_STRATEGY}',
+    chunk_size integer,
+    chunk_overlap integer,
+    embedding_model text NOT NULL DEFAULT '',
+    embedding_dimension integer NOT NULL DEFAULT {EMBEDDING_DIMENSIONS},
+    is_deleted boolean NOT NULL DEFAULT false,
+    deleted_at timestamptz,
     metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -93,8 +111,33 @@ CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents (doc_id);
 CREATE INDEX IF NOT EXISTS idx_documents_source_url ON documents (source_url);
 CREATE INDEX IF NOT EXISTS idx_documents_city_type ON documents (province, city, data_type);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_id ON document_chunks (doc_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_version ON document_chunks (doc_id, version_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_city_type ON document_chunks (province, city, data_type);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_publish_date ON document_chunks (publish_date DESC);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_active ON document_chunks (doc_id) WHERE is_deleted = false;
+"""
+
+
+METADATA_SCHEMA_MIGRATION_SQL = f"""
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash text NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS version_id integer NOT NULL DEFAULT 1;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS content_hash text NOT NULL DEFAULT '';
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS version_id integer NOT NULL DEFAULT 1;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_index integer NOT NULL DEFAULT 0;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_count integer NOT NULL DEFAULT 0;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_strategy text NOT NULL DEFAULT '{CHUNK_STRATEGY}';
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_size integer;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_overlap integer;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_model text NOT NULL DEFAULT '';
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding_dimension integer NOT NULL DEFAULT {EMBEDDING_DIMENSIONS};
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false;
+ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_doc_version ON document_chunks (doc_id, version_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_active ON document_chunks (doc_id) WHERE is_deleted = false;
 """
 
 
@@ -282,6 +325,7 @@ class PostgresTravelVectorStore:
     def ensure_schema(self) -> None:
         with self.connections.connection() as conn:
             conn.execute(SCHEMA_SQL)
+            conn.execute(METADATA_SCHEMA_MIGRATION_SQL)
             self._ensure_embedding_column_dimension(conn)
         self._schema_ready = True
 
@@ -363,13 +407,21 @@ class PostgresTravelVectorStore:
 
         document_metadata = dict(metadata or {})
         normalized_publish_date = parse_publish_date(publish_date)
-        # Stable doc_id makes repeated ingestion idempotent for the same source and content.
-        doc_id = str(document_metadata.get("doc_id") or stable_hash(source_url or title, title, raw_content))
+        doc_id = stable_document_id(
+            explicit_id=document_metadata.get("doc_id"),
+            source_type=source_type,
+            source_url=source_url,
+            source_name=source_name,
+            title=title,
+        )
+        content_hash = prefixed_content_hash(raw_content)
+        embedding_model = self.embedding_model_name()
         chunks = split_markdown_document(
             title=title,
             content=raw_content,
             metadata={
                 **document_metadata,
+                "content_hash": content_hash,
                 "province": province,
                 "city": city,
                 "data_type": data_type,
@@ -388,13 +440,43 @@ class PostgresTravelVectorStore:
         added = 0
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                previous = cur.execute(
+                    """
+                    SELECT version_id, content_hash, is_deleted
+                    FROM documents
+                    WHERE doc_id = %s
+                    FOR UPDATE
+                    """,
+                    (doc_id,),
+                ).fetchone()
+                previous_version = int((previous or {}).get("version_id") or 0)
+                previous_hash = str((previous or {}).get("content_hash") or "")
+                previous_deleted = bool((previous or {}).get("is_deleted") or False)
+                if previous and not previous_deleted and previous_hash == content_hash:
+                    return {"doc_id": doc_id, "chunks_added": 0, "version_id": previous_version}
+
+                version_id = previous_version + 1 if previous else 1
+                document_metadata = {
+                    **document_metadata,
+                    "doc_id": doc_id,
+                    "content_hash": content_hash,
+                    "version_id": version_id,
+                    "chunk_count": len(chunks),
+                    "chunk_strategy": CHUNK_STRATEGY,
+                    "chunk_size": DEFAULT_CHUNK_SIZE,
+                    "chunk_overlap": DEFAULT_CHUNK_OVERLAP,
+                    "embedding_model": embedding_model,
+                    "embedding_dimension": self.embedding_dimensions,
+                    "is_deleted": False,
+                }
                 cur.execute(
                     """
                     INSERT INTO documents (
                         doc_id, title, source_name, source_url, source_type,
-                        publish_date, province, city, data_type, raw_content, metadata
+                        publish_date, province, city, data_type, content_hash,
+                        version_id, is_deleted, deleted_at, raw_content, metadata
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, NULL, %s, %s)
                     ON CONFLICT (doc_id) DO UPDATE SET
                         title = EXCLUDED.title,
                         source_name = EXCLUDED.source_name,
@@ -404,6 +486,10 @@ class PostgresTravelVectorStore:
                         province = EXCLUDED.province,
                         city = EXCLUDED.city,
                         data_type = EXCLUDED.data_type,
+                        content_hash = EXCLUDED.content_hash,
+                        version_id = EXCLUDED.version_id,
+                        is_deleted = false,
+                        deleted_at = NULL,
                         raw_content = EXCLUDED.raw_content,
                         metadata = EXCLUDED.metadata,
                         updated_at = now()
@@ -419,28 +505,55 @@ class PostgresTravelVectorStore:
                         province,
                         city,
                         data_type,
+                        content_hash,
+                        version_id,
                         raw_content,
                         jsonb(document_metadata),
                     ),
                 ).fetchone()
-                # Rebuild chunks for the document so updated source content does not leave stale vectors behind.
-                cur.execute("DELETE FROM document_chunks WHERE doc_id = %s", (doc_id,))
+                # Rebuild chunks for the document while keeping older versions available for audit.
+                cur.execute(
+                    """
+                    UPDATE document_chunks
+                    SET is_deleted = true, deleted_at = now(), updated_at = now()
+                    WHERE doc_id = %s AND is_deleted = false
+                    """,
+                    (doc_id,),
+                )
                 for index, chunk in enumerate(chunks):
-                    chunk_id = stable_hash(doc_id, str(index), chunk.section, chunk.content)
+                    chunk_content_hash = prefixed_content_hash(chunk.content)
+                    chunk_id = stable_hash(doc_id, str(version_id), str(index), chunk.section, chunk_content_hash)
                     vector_literal = vector_to_sql_literal(chunk_vectors[index])
                     chunk_metadata = {
                         **chunk.metadata,
                         "chunk_index": index,
+                        "chunk_count": len(chunks),
                         "doc_id": doc_id,
+                        "content_hash": chunk_content_hash,
+                        "document_content_hash": content_hash,
+                        "version_id": version_id,
+                        "chunk_strategy": CHUNK_STRATEGY,
+                        "chunk_size": DEFAULT_CHUNK_SIZE,
+                        "chunk_overlap": DEFAULT_CHUNK_OVERLAP,
+                        "embedding_model": embedding_model,
+                        "embedding_dimension": self.embedding_dimensions,
+                        "is_deleted": False,
                     }
                     row = cur.execute(
                         """
                         INSERT INTO document_chunks (
                             doc_id, chunk_id, title, section, content, embedding,
                             province, city, scenic_spot, data_type, source_name,
-                            source_url, publish_date, metadata
+                            source_url, publish_date, content_hash, version_id,
+                            chunk_index, chunk_count, chunk_strategy, chunk_size,
+                            chunk_overlap, embedding_model, embedding_dimension,
+                            is_deleted, deleted_at, metadata
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false,
+                            NULL, %s
+                        )
                         ON CONFLICT (chunk_id) DO UPDATE SET
                             title = EXCLUDED.title,
                             section = EXCLUDED.section,
@@ -453,6 +566,17 @@ class PostgresTravelVectorStore:
                             source_name = EXCLUDED.source_name,
                             source_url = EXCLUDED.source_url,
                             publish_date = EXCLUDED.publish_date,
+                            content_hash = EXCLUDED.content_hash,
+                            version_id = EXCLUDED.version_id,
+                            chunk_index = EXCLUDED.chunk_index,
+                            chunk_count = EXCLUDED.chunk_count,
+                            chunk_strategy = EXCLUDED.chunk_strategy,
+                            chunk_size = EXCLUDED.chunk_size,
+                            chunk_overlap = EXCLUDED.chunk_overlap,
+                            embedding_model = EXCLUDED.embedding_model,
+                            embedding_dimension = EXCLUDED.embedding_dimension,
+                            is_deleted = false,
+                            deleted_at = NULL,
                             metadata = EXCLUDED.metadata,
                             updated_at = now()
                         RETURNING id
@@ -471,12 +595,21 @@ class PostgresTravelVectorStore:
                             source_name[:160],
                             source_url,
                             normalized_publish_date,
+                            chunk_content_hash,
+                            version_id,
+                            index,
+                            len(chunks),
+                            CHUNK_STRATEGY,
+                            DEFAULT_CHUNK_SIZE,
+                            DEFAULT_CHUNK_OVERLAP,
+                            embedding_model,
+                            self.embedding_dimensions,
                             jsonb(chunk_metadata),
                         ),
                     ).fetchone()
                     if row is not None:
                         added += 1
-        return {"doc_id": doc_id, "chunks_added": added}
+        return {"doc_id": doc_id, "chunks_added": added, "version_id": version_id}
 
     def add_text(
         self,
@@ -529,6 +662,12 @@ class PostgresTravelVectorStore:
             if len(vector) != self.embedding_dimensions:
                 raise RuntimeError(f"Embedding dimension mismatch: expected {self.embedding_dimensions}, got {len(vector)}")
         return clean_vectors
+
+    def embedding_model_name(self) -> str:
+        model = getattr(self.embeddings, "model", None)
+        if model:
+            return str(model)
+        return get_settings().embedding_model_id or self.embeddings.__class__.__name__
 
     def search_chunks(
         self,
@@ -583,7 +722,9 @@ class PostgresTravelVectorStore:
                         1 - (c.embedding <=> %s::vector) AS score
                     FROM document_chunks c
                     JOIN documents d ON d.doc_id = c.doc_id
-                    WHERE (%s::text IS NULL OR c.city = %s::text)
+                    WHERE c.is_deleted = false
+                      AND d.is_deleted = false
+                      AND (%s::text IS NULL OR c.city = %s::text)
                       AND (%s::text IS NULL OR c.province = %s::text)
                       AND (%s::text IS NULL OR c.data_type = %s::text)
                       AND (%s::text IS NULL OR c.source_name = %s::text)
@@ -662,7 +803,9 @@ class PostgresTravelVectorStore:
                             ) AS haystack
                         FROM document_chunks c
                         JOIN documents d ON d.doc_id = c.doc_id
-                        WHERE (%s::text IS NULL OR c.city = %s::text)
+                        WHERE c.is_deleted = false
+                          AND d.is_deleted = false
+                          AND (%s::text IS NULL OR c.city = %s::text)
                           AND (%s::text IS NULL OR c.province = %s::text)
                           AND (%s::text IS NULL OR c.data_type = %s::text)
                           AND (%s::text IS NULL OR c.source_name = %s::text)
@@ -781,8 +924,8 @@ def split_markdown_document(
     title: str,
     content: str,
     metadata: dict[str, Any] | None = None,
-    chunk_size: int = 700,
-    overlap: int = 100,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[TravelDocumentChunk]:
     text = normalize_document_content(content)
     if not text:
@@ -967,6 +1110,25 @@ def as_datetime(value: date | datetime | None) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+
+def stable_document_id(
+    *,
+    explicit_id: Any | None,
+    source_type: str,
+    source_url: str | None,
+    source_name: str,
+    title: str,
+) -> str:
+    if explicit_id:
+        return str(explicit_id)
+    if source_url:
+        return stable_hash("source-url", source_type or "", source_url)
+    return stable_hash("source-title", source_type or "", source_name or "", title or "")
+
+
+def prefixed_content_hash(content: str) -> str:
+    return f"sha256:{stable_hash(content)}"
 
 
 def stable_hash(*parts: str) -> str:
