@@ -12,7 +12,9 @@
       "category": "holiday_reservation_transport",
       "difficulty": "medium",
       "must_include": ["官方渠道复核预约", "南京博物院/总统府/夫子庙或钟山", "地铁或交通管制提醒"],
-      "avoid": ["编造具体放票时间", "声称无需预约"]
+      "avoid": ["编造具体放票时间", "声称无需预约"],
+      "expected_source_keywords": ["南京博物院", "中山陵", "夫子庙", "交通管制"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -28,7 +30,9 @@
       "category": "museum_reservation",
       "difficulty": "easy",
       "must_include": ["实名分时预约", "官方渠道", "替代安排"],
-      "avoid": ["保证一定能现场进馆", "给出未经核实的票量"]
+      "avoid": ["保证一定能现场进馆", "给出未经核实的票量"],
+      "expected_source_keywords": ["中国国家博物馆", "实名预约", "官方渠道"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -44,7 +48,9 @@
       "category": "family_low_intensity",
       "difficulty": "easy",
       "must_include": ["熊猫基地", "博物馆或遗址", "低强度/休息"],
-      "avoid": ["每天塞满远距离景点", "忽略孩子饮食"]
+      "avoid": ["每天塞满远距离景点", "忽略孩子饮食"],
+      "expected_source_keywords": ["成都", "熊猫基地", "亲子", "博物馆"],
+      "requires_realtime_check": false
     }
   },
   {
@@ -60,7 +66,9 @@
       "category": "rainy_day_plan",
       "difficulty": "easy",
       "must_include": ["室内", "少走路", "预约复核"],
-      "avoid": ["安排大量露天景点", "不考虑换乘成本"]
+      "avoid": ["安排大量露天景点", "不考虑换乘成本"],
+      "expected_source_keywords": ["上海博物馆", "浦东美术馆", "预约", "室内"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -76,7 +84,9 @@
       "category": "first_time_city_route",
       "difficulty": "medium",
       "must_include": ["故宫预约", "天安门安检/管控", "颐和园单独安排"],
-      "avoid": ["建议一天塞完所有景点"]
+      "avoid": ["建议一天塞完所有景点"],
+      "expected_source_keywords": ["故宫", "天安门", "颐和园", "预约"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -92,7 +102,9 @@
       "category": "crowd_avoidance_photo",
       "difficulty": "medium",
       "must_include": ["早出发", "西湖分散点位", "交通管控"],
-      "avoid": ["只推荐断桥等高峰点"]
+      "avoid": ["只推荐断桥等高峰点"],
+      "expected_source_keywords": ["西湖", "交通管控", "茅家埠", "浴鹄湾"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -108,7 +120,9 @@
       "category": "queue_management",
       "difficulty": "medium",
       "must_include": ["排队高峰", "官方购票/运营复核", "解放碑/朝天门/洪崖洞串联"],
-      "avoid": ["保证不用排队"]
+      "avoid": ["保证不用排队"],
+      "expected_source_keywords": ["长江索道", "洪崖洞", "官方购票", "运营"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -124,7 +138,9 @@
       "category": "family_theme_park",
       "difficulty": "easy",
       "must_include": ["番禺/汉溪长隆住宿", "一天一个主题", "官方规则复核"],
-      "avoid": ["每天跨多个远距离区域"]
+      "avoid": ["每天跨多个远距离区域"],
+      "expected_source_keywords": ["广州长隆", "汉溪长隆", "门票", "入园规则"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -140,7 +156,9 @@
       "category": "day_trip_transport",
       "difficulty": "medium",
       "must_include": ["临潼方向", "早出发", "正规交通", "官方票务"],
-      "avoid": ["推荐非正规包车"]
+      "avoid": ["推荐非正规包车"],
+      "expected_source_keywords": ["兵马俑", "华清宫", "临潼", "官方票务"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -156,7 +174,9 @@
       "category": "elderly_island_transport",
       "difficulty": "medium",
       "must_include": ["官方船票", "码头/时段", "老人行李和步行"],
-      "avoid": ["忽略码头差异", "当天临时买票保证成功"]
+      "avoid": ["忽略码头差异", "当天临时买票保证成功"],
+      "expected_source_keywords": ["鼓浪屿", "船票", "码头", "时段"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -172,7 +192,9 @@
       "category": "elderly_low_intensity",
       "difficulty": "easy",
       "must_include": ["低强度", "市南区/海边", "避开台阶和大风"],
-      "avoid": ["安排崂山高强度徒步"]
+      "avoid": ["安排崂山高强度徒步"],
+      "expected_source_keywords": ["青岛", "市南区", "海边", "低强度"],
+      "requires_realtime_check": false
     }
   },
   {
@@ -188,7 +210,9 @@
       "category": "attraction_comparison",
       "difficulty": "easy",
       "must_include": ["漓江经典", "遇龙河休闲", "天气水位/停航复核"],
-      "avoid": ["承诺任何天气都能漂流"]
+      "avoid": ["承诺任何天气都能漂流"],
+      "expected_source_keywords": ["漓江", "遇龙河", "停航", "水位"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -204,7 +228,9 @@
       "category": "photo_low_intensity",
       "difficulty": "medium",
       "must_include": ["不塞太多园林", "早到避峰", "预约限流"],
-      "avoid": ["一天安排多个园林加夜游"]
+      "avoid": ["一天安排多个园林加夜游"],
+      "expected_source_keywords": ["苏州园林", "拙政园", "留园", "预约"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -220,7 +246,9 @@
       "category": "winter_preparation",
       "difficulty": "easy",
       "must_include": ["保暖防滑", "冰雪大世界官方开园票务", "中间休整"],
-      "avoid": ["低估低温风险"]
+      "avoid": ["低估低温风险"],
+      "expected_source_keywords": ["哈尔滨", "冰雪大世界", "中央大街", "开园"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -236,7 +264,9 @@
       "category": "multi_city_pacing",
       "difficulty": "medium",
       "must_include": ["大理丽江取舍", "玉龙雪山量力", "低强度替代"],
-      "avoid": ["建议连续长途奔波"]
+      "avoid": ["建议连续长途奔波"],
+      "expected_source_keywords": ["大理", "丽江", "玉龙雪山", "高反"],
+      "requires_realtime_check": false
     }
   },
   {
@@ -252,7 +282,9 @@
       "category": "family_budget_avoid_pitfalls",
       "difficulty": "medium",
       "must_include": ["住宿区域取舍", "不频繁换酒店", "海上项目资质/天气"],
-      "avoid": ["推荐低价不明项目"]
+      "avoid": ["推荐低价不明项目"],
+      "expected_source_keywords": ["三亚", "亚龙湾", "海上项目", "天气"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -268,7 +300,9 @@
       "category": "city_two_day_route",
       "difficulty": "easy",
       "must_include": ["黄鹤楼", "湖北省博预约", "东湖只选片区"],
-      "avoid": ["东湖全覆盖式安排"]
+      "avoid": ["东湖全覆盖式安排"],
+      "expected_source_keywords": ["黄鹤楼", "湖北省博物馆", "东湖", "预约"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -284,7 +318,9 @@
       "category": "food_weekend_hotel",
       "difficulty": "medium",
       "must_include": ["五一广场住宿利弊", "错峰排队", "博物馆/橘子洲预约交通"],
-      "avoid": ["只列网红店名"]
+      "avoid": ["只列网红店名"],
+      "expected_source_keywords": ["长沙", "五一广场", "橘子洲", "湖南博物院"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -310,7 +346,9 @@
       "category": "context_followup",
       "difficulty": "hard",
       "must_include": ["根据历史理解南京博物院", "官方预约", "替代安排"],
-      "avoid": ["把问题误解成任意博物馆", "忽略会话历史"]
+      "avoid": ["把问题误解成任意博物馆", "忽略会话历史"],
+      "expected_source_keywords": ["南京博物院", "实名预约", "官方渠道"],
+      "requires_realtime_check": true
     }
   },
   {
@@ -326,7 +364,9 @@
       "category": "insufficient_realtime_info",
       "difficulty": "hard",
       "must_include": ["不能断言", "官方公告/文旅/电话", "补充古镇全名"],
-      "avoid": ["编造闭园结论", "给出未经核实的开放状态"]
+      "avoid": ["编造闭园结论", "给出未经核实的开放状态"],
+      "expected_source_keywords": ["古镇", "闭园", "官方公告", "文旅"],
+      "requires_realtime_check": true
     }
   }
 ]
