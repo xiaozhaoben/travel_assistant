@@ -381,8 +381,9 @@ def qa_context_for_prompt(context: str, force_web_search: bool = False) -> str:
     text = context.strip()
     if force_web_search:
         instruction = (
-            "【联网要求】用户明确要求联网或问题涉及时效信息，"
-            "必须优先获取官方/高可信资料来回答；不要仅根据下方参考资料或历史对话回答。"
+            "【联网要求】用户明确要求联网或问题涉及时效信息，必须先获取联网搜索结果，"
+            "并优先采用官方/高可信资料；如果仍无可靠结果，明确说明不确定。"
+            "不要在最终回答中暴露工具名、函数名或内部调用过程。"
         )
         if text:
             return f"{instruction}\n\n{text}"

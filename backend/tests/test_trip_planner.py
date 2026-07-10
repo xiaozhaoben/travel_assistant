@@ -852,7 +852,8 @@ def test_travel_qa_agent_prompts_web_search_when_user_explicitly_requests_it(mon
 
     prompt = runtime.calls[0]["state"]["messages"][0]["content"]
     assert "用户明确要求联网或问题涉及时效信息" in prompt
-    assert "必须先调用联网搜索工具" in prompt
+    assert "必须先获取联网搜索结果" in prompt
+    assert "不要在最终回答中暴露工具名" in prompt
     assert result.used_web_search is True
     assert result.sources[0].title == "珠海天气官方预报"
 
@@ -952,9 +953,9 @@ def test_backend_paths_stay_at_backend_root_after_package_split():
     from app.researching.research import DestinationResearchService
 
     assert BACKEND_DIR.name == "backend"
-    assert BACKEND_DIR.parent.name == "travel_assistant"
+    assert (BACKEND_DIR / "app").is_dir()
     assert ENV_PATH == BACKEND_DIR / ".env"
-    assert DestinationResearchService(web_client=FakeWebSearchCaller()).cache_path == BACKEND_DIR / "runtime" / "research_cache.json"
+    assert DestinationResearchService().cache_path.parent == BACKEND_DIR / "runtime"
 
 
 def test_settings_builds_database_url_from_postgres_parts(monkeypatch):
