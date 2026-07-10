@@ -10,7 +10,7 @@ import threading
 import uuid
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -20,7 +20,6 @@ from .core.llm_service import create_llm
 from .domain.models import (
     ApiResponse,
     AuthTokenResponse,
-    MergeAnonymousRequest,
     PlanEditRequest,
     PrincipalTokenResponse,
     TravelDocumentAutoIngestRequest,
@@ -55,16 +54,17 @@ from .auth.service import (
     get_current_user,
     get_user_by_username,
     hash_password,
-    merge_anonymous_conversations,
     verify_password,
 )
 from .auth.principal import (
     Principal,
     configure_principal_auth,
     create_principal_token,
+    decode_principal_token,
     get_current_principal,
+    require_user_principal,
 )
-from .core.api_errors import install_api_error_handlers
+from .core.api_errors import api_error, install_api_error_handlers
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.prompts import render_travel_document_metadata_prompt
@@ -72,7 +72,7 @@ from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.qa_checkpointer import create_qa_checkpointer
 from .knowledge.vector_store import create_travel_vector_store, normalize_document_content
 from .storage.plan_log import PlanLogRecorder
-from .storage.qa_store import create_qa_conversation_store
+from .storage.qa_store import QAConversationNotFound, create_qa_conversation_store
 from .storage.report_store import create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
@@ -187,23 +187,23 @@ def get_app_resources() -> AppResources:
     state_resources = getattr(app.state, "resources", None)
     global_resources = current_global_resources()
     if state_resources is not None and (
-        (news_agent is not None and news_agent is not state_resources.news_agent)
-        or (qa_agent is not None and qa_agent is not state_resources.qa_agent)
-        or (qa_store is not None and qa_store is not state_resources.qa_store)
-        or (qa_checkpointer is not None and qa_checkpointer is not state_resources.qa_checkpointer)
-        or (image_provider is not None and image_provider is not state_resources.image_provider)
+        (news_agent is not None and news_agent is not getattr(state_resources, "news_agent", None))
+        or (qa_agent is not None and qa_agent is not getattr(state_resources, "qa_agent", None))
+        or (qa_store is not None and qa_store is not getattr(state_resources, "qa_store", None))
+        or (qa_checkpointer is not None and qa_checkpointer is not getattr(state_resources, "qa_checkpointer", None))
+        or (image_provider is not None and image_provider is not getattr(state_resources, "image_provider", None))
     ):
         resources = AppResources(
             orchestrator=orchestrator or state_resources.orchestrator,
-            report_store=report_store if report_store is not None else state_resources.report_store,
+            report_store=report_store if report_store is not None else getattr(state_resources, "report_store", None),
             travel_vector_store=travel_vector_store
             if travel_vector_store is not None
-            else state_resources.travel_vector_store,
-            qa_store=qa_store if qa_store is not None else state_resources.qa_store,
-            qa_checkpointer=qa_checkpointer if qa_checkpointer is not None else state_resources.qa_checkpointer,
-            news_agent=news_agent or state_resources.news_agent,
-            qa_agent=qa_agent or state_resources.qa_agent,
-            image_provider=image_provider or state_resources.image_provider,
+            else getattr(state_resources, "travel_vector_store", None),
+            qa_store=qa_store if qa_store is not None else getattr(state_resources, "qa_store", None),
+            qa_checkpointer=qa_checkpointer if qa_checkpointer is not None else getattr(state_resources, "qa_checkpointer", None),
+            news_agent=news_agent or getattr(state_resources, "news_agent", None),
+            qa_agent=qa_agent or getattr(state_resources, "qa_agent", None),
+            image_provider=image_provider or getattr(state_resources, "image_provider", None),
         )
         app.state.resources = resources
         return resources
@@ -531,7 +531,10 @@ def ask_travel_question(
         conversation_history,
         config,
     )
-    result = _persist_qa_exchange(resource_qa_store, conversation, request.question, result)
+    result = _persist_qa_exchange(
+        resource_qa_store, conversation, request.question, result,
+        user_id=user_id, anonymous_id=anonymous_id,
+    )
     return ApiResponse[TravelQAResponse](success=True, message="智能问答完成", data=result)
 
 
@@ -600,7 +603,10 @@ def stream_travel_question(
 
             if final_response is None:
                 final_response = TravelQAResponse(answer="".join(answer_parts))
-            final_response = _persist_qa_exchange(resource_qa_store, conversation, request.question, final_response)
+            final_response = _persist_qa_exchange(
+                resource_qa_store, conversation, request.question, final_response,
+                user_id=user_id, anonymous_id=anonymous_id,
+            )
             yield _sse_event("done", final_response.model_dump(mode="json"))
         except Exception as exc:
             request_id = getattr(http_request.state, "request_id", "unknown")
@@ -636,7 +642,16 @@ def _prepare_qa_memory(
             anonymous_id=anonymous_id,
             title=request.question,
         )
-        conversation_history = resource_qa_store.get_recent_messages(conversation["id"], limit=8)
+        try:
+            conversation_history = resource_qa_store.get_recent_messages(
+                conversation["id"], limit=8, user_id=user_id, anonymous_id=anonymous_id
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            conversation_history = resource_qa_store.get_recent_messages(conversation["id"], limit=8)
+    except QAConversationNotFound:
+        raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
     except Exception as exc:
         logger.warning("QA conversation memory read failed, answering without history: %s", exc)
         conversation = None
@@ -689,13 +704,24 @@ def _stream_qa_agent(
         return qa_agent_instance.stream(question, top_k=top_k, conversation_history=conversation_history)
 
 
-def _persist_qa_exchange(resource_qa_store, conversation, question: str, result: TravelQAResponse) -> TravelQAResponse:
+def _persist_qa_exchange(
+    resource_qa_store,
+    conversation,
+    question: str,
+    result: TravelQAResponse,
+    *,
+    user_id: str | None = None,
+    anonymous_id: str | None = None,
+) -> TravelQAResponse:
     if conversation is None or resource_qa_store is None:
         logger.info("QA persist skipped: conversation=%s, qa_store=%s", conversation is not None, resource_qa_store is not None)
         return result
     message_id = None
     try:
-        resource_qa_store.append_message(conversation["id"], "user", question)
+        resource_qa_store.append_message(
+            conversation["id"], "user", question,
+            user_id=user_id, anonymous_id=anonymous_id,
+        )
         assistant_message = resource_qa_store.append_message(
             conversation["id"],
             "assistant",
@@ -704,6 +730,8 @@ def _persist_qa_exchange(resource_qa_store, conversation, question: str, result:
             retrieved_count=result.retrieved_count,
             generation_mode=result.generation_mode,
             used_web_search=result.used_web_search,
+            user_id=user_id,
+            anonymous_id=anonymous_id,
         )
         message_id = assistant_message.get("id") if isinstance(assistant_message, dict) else None
         logger.info("QA exchange persisted: conversation=%s, message_id=%s, answer_len=%d", conversation["id"], message_id, len(result.answer))
@@ -730,32 +758,41 @@ def _sse_event(event: str, data) -> str:
 
 @app.get("/api/qa/conversations", response_model=ApiResponse[list[TravelQAConversationSummary]])
 def list_qa_conversations(
-    user_id: str | None = Query(default=None, max_length=120),
-    anonymous_id: str | None = Query(default=None, max_length=120),
     limit: int = Query(default=50, ge=1, le=100),
+    principal: Principal = Depends(get_current_principal),
 ):
     resources = get_app_resources()
     resource_qa_store = getattr(resources, "qa_store", None)
     if resource_qa_store is None:
         return ApiResponse[list[TravelQAConversationSummary]](success=True, message="问答记忆未启用", data=[])
     try:
-        conversations = resource_qa_store.list_conversations(user_id=user_id, anonymous_id=anonymous_id, limit=limit)
+        conversations = resource_qa_store.list_conversations(
+            user_id=principal.user_id, anonymous_id=principal.anonymous_id, limit=limit
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
     return ApiResponse[list[TravelQAConversationSummary]](success=True, message="问答会话列表获取成功", data=conversations)
 
 
 @app.get("/api/qa/conversations/{conversation_id}", response_model=ApiResponse[TravelQAConversationDetail])
-def get_qa_conversation(conversation_id: str):
+def get_qa_conversation(
+    conversation_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
     resources = get_app_resources()
     resource_qa_store = getattr(resources, "qa_store", None)
     if resource_qa_store is None:
         raise HTTPException(status_code=503, detail="问答记忆未启用")
     try:
-        conversation = resource_qa_store.get_conversation(conversation_id)
+        conversation = resource_qa_store.get_conversation(
+            conversation_id, user_id=principal.user_id, anonymous_id=principal.anonymous_id
+        )
+    except QAConversationNotFound:
+        raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
     if conversation is None:
+        raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
         raise HTTPException(status_code=404, detail="问答会话不存在")
     return ApiResponse[TravelQAConversationDetail](success=True, message="问答会话详情获取成功", data=conversation)
 
@@ -1393,13 +1430,33 @@ def get_current_auth_user(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/auth/merge-anonymous")
 def merge_anonymous_sessions(
-    request: MergeAnonymousRequest,
-    current_user: dict = Depends(get_current_user),
+    anonymous_token: str | None = Header(default=None, alias="X-Anonymous-Token"),
+    principal: Principal = Depends(require_user_principal),
 ):
-    connections = get_auth_connections()
-    merged_count = merge_anonymous_conversations(connections, current_user["user_id"], request.anonymous_id)
+    if not anonymous_token:
+        raise api_error(401, "AUTH_ANONYMOUS_TOKEN_REQUIRED", "X-Anonymous-Token is required")
+    try:
+        anonymous_principal = decode_principal_token(
+            anonymous_token, settings.jwt_secret_key, settings.jwt_algorithm
+        )
+    except HTTPException as exc:
+        raise api_error(401, "AUTH_ANONYMOUS_TOKEN_INVALID", "Invalid anonymous token") from exc
+    if anonymous_principal.principal_type != "anonymous":
+        raise api_error(401, "AUTH_ANONYMOUS_TOKEN_INVALID", "Anonymous token required")
+    resources = get_app_resources()
+    resource_qa_store = getattr(resources, "qa_store", None)
+    if resource_qa_store is None or not hasattr(resource_qa_store, "merge_anonymous"):
+        raise HTTPException(status_code=503, detail="QA conversation storage is not configured")
+    merged_conversations, merged_messages = resource_qa_store.merge_anonymous(
+        anonymous_principal.subject, principal.subject
+    )
+    merged_count = merged_conversations
     return {
         "success": True,
         "message": f"已合并 {merged_count} 个匿名会话",
-        "data": {"merged_count": merged_count},
+        "data": {
+            "merged_conversations": merged_conversations,
+            "merged_messages": merged_messages,
+            "anonymous_id": anonymous_principal.subject,
+        },
     }

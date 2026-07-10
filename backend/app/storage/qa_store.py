@@ -20,6 +20,10 @@ from app.storage.db import DatabaseConnectionManager
 logger = logging.getLogger(__name__)
 
 
+class QAConversationNotFound(LookupError):
+    """Raised when a conversation is absent or owned by another principal."""
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS travel_qa_conversations (
     id uuid PRIMARY KEY,
@@ -91,9 +95,11 @@ class PostgresQAConversationStore:
     ) -> dict[str, Any]:
         self._ensure_schema_once()
         if conversation_id:
-            existing = self._get_conversation_row(conversation_id)
+            existing = self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id)
             if existing is not None:
                 return existing
+            if self._get_conversation_row(conversation_id) is not None:
+                raise QAConversationNotFound(conversation_id)
 
         new_id = str(uuid4())
         conversation_title = _conversation_title(title or "新的旅行问答")
@@ -109,16 +115,23 @@ class PostgresQAConversationStore:
                 ).fetchone()
         return dict(row)
 
-    def _get_conversation_row(self, conversation_id: str) -> dict[str, Any] | None:
+    def _get_conversation_row(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        owner_clause, owner_params = _owner_predicate(user_id, anonymous_id)
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 row = cur.execute(
-                    """
+                    f"""
                     SELECT id::text, user_id, anonymous_id, title, created_at, updated_at
                     FROM travel_qa_conversations
-                    WHERE id = %s
+                    WHERE id = %s {owner_clause}
                     """,
-                    (conversation_id,),
+                    (conversation_id, *owner_params),
                 ).fetchone()
         return dict(row) if row else None
 
@@ -128,12 +141,17 @@ class PostgresQAConversationStore:
         role: str,
         content: str,
         *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
         sources: list[TravelKnowledgeSource] | None = None,
         retrieved_count: int = 0,
         generation_mode: str | None = None,
         used_web_search: bool = False,
     ) -> dict[str, Any]:
         self._ensure_schema_once()
+        if user_id or anonymous_id:
+            if self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id) is None:
+                raise QAConversationNotFound(conversation_id)
         message_id = str(uuid4())
         source_payload = [source.model_dump(mode="json") for source in sources or []]
         with self.connections.connection() as conn:
@@ -165,8 +183,18 @@ class PostgresQAConversationStore:
                 )
         return dict(row)
 
-    def get_recent_messages(self, conversation_id: str, limit: int = 8) -> list[dict[str, str]]:
+    def get_recent_messages(
+        self,
+        conversation_id: str,
+        limit: int = 8,
+        *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
+    ) -> list[dict[str, str]]:
         self._ensure_schema_once()
+        if user_id or anonymous_id:
+            if self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id) is None:
+                raise QAConversationNotFound(conversation_id)
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
@@ -211,9 +239,17 @@ class PostgresQAConversationStore:
                 ).fetchall()
         return [TravelQAConversationSummary.model_validate(dict(row)) for row in rows]
 
-    def get_conversation(self, conversation_id: str) -> TravelQAConversationDetail | None:
+    def get_conversation(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
+    ) -> TravelQAConversationDetail | None:
         self._ensure_schema_once()
-        conversation = self._get_conversation_row(conversation_id)
+        conversation = self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id)
+        if (user_id or anonymous_id) and conversation is None:
+            raise QAConversationNotFound(conversation_id)
         if conversation is None:
             return None
         with self.connections.connection() as conn:
@@ -234,6 +270,30 @@ class PostgresQAConversationStore:
     def close(self) -> None:
         self.connections.close()
 
+    def merge_anonymous(self, anonymous_id: str, user_id: str) -> tuple[int, int]:
+        self._ensure_schema_once()
+        with self.connections.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT count(*) FROM travel_qa_messages m
+                    JOIN travel_qa_conversations c ON c.id = m.conversation_id
+                    WHERE c.anonymous_id = %s AND c.user_id IS NULL
+                    """,
+                    (anonymous_id,),
+                )
+                merged_messages = int(cur.fetchone()[0] or 0)
+                cur.execute(
+                    """
+                    UPDATE travel_qa_conversations
+                    SET user_id = %s, anonymous_id = NULL
+                    WHERE anonymous_id = %s AND user_id IS NULL
+                    """,
+                    (user_id, anonymous_id),
+                )
+                merged_conversations = cur.rowcount or 0
+        return merged_conversations, merged_messages
+
 
 class InMemoryQAConversationStore:
     def __init__(self):
@@ -245,7 +305,10 @@ class InMemoryQAConversationStore:
 
     def get_or_create_conversation(self, conversation_id=None, user_id=None, anonymous_id=None, title=None):
         if conversation_id and conversation_id in self.conversations:
-            return self.conversations[conversation_id]
+            row = self.conversations[conversation_id]
+            if (user_id or anonymous_id) and not _owner_matches(row, user_id, anonymous_id):
+                raise QAConversationNotFound(conversation_id)
+            return row
         now = datetime.now(timezone.utc)
         conversation_id = conversation_id or str(uuid4())
         row = {
@@ -261,6 +324,13 @@ class InMemoryQAConversationStore:
         return row
 
     def append_message(self, conversation_id, role, content, **kwargs):
+        user_id = kwargs.pop("user_id", None)
+        anonymous_id = kwargs.pop("anonymous_id", None)
+        if (user_id or anonymous_id) and (
+            conversation_id not in self.conversations
+            or not _owner_matches(self.conversations[conversation_id], user_id, anonymous_id)
+        ):
+            raise QAConversationNotFound(conversation_id)
         now = datetime.now(timezone.utc)
         row = {
             "id": str(uuid4()),
@@ -278,7 +348,12 @@ class InMemoryQAConversationStore:
             self.conversations[conversation_id]["updated_at"] = now
         return row
 
-    def get_recent_messages(self, conversation_id, limit=8):
+    def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
+        if (user_id or anonymous_id) and (
+            conversation_id not in self.conversations
+            or not _owner_matches(self.conversations[conversation_id], user_id, anonymous_id)
+        ):
+            raise QAConversationNotFound(conversation_id)
         rows = self.messages.get(conversation_id, [])[-limit:]
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
@@ -291,15 +366,44 @@ class InMemoryQAConversationStore:
         rows = sorted(rows, key=lambda row: row["updated_at"], reverse=True)[:limit]
         return [TravelQAConversationSummary.model_validate(row) for row in rows]
 
-    def get_conversation(self, conversation_id):
+    def get_conversation(self, conversation_id, *, user_id=None, anonymous_id=None):
         row = self.conversations.get(conversation_id)
-        if row is None:
+        if row is None or ((user_id or anonymous_id) and not _owner_matches(row, user_id, anonymous_id)):
+            if user_id or anonymous_id:
+                raise QAConversationNotFound(conversation_id)
             return None
         messages = [_message_from_row(item) for item in self.messages.get(conversation_id, [])]
         return TravelQAConversationDetail.model_validate({**row, "messages": messages})
 
     def close(self):
         return None
+
+    def merge_anonymous(self, anonymous_id: str, user_id: str) -> tuple[int, int]:
+        conversations = [
+            row for row in self.conversations.values()
+            if row.get("anonymous_id") == anonymous_id and not row.get("user_id")
+        ]
+        message_count = 0
+        for row in conversations:
+            row["user_id"] = user_id
+            row["anonymous_id"] = None
+            message_count += len(self.messages.get(row["id"], []))
+        return len(conversations), message_count
+
+
+def _owner_predicate(user_id: str | None, anonymous_id: str | None) -> tuple[str, tuple[str, ...]]:
+    if user_id:
+        return "AND user_id = %s", (user_id,)
+    if anonymous_id:
+        return "AND anonymous_id = %s", (anonymous_id,)
+    return "", ()
+
+
+def _owner_matches(row: dict[str, Any], user_id: str | None, anonymous_id: str | None) -> bool:
+    return bool(
+        (user_id and row.get("user_id") == user_id and not row.get("anonymous_id"))
+        or (anonymous_id and row.get("anonymous_id") == anonymous_id and not row.get("user_id"))
+    )
 
 
 def create_qa_conversation_store(database_url: str | None) -> PostgresQAConversationStore | None:

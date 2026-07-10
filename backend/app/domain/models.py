@@ -473,10 +473,6 @@ class PrincipalTokenResponse(BaseModel):
     expires_in: int
 
 
-class MergeAnonymousRequest(BaseModel):
-    anonymous_id: str = Field(..., min_length=1, max_length=120)
-
-
 class ApiResponse(BaseModel, Generic[T]):
     success: bool
     message: str
