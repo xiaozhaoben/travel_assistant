@@ -65,9 +65,17 @@ def _dependency_client() -> TestClient:
 
     @app.get("/plain-error")
     def plain_error():
-        raise HTTPException(status_code=409, detail="conflict")
+        raise HTTPException(status_code=409, detail="database password leaked")
 
-    return TestClient(app)
+    @app.get("/validated")
+    def validated(count: int):
+        return {"count": count}
+
+    @app.get("/crash")
+    def crash():
+        raise RuntimeError("secret token must not leak")
+
+    return TestClient(app, raise_server_exceptions=False)
 
 
 def test_anonymous_token_round_trip():
@@ -206,9 +214,41 @@ def test_plain_http_exception_is_sanitized_and_bad_request_id_is_replaced():
     assert response.status_code == 409
     assert response.json()["success"] is False
     assert response.json()["code"] == "HTTP_409"
-    assert response.json()["message"] == "conflict"
+    assert response.json()["message"] == "请求冲突"
+    assert "database password leaked" not in response.text
     assert response.json()["request_id"] != "bad id with spaces"
     assert response.headers["X-Request-ID"] == response.json()["request_id"]
+
+
+def test_request_validation_error_has_stable_shape_and_request_id():
+    client = _dependency_client()
+
+    response = client.get("/validated?count=not-an-integer", headers={"X-Request-ID": "validation-123"})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "success": False,
+        "code": "REQUEST_VALIDATION_FAILED",
+        "message": "请求参数校验失败",
+        "request_id": "validation-123",
+    }
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+
+
+def test_unhandled_exception_has_stable_shape_without_exception_details():
+    client = _dependency_client()
+
+    response = client.get("/crash", headers={"X-Request-ID": "internal-error-123"})
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "success": False,
+        "code": "INTERNAL_ERROR",
+        "message": "服务器内部错误",
+        "request_id": "internal-error-123",
+    }
+    assert response.headers["X-Request-ID"] == response.json()["request_id"]
+    assert "secret token must not leak" not in response.text
 
 
 def test_travel_qa_request_ignores_legacy_identity_fields():

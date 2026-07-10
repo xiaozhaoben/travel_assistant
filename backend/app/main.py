@@ -601,9 +601,12 @@ def stream_travel_question(
                 final_response = TravelQAResponse(answer="".join(answer_parts))
             final_response = _persist_qa_exchange(resource_qa_store, conversation, request.question, final_response)
             yield _sse_event("done", final_response.model_dump(mode="json"))
-        except Exception as exc:
-            logger.warning("Travel QA stream failed: %s", exc)
-            yield _sse_event("error", {"message": str(exc)})
+        except Exception:
+            logger.exception("Travel QA stream failed")
+            yield _sse_event(
+                "error",
+                {"code": "QA_STREAM_FAILED", "message": "智能问答暂时不可用"},
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

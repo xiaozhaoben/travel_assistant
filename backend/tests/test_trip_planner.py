@@ -3812,6 +3812,32 @@ def test_api_qa_stream_returns_incremental_answer_events():
     assert fake_store.saved[1]["used_web_search"] is True
 
 
+def test_api_qa_stream_hides_internal_exception_details():
+    class FailingQAAgent:
+        def stream(self, question, top_k=5, conversation_history=None, config=None):
+            raise RuntimeError("provider secret token leaked")
+
+    original_qa_agent = main_module.qa_agent
+    main_module.qa_agent = FailingQAAgent()
+    try:
+        client = TestClient(app)
+        auth_headers = _anonymous_auth_headers(client)
+        with client.stream(
+            "POST",
+            "/api/qa/ask/stream",
+            json={"question": "南京博物馆怎么预约？"},
+            headers=auth_headers,
+        ) as response:
+            body = response.read().decode("utf-8")
+    finally:
+        main_module.qa_agent = original_qa_agent
+
+    assert response.status_code == 200
+    assert "event: error" in body
+    assert 'data: {"code":"QA_STREAM_FAILED","message":"智能问答暂时不可用"}' in body
+    assert "provider secret token leaked" not in body
+
+
 def test_in_memory_qa_store_returns_conversation_history_and_detail():
     from app.storage.qa_store import InMemoryQAConversationStore
 
