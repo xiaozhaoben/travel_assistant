@@ -307,8 +307,6 @@ class TravelQARequest(BaseModel):
     question: str = Field(..., min_length=2, max_length=500)
     top_k: int = Field(default=5, ge=1, le=12)
     conversation_id: Optional[str] = None
-    user_id: Optional[str] = None
-    anonymous_id: Optional[str] = None
 
 
 class TravelQAResponse(BaseModel):
@@ -465,6 +463,14 @@ class AuthTokenResponse(BaseModel):
     token_type: str = "bearer"
     user_id: str
     username: str
+
+
+class PrincipalTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    principal_type: Literal["anonymous", "user"]
+    subject: str
+    expires_in: int
 
 
 class MergeAnonymousRequest(BaseModel):

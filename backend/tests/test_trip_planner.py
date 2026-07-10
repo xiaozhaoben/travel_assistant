@@ -34,6 +34,12 @@ from app.storage.plan_log import PlanLogRecorder
 from app.workflows.agents import AttractionSearchAgent, HotelAgent, PlannerAgent, TravelAgentOrchestrator, WeatherQueryAgent
 
 
+def _anonymous_auth_headers(client: TestClient) -> dict[str, str]:
+    response = client.post("/api/auth/anonymous")
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['data']['access_token']}"}
+
+
 class FakeMessage:
     def __init__(self, content: str):
         self.content = content
@@ -3624,8 +3630,13 @@ def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
     monkeypatch.setattr(main_module, "qa_agent", FakeQAAgent())
     monkeypatch.setattr(main_module, "news_agent", FakeNewsAgent())
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
-    qa_response = client.post("/api/qa/ask", json={"question": "端午去南京要注意什么？"})
+    qa_response = client.post(
+        "/api/qa/ask",
+        json={"question": "端午去南京要注意什么？"},
+        headers=auth_headers,
+    )
     assert qa_response.status_code == 200
     assert qa_response.json()["data"]["answer"].startswith("回答")
     assert qa_response.json()["data"]["sources"][0]["title"] == "南京端午预约提醒"
@@ -3699,6 +3710,7 @@ def test_api_qa_persists_conversation_history():
     main_module.qa_store = fake_store
     try:
         client = TestClient(app)
+        auth_headers = _anonymous_auth_headers(client)
         response = client.post(
             "/api/qa/ask",
             json={
@@ -3706,6 +3718,7 @@ def test_api_qa_persists_conversation_history():
                 "conversation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "anonymous_id": "anon-browser-1",
             },
+            headers=auth_headers,
         )
     finally:
         main_module.qa_agent = original_qa_agent
@@ -3776,10 +3789,12 @@ def test_api_qa_stream_returns_incremental_answer_events():
     main_module.qa_store = fake_store
     try:
         client = TestClient(app)
+        auth_headers = _anonymous_auth_headers(client)
         with client.stream(
             "POST",
             "/api/qa/ask/stream",
             json={"question": "南京博物馆怎么预约？", "anonymous_id": "anon-browser-1"},
+            headers=auth_headers,
         ) as response:
             body = response.read().decode("utf-8")
     finally:

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Header, HTTPException, status
 
+from app.auth.principal import (
+    configure_principal_auth,
+    create_principal_token,
+    decode_principal_token,
+    get_current_principal,
+    get_current_principal_optional,
+)
 from app.storage.db import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -14,13 +20,6 @@ try:
     from passlib.context import CryptContext
 except ImportError:  # pragma: no cover
     CryptContext = None  # type: ignore[assignment,misc]
-
-try:
-    from jose import JWTError, jwt
-except ImportError:  # pragma: no cover
-    JWTError = None  # type: ignore[assignment,misc]
-    jwt = None  # type: ignore[assignment]
-
 
 USERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -58,30 +57,21 @@ def create_access_token(
     algorithm: str,
     expire_minutes: int,
 ) -> str:
-    if jwt is None:
-        raise RuntimeError("python-jose is required. Run: pip install python-jose[cryptography]")
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user_id,
-        "preferred_username": username,
-        "iat": now,
-        "exp": now + timedelta(minutes=expire_minutes),
-    }
-    return jwt.encode(payload, secret, algorithm=algorithm)
+    return create_principal_token(
+        subject=user_id,
+        principal_type="user",
+        username=username,
+        secret=secret,
+        algorithm=algorithm,
+        expire_minutes=expire_minutes,
+    )
 
 
 def decode_access_token(token: str, secret: str, algorithm: str) -> dict[str, Any]:
-    if jwt is None or JWTError is None:
-        raise RuntimeError("python-jose is required. Run: pip install python-jose[cryptography]")
-    try:
-        payload = jwt.decode(token, secret, algorithms=[algorithm])
-        user_id = payload.get("sub")
-        username = payload.get("preferred_username")
-        if not user_id:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的认证凭据")
-        return {"user_id": str(user_id), "username": str(username or "")}
-    except JWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="认证凭据已过期或无效") from exc
+    principal = decode_principal_token(token, secret, algorithm)
+    if principal.principal_type != "user":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的用户认证凭据")
+    return {"user_id": principal.subject, "username": principal.username}
 
 
 def ensure_users_table(connections: DatabaseConnectionManager) -> None:
@@ -161,15 +151,12 @@ def merge_anonymous_conversations(
 
 # 模块级引用，由 main.py 在 lifespan 中注入
 _connections: DatabaseConnectionManager | None = None
-_secret: str = "change-me-in-production"
-_algorithm: str = "HS256"
 
 
 def configure_auth(connections: DatabaseConnectionManager, secret: str, algorithm: str) -> None:
-    global _connections, _secret, _algorithm
+    global _connections
     _connections = connections
-    _secret = secret
-    _algorithm = algorithm
+    configure_principal_auth(secret, algorithm)
 
 
 def get_auth_connections() -> DatabaseConnectionManager:
@@ -178,24 +165,21 @@ def get_auth_connections() -> DatabaseConnectionManager:
     return _connections
 
 
-def get_current_user(authorization: str = Header(..., alias="Authorization")) -> dict[str, Any]:
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的认证头")
-    token = authorization[7:].strip()
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="认证凭据为空")
-    return decode_access_token(token, _secret, _algorithm)
+def get_current_user(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    principal = get_current_principal(authorization)
+    if principal.principal_type != "user":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要用户认证")
+    return {"user_id": principal.subject, "username": principal.username}
 
 
 def get_current_user_optional(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any] | None:
-    if not authorization or not authorization.startswith("Bearer "):
+    principal = get_current_principal_optional(authorization)
+    if principal is None:
         return None
-    token = authorization[7:].strip()
-    if not token:
-        return None
-    try:
-        return decode_access_token(token, _secret, _algorithm)
-    except HTTPException:
-        return None
+    if principal.principal_type != "user":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要用户认证")
+    return {"user_id": principal.subject, "username": principal.username}

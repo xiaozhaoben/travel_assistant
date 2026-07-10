@@ -58,6 +58,7 @@ class Settings:
     jwt_secret_key: str
     jwt_algorithm: str
     jwt_expire_minutes: int
+    anonymous_jwt_expire_minutes: int
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -135,6 +136,7 @@ def get_settings() -> Settings:
         jwt_secret_key=os.getenv("JWT_SECRET_KEY", "change-me-in-production"),
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "1440")),
+        anonymous_jwt_expire_minutes=int(os.getenv("ANONYMOUS_JWT_EXPIRE_MINUTES", "43200")),
     )
 
 

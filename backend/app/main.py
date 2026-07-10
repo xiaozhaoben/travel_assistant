@@ -22,6 +22,7 @@ from .domain.models import (
     AuthTokenResponse,
     MergeAnonymousRequest,
     PlanEditRequest,
+    PrincipalTokenResponse,
     TravelDocumentAutoIngestRequest,
     TravelDocumentIngestJobResponse,
     TravelDocumentIngestJobStatus,
@@ -52,12 +53,18 @@ from .auth.service import (
     ensure_users_table,
     get_auth_connections,
     get_current_user,
-    get_current_user_optional,
     get_user_by_username,
     hash_password,
     merge_anonymous_conversations,
     verify_password,
 )
+from .auth.principal import (
+    Principal,
+    configure_principal_auth,
+    create_principal_token,
+    get_current_principal,
+)
+from .core.api_errors import install_api_error_handlers
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.prompts import render_travel_document_metadata_prompt
@@ -244,6 +251,7 @@ def get_app_resources() -> AppResources:
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    configure_principal_auth(settings.jwt_secret_key, settings.jwt_algorithm)
     resources = current_global_resources() or create_app_resources()
     bind_app_resources(resources)
     fastapi_app.state.resources = resources
@@ -398,6 +406,7 @@ def hydrate_report_assets(report_id: str, result: TripPlanningResult, store: obj
 
 
 app = FastAPI(title="Travel Assistant API", version="1.0.0", lifespan=lifespan)
+install_api_error_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -500,14 +509,19 @@ def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
 @app.post("/api/qa/ask", response_model=ApiResponse[TravelQAResponse])
 def ask_travel_question(
     request: TravelQARequest,
-    auth_user: dict | None = Depends(get_current_user_optional),
+    principal: Principal = Depends(get_current_principal),
 ):
     resources = get_app_resources()
-    _apply_auth_identity(request, auth_user)
-    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+    user_id, anonymous_id = _apply_auth_identity(principal)
+    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(
+        resources,
+        request,
+        user_id=user_id,
+        anonymous_id=anonymous_id,
+    )
     config = _qa_thread_config(
         conversation["id"] if conversation else None,
-        user_id=auth_user["user_id"] if auth_user else request.user_id,
+        user_id=user_id,
     )
 
     result = _call_qa_agent(
@@ -524,14 +538,19 @@ def ask_travel_question(
 @app.post("/api/qa/ask/stream")
 def stream_travel_question(
     request: TravelQARequest,
-    auth_user: dict | None = Depends(get_current_user_optional),
+    principal: Principal = Depends(get_current_principal),
 ):
     resources = get_app_resources()
-    _apply_auth_identity(request, auth_user)
-    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(resources, request)
+    user_id, anonymous_id = _apply_auth_identity(principal)
+    resource_qa_store, conversation, conversation_history = _prepare_qa_memory(
+        resources,
+        request,
+        user_id=user_id,
+        anonymous_id=anonymous_id,
+    )
     config = _qa_thread_config(
         conversation["id"] if conversation else None,
-        user_id=auth_user["user_id"] if auth_user else request.user_id,
+        user_id=user_id,
     )
 
     def event_stream():
@@ -589,7 +608,12 @@ def stream_travel_question(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-def _prepare_qa_memory(resources: AppResources, request: TravelQARequest):
+def _prepare_qa_memory(
+    resources: AppResources,
+    request: TravelQARequest,
+    user_id: str | None,
+    anonymous_id: str | None,
+):
     resource_qa_store = getattr(resources, "qa_store", None)
     conversation = None
     conversation_history: list[dict[str, str]] = []
@@ -598,8 +622,8 @@ def _prepare_qa_memory(resources: AppResources, request: TravelQARequest):
     try:
         conversation = resource_qa_store.get_or_create_conversation(
             conversation_id=request.conversation_id,
-            user_id=request.user_id,
-            anonymous_id=request.anonymous_id,
+            user_id=user_id,
+            anonymous_id=anonymous_id,
             title=request.question,
         )
         conversation_history = resource_qa_store.get_recent_messages(conversation["id"], limit=8)
@@ -621,10 +645,8 @@ def _qa_thread_config(thread_id: str | None, user_id: str | None = None) -> dict
     return {"configurable": configurable}
 
 
-def _apply_auth_identity(request: TravelQARequest, auth_user: dict | None) -> None:
-    if auth_user is not None:
-        request.user_id = auth_user["user_id"]
-        request.anonymous_id = None
+def _apply_auth_identity(principal: Principal) -> tuple[str | None, str | None]:
+    return principal.user_id, principal.anonymous_id
 
 
 def _call_qa_agent(qa_agent_instance, question: str, top_k: int, conversation_history: list[dict[str, str]], config: dict | None):
@@ -1276,6 +1298,29 @@ def get_map_weather(
 # ---------------------------------------------------------------------------
 # 认证端点
 # ---------------------------------------------------------------------------
+
+
+@app.post("/api/auth/anonymous", response_model=ApiResponse[PrincipalTokenResponse])
+def create_anonymous_principal():
+    subject = str(uuid.uuid4())
+    token = create_principal_token(
+        subject=subject,
+        principal_type="anonymous",
+        username="",
+        secret=settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+        expire_minutes=settings.anonymous_jwt_expire_minutes,
+    )
+    return ApiResponse[PrincipalTokenResponse](
+        success=True,
+        message="匿名身份创建成功",
+        data=PrincipalTokenResponse(
+            access_token=token,
+            principal_type="anonymous",
+            subject=subject,
+            expires_in=settings.anonymous_jwt_expire_minutes * 60,
+        ),
+    )
 
 
 @app.post("/api/auth/register", response_model=ApiResponse[AuthTokenResponse])
