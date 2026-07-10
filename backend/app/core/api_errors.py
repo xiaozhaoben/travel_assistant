@@ -75,7 +75,13 @@ def install_api_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
-        logger.exception("Unhandled application error")
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.error(
+            "Application request failed request_id=%s category=%s exception_type=%s",
+            request_id,
+            "INTERNAL_ERROR",
+            type(exc).__name__,
+        )
         return _error_response(
             request,
             status_code=500,

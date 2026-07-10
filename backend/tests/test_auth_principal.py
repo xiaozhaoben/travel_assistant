@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import logging
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
@@ -14,6 +16,7 @@ from app.auth.principal import (
     decode_principal_token,
     get_current_principal,
     get_current_principal_optional,
+    require_user_principal,
 )
 from app.core.api_errors import api_error, install_api_error_handlers
 from app.core.config import get_settings
@@ -58,6 +61,10 @@ def _dependency_client() -> TestClient:
     @app.get("/optional")
     def optional(principal: Principal | None = Depends(get_current_principal_optional)):
         return {"subject": principal.subject if principal else None}
+
+    @app.get("/user-required")
+    def user_required(principal: Principal = Depends(require_user_principal)):
+        return {"subject": principal.subject}
 
     @app.get("/teapot")
     def teapot():
@@ -110,6 +117,51 @@ def test_invalid_principal_token_is_unauthorized(token):
         decode_principal_token(token(), SECRET, ALGORITHM)
 
     assert exc_info.value.status_code == 401
+    assert exc_info.value.code == "AUTH_TOKEN_INVALID"
+
+
+@pytest.mark.parametrize(
+    "missing_claim",
+    ["exp", "iat", "sub"],
+)
+def test_principal_token_requires_standard_claims(missing_claim: str):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": "user-123",
+        "principal_type": "user",
+        "preferred_username": "alice",
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+    }
+    payload.pop(missing_claim)
+    token = jwt.encode(payload, SECRET, algorithm=ALGORITHM)
+
+    with pytest.raises(HTTPException) as exc_info:
+        decode_principal_token(token, SECRET, ALGORITHM)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.code == "AUTH_TOKEN_INVALID"
+
+
+def test_principal_token_rejects_non_string_subject():
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": 123,
+            "principal_type": "user",
+            "preferred_username": "alice",
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+        },
+        SECRET,
+        algorithm=ALGORITHM,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        decode_principal_token(token, SECRET, ALGORITHM)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.code == "AUTH_TOKEN_INVALID"
 
 
 def test_unknown_principal_type_is_rejected():
@@ -130,6 +182,7 @@ def test_unknown_principal_type_is_rejected():
         decode_principal_token(token, SECRET, ALGORITHM)
 
     assert exc_info.value.status_code == 401
+    assert exc_info.value.code == "AUTH_TOKEN_INVALID"
 
 
 def test_legacy_user_token_with_username_is_accepted():
@@ -151,18 +204,22 @@ def test_legacy_user_token_with_username_is_accepted():
 
 
 @pytest.mark.parametrize(
-    "path,authorization",
+    "path,authorization,expected_code",
     [
-        ("/required", None),
-        ("/required", "Basic abc"),
-        ("/required", "Bearer"),
-        ("/required", "Bearer invalid-token"),
-        ("/optional", "Basic abc"),
-        ("/optional", "Bearer"),
-        ("/optional", "Bearer invalid-token"),
+        ("/required", None, "AUTH_REQUIRED"),
+        ("/required", "Basic abc", "AUTH_INVALID_HEADER"),
+        ("/required", "Bearer", "AUTH_INVALID_HEADER"),
+        ("/required", "Bearer invalid-token", "AUTH_TOKEN_INVALID"),
+        ("/optional", "Basic abc", "AUTH_INVALID_HEADER"),
+        ("/optional", "Bearer", "AUTH_INVALID_HEADER"),
+        ("/optional", "Bearer invalid-token", "AUTH_TOKEN_INVALID"),
     ],
 )
-def test_missing_or_invalid_authorization_is_unauthorized(path: str, authorization: str | None):
+def test_missing_or_invalid_authorization_is_unauthorized(
+    path: str,
+    authorization: str | None,
+    expected_code: str,
+):
     client = _dependency_client()
     headers = {"Authorization": authorization} if authorization is not None else {}
 
@@ -170,7 +227,21 @@ def test_missing_or_invalid_authorization_is_unauthorized(path: str, authorizati
 
     assert response.status_code == 401
     assert response.json()["success"] is False
+    assert response.json()["code"] == expected_code
     assert response.json()["request_id"]
+
+
+def test_user_required_dependency_rejects_anonymous_principal():
+    client = _dependency_client()
+
+    response = client.get(
+        "/user-required",
+        headers={"Authorization": f"Bearer {_token('anon-123', 'anonymous')}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_USER_REQUIRED"
+    assert response.json()["message"] == "该操作需要登录用户身份"
 
 
 def test_optional_principal_only_allows_truly_missing_authorization():
@@ -235,10 +306,11 @@ def test_request_validation_error_has_stable_shape_and_request_id():
     assert response.headers["X-Request-ID"] == response.json()["request_id"]
 
 
-def test_unhandled_exception_has_stable_shape_without_exception_details():
+def test_unhandled_exception_has_stable_shape_without_exception_details(caplog):
     client = _dependency_client()
 
-    response = client.get("/crash", headers={"X-Request-ID": "internal-error-123"})
+    with caplog.at_level(logging.ERROR, logger="app.core.api_errors"):
+        response = client.get("/crash", headers={"X-Request-ID": "internal-error-123"})
 
     assert response.status_code == 500
     assert response.json() == {
@@ -249,6 +321,9 @@ def test_unhandled_exception_has_stable_shape_without_exception_details():
     }
     assert response.headers["X-Request-ID"] == response.json()["request_id"]
     assert "secret token must not leak" not in response.text
+    assert "secret token must not leak" not in caplog.text
+    assert "internal-error-123" in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_travel_qa_request_ignores_legacy_identity_fields():
@@ -279,3 +354,51 @@ def test_anonymous_endpoint_issues_server_generated_principal_token():
     principal = decode_principal_token(data["access_token"], settings.jwt_secret_key, settings.jwt_algorithm)
     assert principal.subject == data["subject"]
     assert principal.principal_type == "anonymous"
+
+
+def test_lifespan_non_default_secret_issues_token_accepted_by_qa(monkeypatch):
+    import app.main as main_module
+
+    original_settings = main_module.settings
+    resource_names = (
+        "orchestrator",
+        "report_store",
+        "travel_vector_store",
+        "qa_store",
+        "qa_checkpointer",
+        "news_agent",
+        "qa_agent",
+        "image_provider",
+    )
+    original_resource_bindings = {name: getattr(main_module, name) for name in resource_names}
+    isolated_resources = main_module.create_app_resources()
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        replace(original_settings, jwt_secret_key="non-default-lifespan-secret"),
+    )
+    monkeypatch.setattr(main_module, "current_global_resources", lambda: None)
+    monkeypatch.setattr(main_module, "create_app_resources", lambda: isolated_resources)
+    monkeypatch.setattr(
+        main_module,
+        "_call_qa_agent",
+        lambda *args, **kwargs: main_module.TravelQAResponse(answer="认证成功", generation_mode="fallback"),
+    )
+
+    try:
+        with TestClient(main_module.app) as client:
+            anonymous_response = client.post("/api/auth/anonymous")
+            token = anonymous_response.json()["data"]["access_token"]
+            qa_response = client.post(
+                "/api/qa/ask",
+                json={"question": "南京怎么玩？"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    finally:
+        configure_principal_auth(original_settings.jwt_secret_key, original_settings.jwt_algorithm)
+        for name, value in original_resource_bindings.items():
+            setattr(main_module, name, value)
+
+    assert anonymous_response.status_code == 200
+    assert qa_response.status_code == 200
+    assert qa_response.json()["data"]["answer"] == "认证成功"

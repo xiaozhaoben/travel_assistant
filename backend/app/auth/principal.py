@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import re
 from typing import Literal
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from app.core.api_errors import api_error
 
@@ -64,7 +64,12 @@ def decode_principal_token(token: str, secret: str, algorithm: str) -> Principal
     if jwt is None or JWTError is None:
         raise RuntimeError("python-jose is required. Run: pip install python-jose[cryptography]")
     try:
-        payload = jwt.decode(token, secret, algorithms=[algorithm])
+        payload = jwt.decode(
+            token,
+            secret,
+            algorithms=[algorithm],
+            options={"require_exp": True, "require_iat": True, "require_sub": True},
+        )
     except JWTError as exc:
         raise _invalid_token() from exc
 
@@ -73,10 +78,16 @@ def decode_principal_token(token: str, secret: str, algorithm: str) -> Principal
     principal_type = payload.get("principal_type")
     if principal_type is None and username:
         principal_type = "user"
-    if not subject or principal_type not in ("anonymous", "user"):
+    # Migration boundary: legacy user subjects may be non-UUID values, but they
+    # must remain non-empty strings until all historical tokens have expired.
+    if (
+        not isinstance(subject, str)
+        or not subject
+        or principal_type not in ("anonymous", "user")
+    ):
         raise _invalid_token()
     return Principal(
-        subject=str(subject),
+        subject=subject,
         principal_type=principal_type,
         username=str(username or ""),
     )
@@ -109,6 +120,18 @@ def get_current_principal_optional(
     return decode_principal_token(token, _secret, _algorithm)
 
 
+def require_user_principal(
+    principal: Principal = Depends(get_current_principal),
+) -> Principal:
+    if principal.principal_type != "user":
+        raise api_error(
+            status.HTTP_403_FORBIDDEN,
+            "AUTH_USER_REQUIRED",
+            "该操作需要登录用户身份",
+        )
+    return principal
+
+
 def _bearer_token(authorization: str | None) -> str:
     if authorization is None:
         raise api_error(status.HTTP_401_UNAUTHORIZED, "AUTH_REQUIRED", "需要 Bearer 认证令牌")
@@ -119,4 +142,4 @@ def _bearer_token(authorization: str | None) -> str:
 
 
 def _invalid_token() -> HTTPException:
-    return api_error(status.HTTP_401_UNAUTHORIZED, "AUTH_INVALID_TOKEN", "认证令牌已过期或无效")
+    return api_error(status.HTTP_401_UNAUTHORIZED, "AUTH_TOKEN_INVALID", "认证令牌已过期或无效")

@@ -10,7 +10,7 @@ import threading
 import uuid
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -538,6 +538,7 @@ def ask_travel_question(
 @app.post("/api/qa/ask/stream")
 def stream_travel_question(
     request: TravelQARequest,
+    http_request: Request,
     principal: Principal = Depends(get_current_principal),
 ):
     resources = get_app_resources()
@@ -601,8 +602,14 @@ def stream_travel_question(
                 final_response = TravelQAResponse(answer="".join(answer_parts))
             final_response = _persist_qa_exchange(resource_qa_store, conversation, request.question, final_response)
             yield _sse_event("done", final_response.model_dump(mode="json"))
-        except Exception:
-            logger.exception("Travel QA stream failed")
+        except Exception as exc:
+            request_id = getattr(http_request.state, "request_id", "unknown")
+            logger.error(
+                "Travel QA stream failed request_id=%s category=%s exception_type=%s",
+                request_id,
+                "QA_STREAM_FAILED",
+                type(exc).__name__,
+            )
             yield _sse_event(
                 "error",
                 {"code": "QA_STREAM_FAILED", "message": "智能问答暂时不可用"},

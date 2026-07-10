@@ -11,6 +11,7 @@ from app.auth.principal import (
     decode_principal_token,
     get_current_principal,
     get_current_principal_optional,
+    require_user_principal,
 )
 from app.storage.db import DatabaseConnectionManager
 
@@ -168,9 +169,7 @@ def get_auth_connections() -> DatabaseConnectionManager:
 def get_current_user(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
-    principal = get_current_principal(authorization)
-    if principal.principal_type != "user":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要用户认证")
+    principal = require_user_principal(get_current_principal(authorization))
     return {"user_id": principal.subject, "username": principal.username}
 
 
@@ -180,6 +179,5 @@ def get_current_user_optional(
     principal = get_current_principal_optional(authorization)
     if principal is None:
         return None
-    if principal.principal_type != "user":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要用户认证")
+    principal = require_user_principal(principal)
     return {"user_id": principal.subject, "username": principal.username}
