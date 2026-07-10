@@ -76,7 +76,7 @@ def decode_principal_token(token: str, secret: str, algorithm: str) -> Principal
     subject = payload.get("sub")
     username = payload.get("preferred_username")
     principal_type = payload.get("principal_type")
-    if principal_type is None and username:
+    if "principal_type" not in payload and username:
         principal_type = "user"
     # Migration boundary: legacy user subjects may be non-UUID values, but they
     # must remain non-empty strings until all historical tokens have expired.

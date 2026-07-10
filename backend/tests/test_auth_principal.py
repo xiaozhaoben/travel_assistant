@@ -203,6 +203,27 @@ def test_legacy_user_token_with_username_is_accepted():
     assert principal == Principal(subject="legacy-user", principal_type="user", username="old-alice")
 
 
+def test_explicit_null_principal_type_is_rejected():
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": "legacy-user",
+            "principal_type": None,
+            "preferred_username": "old-alice",
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+        },
+        SECRET,
+        algorithm=ALGORITHM,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        decode_principal_token(token, SECRET, ALGORITHM)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.code == "AUTH_TOKEN_INVALID"
+
+
 @pytest.mark.parametrize(
     "path,authorization,expected_code",
     [
