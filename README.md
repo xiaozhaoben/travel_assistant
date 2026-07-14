@@ -40,6 +40,41 @@ UNSPLASH_ACCESS_KEY=你的Unsplash Access Key
 DashScope/Qwen 模型默认建议保持 `LLM_ENABLE_THINKING=false`，这样更适合快速返回结构化 JSON 行程。
 默认 `PLANNER_MODE=fast` 会跳过最终 Planner 大模型整合以提升响应速度；如需更强的文本质量和路线解释，可设为 `quality`。
 
+### 生产环境身份、Redis 与安全边界
+
+匿名访问由服务端 `POST /api/auth/anonymous` 签发 JWT，浏览器不能自行指定匿名身份。匿名令牌使用 `JWT_SECRET_KEY` 签名，生命周期由 `ANONYMOUS_JWT_EXPIRE_MINUTES` 控制，默认 `43200` 分钟（30 天）；普通用户令牌由 `JWT_EXPIRE_MINUTES` 控制。生产环境必须替换默认 JWT 密钥并妥善轮换。
+
+Redis 用于分布式限流和知识入库任务状态。可使用 `REDIS_URL`，或使用以下拆分变量，真实值只应保存在部署环境或密钥管理服务中：
+
+```env
+REDIS_HOST=
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
+REDIS_CONNECT_TIMEOUT_SECONDS=2
+REDIS_SOCKET_TIMEOUT_SECONDS=2
+REDIS_MAX_CONNECTIONS=20
+```
+
+当前 Redis 连接暂未启用 TLS，只适合受控内网。安全组必须将 Redis 端口限制为仅后端实例或专用内网网段可访问，禁止向公网开放；需要跨不可信网络部署时，应先增加 TLS 支持。
+
+限流使用 Redis 固定窗口，窗口由 `RATE_LIMIT_WINDOW_SECONDS` 控制，默认 60 秒。`RATE_LIMIT_ENABLED` 可显式开关；默认额度如下：
+
+| 类别 | 环境变量 | 每窗口默认次数 |
+| --- | --- | ---: |
+| 匿名令牌签发 | `RATE_LIMIT_ANONYMOUS_ISSUE_LIMIT` | 20 |
+| 注册 | `RATE_LIMIT_REGISTER_LIMIT` | 10 |
+| 登录 | `RATE_LIMIT_LOGIN_LIMIT` | 10 |
+| 智能问答 | `RATE_LIMIT_QA_LIMIT` | 20 |
+| 行程规划 | `RATE_LIMIT_PLANNING_LIMIT` | 5 |
+| 地图接口 | `RATE_LIMIT_MAP_LIMIT` | 60 |
+| 知识库读取 | `RATE_LIMIT_KNOWLEDGE_READ_LIMIT` | 30 |
+| 知识库写入 | `RATE_LIMIT_KNOWLEDGE_WRITE_LIMIT` | 5 |
+
+Redis 不可用时，匿名签发、注册、登录和知识库读写采用 fail-closed 并返回服务不可用；智能问答、行程规划和地图查询采用 fail-open，避免普通旅行功能被 Redis 故障完全阻断。CI 通过 `RATE_LIMIT_ENABLED=false` 和测试替身运行，不连接外部 Redis。
+
+服务端 URL 抓取仅接受 `http` / `https` 的公网目标，拒绝本机、私网、链路本地、多播、保留地址及重定向，并将 DNS 解析结果固定到已校验的公网 IP。响应只允许白名单文本或 Feed Content-Type；默认最大响应为 2 MiB，连接、读取和总耗时分别由 `URL_FETCH_CONNECT_TIMEOUT_SECONDS`（8 秒）、`URL_FETCH_READ_TIMEOUT_SECONDS`（20 秒）和 `URL_FETCH_TOTAL_TIMEOUT_SECONDS`（30 秒）限制，大小由 `URL_FETCH_MAX_BYTES` 调整。
+
 高德地图后端调用走 MCP stdio，不再直接请求高德 REST API。后端会通过以下 MCP server 启动方式调用工具：
 
 ```json
@@ -213,9 +248,14 @@ docker run -d --name travel-assistant-backend --env-file backend/.env -p 8000:80
 前端也可以用 Docker 预览静态产物：
 
 ```bash
-docker build -t travel-assistant-frontend ./frontend --build-arg VITE_API_BASE_URL=https://你的后端域名 --build-arg VITE_API_TIMEOUT_MS=300000
-docker run -d --name travel-assistant-frontend -p 8080:80 travel-assistant-frontend
+docker build -t travel-assistant-frontend ./frontend
+docker run -d --name travel-assistant-frontend -p 8080:80 \
+  -e VITE_API_BASE_URL=https://你的后端域名 \
+  -e VITE_API_TIMEOUT_MS=300000 \
+  travel-assistant-frontend
 ```
+
+前端容器启动时会使用上述环境变量生成 `/config.js`，因此同一镜像可以部署到不同环境，不需要为后端地址重新构建。
 
 GitHub Pages 部署使用 `.github/workflows/deploy-frontend-pages.yml`。在仓库的 `Settings -> Variables -> Actions` 配置：
 
@@ -224,4 +264,4 @@ GitHub Pages 部署使用 `.github/workflows/deploy-frontend-pages.yml`。在仓
 - `VITE_BASE_PATH`：项目 Pages 默认可不填；自定义域名时设为 `/`
 - `VITE_AMAP_WEB_JS_KEY` / `VITE_AMAP_SECURITY_JS_CODE`：需要真实高德 JS 地图时填写
 
-推送到 `main` 或 `master` 后会自动构建 `frontend` 并发布到 GitHub Pages。
+Pull Request 会先运行完整后端测试、前端生产构建以及前后端 Docker 构建/前端容器冒烟测试。推送到 `main` 或 `master` 后也会执行这些门禁，全部通过后才构建并发布到 GitHub Pages。
