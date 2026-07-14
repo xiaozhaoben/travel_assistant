@@ -3,6 +3,8 @@ services:
     build:
       context: ./backend
     env_file:
+      # Redis/rate-limit settings are supplied here as environment variables;
+      # credentials must not be embedded in this Compose file.
       - path: ./backend/.env
         required: false
     environment:

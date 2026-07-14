@@ -66,6 +66,8 @@ from .auth.principal import (
     require_user_principal,
 )
 from .core.api_errors import api_error, install_api_error_handlers
+from .core.rate_limit import Policy, RateLimiter, create_rate_limit_policies
+from .core.redis_client import RedisClient, create_redis_client
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.prompts import render_travel_document_metadata_prompt
@@ -92,6 +94,9 @@ class AppResources:
     news_agent: TravelNewsIngestionAgent
     qa_agent: TravelQuestionAnsweringAgent
     image_provider: UnsplashMCPClient
+    redis_client: RedisClient | None = None
+    rate_limiter: RateLimiter | None = None
+    rate_limit_policies: dict[str, Policy] | None = None
 
 
 @dataclass
@@ -114,6 +119,9 @@ qa_checkpointer = None
 news_agent: TravelNewsIngestionAgent | None = None
 qa_agent: TravelQuestionAnsweringAgent | None = None
 image_provider: UnsplashMCPClient | None = None
+redis_client: RedisClient | None = None
+rate_limiter: RateLimiter | None = None
+rate_limit_policies: dict[str, Policy] | None = None
 knowledge_ingest_jobs: dict[str, KnowledgeIngestJob] = {}
 knowledge_ingest_jobs_lock = threading.Lock()
 
@@ -138,6 +146,11 @@ def create_app_resources() -> AppResources:
         if resource_settings.disable_external_api
         else UnsplashMCPClient()
     )
+    resource_redis_client = create_redis_client(resource_settings)
+    resource_rate_limiter = RateLimiter(
+        resource_redis_client.client,
+        enabled=resource_settings.rate_limit_enabled,
+    )
     return AppResources(
         orchestrator=resource_orchestrator,
         report_store=resource_report_store,
@@ -147,11 +160,15 @@ def create_app_resources() -> AppResources:
         news_agent=resource_news_agent,
         qa_agent=resource_qa_agent,
         image_provider=resource_image_provider,
+        redis_client=resource_redis_client,
+        rate_limiter=resource_rate_limiter,
+        rate_limit_policies=create_rate_limit_policies(resource_settings),
     )
 
 
 def bind_app_resources(resources: AppResources) -> None:
     global orchestrator, report_store, travel_vector_store, qa_store, qa_checkpointer, news_agent, qa_agent, image_provider
+    global redis_client, rate_limiter, rate_limit_policies
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
@@ -162,6 +179,9 @@ def bind_app_resources(resources: AppResources) -> None:
     news_agent = resources.news_agent
     qa_agent = resources.qa_agent
     image_provider = resources.image_provider
+    redis_client = resources.redis_client
+    rate_limiter = resources.rate_limiter
+    rate_limit_policies = resources.rate_limit_policies
 
 
 def current_global_resources() -> AppResources | None:
@@ -181,6 +201,9 @@ def current_global_resources() -> AppResources | None:
             checkpointer=qa_checkpointer,
         ),
         image_provider=image_provider or UnsplashMCPClient(),
+        redis_client=redis_client,
+        rate_limiter=rate_limiter,
+        rate_limit_policies=rate_limit_policies,
     )
 
 
@@ -205,6 +228,9 @@ def get_app_resources() -> AppResources:
             news_agent=news_agent or getattr(state_resources, "news_agent", None),
             qa_agent=qa_agent or getattr(state_resources, "qa_agent", None),
             image_provider=image_provider or getattr(state_resources, "image_provider", None),
+            redis_client=redis_client or getattr(state_resources, "redis_client", None),
+            rate_limiter=rate_limiter or getattr(state_resources, "rate_limiter", None),
+            rate_limit_policies=rate_limit_policies or getattr(state_resources, "rate_limit_policies", None),
         )
         app.state.resources = resources
         return resources
@@ -242,6 +268,9 @@ def get_app_resources() -> AppResources:
             news_agent=news_agent or base_resources.news_agent,
             qa_agent=qa_agent or base_resources.qa_agent,
             image_provider=image_provider or base_resources.image_provider,
+            redis_client=redis_client or base_resources.redis_client,
+            rate_limiter=rate_limiter or base_resources.rate_limiter,
+            rate_limit_policies=rate_limit_policies or base_resources.rate_limit_policies,
         )
     else:
         resources = global_resources or create_app_resources()
@@ -275,6 +304,7 @@ def close_app_resources(resources: AppResources) -> None:
         resources.qa_store,
         resources.qa_checkpointer,
         resources.image_provider,
+        resources.redis_client,
         resources.orchestrator.amap,
         resources.orchestrator.unsplash,
     ):
@@ -285,6 +315,80 @@ def close_app_resources(resources: AppResources) -> None:
         pool_close = getattr(connection_pool, "close", None)
         if callable(pool_close):
             pool_close()
+
+
+def _rate_limit_subject(http_request: Request, principal: Principal | None = None) -> str:
+    if principal is not None:
+        return f"principal:{principal.principal_type}:{principal.subject}"
+    client = http_request.client
+    client_host = client.host if client is not None and client.host else "unknown"
+    return f"ip:{client_host}"
+
+
+def _enforce_rate_limit(
+    policy_name: str,
+    http_request: Request,
+    principal: Principal | None = None,
+) -> int | None:
+    resources = get_app_resources()
+    limiter = getattr(resources, "rate_limiter", None)
+    policies = getattr(resources, "rate_limit_policies", None)
+    if limiter is None or not policies or policy_name not in policies:
+        return None
+    remaining = limiter.enforce(
+        policies[policy_name],
+        _rate_limit_subject(http_request, principal),
+    )
+    return remaining
+
+
+def _limit_anonymous_issue(http_request: Request):
+    return _enforce_rate_limit("anonymous_issue", http_request)
+
+
+def _limit_register(http_request: Request):
+    return _enforce_rate_limit("register", http_request)
+
+
+def _limit_login(http_request: Request):
+    return _enforce_rate_limit("login", http_request)
+
+
+def _limit_qa(
+    http_request: Request,
+    principal: Principal = Depends(get_current_principal),
+):
+    return _enforce_rate_limit("qa", http_request, principal)
+
+
+def _limit_planning(
+    http_request: Request,
+    principal: Principal = Depends(get_current_principal),
+):
+    return _enforce_rate_limit("planning", http_request, principal)
+
+
+def _limit_map(
+    http_request: Request,
+    principal: Principal | None = Depends(get_current_principal_optional),
+):
+    return _enforce_rate_limit("map", http_request, principal)
+
+
+def _limit_knowledge_read(
+    http_request: Request,
+    principal: Principal | None = Depends(get_current_principal_optional),
+):
+    user_principal = principal if principal is not None and principal.principal_type == "user" else None
+    return _enforce_rate_limit("knowledge_read", http_request, user_principal)
+
+
+def _limit_knowledge_write(
+    http_request: Request,
+    principal: Principal | None = Depends(get_current_principal_optional),
+):
+    user_principal = principal if principal is not None and principal.principal_type == "user" else None
+    return _enforce_rate_limit("knowledge_write", http_request, user_principal)
 
 
 def asset_cache_key(asset_type: str, city: str | None, name: str, extra: str | None = None) -> str:
@@ -490,6 +594,9 @@ def health():
         "qa_memory": resource_qa_store.health()
         if resource_qa_store is not None
         else {"enabled": False, "ok": False},
+        "redis": resources.redis_client.health()
+        if getattr(resources, "redis_client", None) is not None
+        else {"enabled": False, "ok": False},
         "web_search": {
             "enabled": bool(settings.web_search_mcp_command),
             "tool": settings.web_search_mcp_tool,
@@ -517,6 +624,7 @@ def plan_trip(
     request: TripPlanRequest,
     background_tasks: BackgroundTasks,
     principal: Principal = Depends(get_current_principal),
+    _rate_limit: int | None = Depends(_limit_planning),
 ):
     resources = get_app_resources()
     owner_type, owner_id = principal.principal_type, principal.subject
@@ -558,6 +666,7 @@ def plan_trip(
 def ask_travel_question(
     request: TravelQARequest,
     principal: Principal = Depends(get_current_principal),
+    _rate_limit: int | None = Depends(_limit_qa),
 ):
     resources = get_app_resources()
     user_id, anonymous_id = _apply_auth_identity(principal)
@@ -591,6 +700,7 @@ def stream_travel_question(
     request: TravelQARequest,
     http_request: Request,
     principal: Principal = Depends(get_current_principal),
+    _rate_limit: int | None = Depends(_limit_qa),
 ):
     resources = get_app_resources()
     user_id, anonymous_id = _apply_auth_identity(principal)
@@ -836,7 +946,10 @@ def get_qa_conversation(
 
 
 @app.post("/api/news/ingest", response_model=ApiResponse[TravelNewsIngestResult])
-def ingest_travel_news(request: TravelNewsIngestRequest):
+def ingest_travel_news(
+    request: TravelNewsIngestRequest,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     resources = get_app_resources()
     feed_urls = request.feed_urls or configured_travel_feeds()
     result = TravelNewsIngestResult.model_validate(resources.news_agent.fetch_travel_feeds(feed_urls))
@@ -846,7 +959,10 @@ def ingest_travel_news(request: TravelNewsIngestRequest):
 
 
 @app.post("/api/knowledge/documents", response_model=ApiResponse[TravelDocumentIngestResult])
-def ingest_travel_document(request: TravelDocumentIngestRequest):
+def ingest_travel_document(
+    request: TravelDocumentIngestRequest,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     store = travel_vector_store
     if store is None:
         resources = get_app_resources()
@@ -878,7 +994,10 @@ def ingest_travel_document(request: TravelDocumentIngestRequest):
 
 
 @app.post("/api/knowledge/documents/from-url", response_model=ApiResponse[TravelDocumentIngestResult])
-def ingest_travel_document_from_url(request: TravelDocumentUrlIngestRequest):
+def ingest_travel_document_from_url(
+    request: TravelDocumentUrlIngestRequest,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     store = travel_vector_store
     if store is None:
         resources = get_app_resources()
@@ -935,7 +1054,10 @@ def ingest_travel_document_from_url(request: TravelDocumentUrlIngestRequest):
 
 
 @app.post("/api/knowledge/documents/auto", response_model=ApiResponse[TravelDocumentIngestResult])
-def ingest_travel_document_auto(request: TravelDocumentAutoIngestRequest):
+def ingest_travel_document_auto(
+    request: TravelDocumentAutoIngestRequest,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     store = travel_vector_store
     if store is None:
         resources = get_app_resources()
@@ -1040,7 +1162,11 @@ def run_knowledge_ingest_job(job_id: str, request, runner) -> None:
 
 
 @app.post("/api/knowledge/documents/from-url/jobs", response_model=ApiResponse[TravelDocumentIngestJobResponse])
-def create_travel_document_url_ingest_job(request: TravelDocumentUrlIngestRequest, background_tasks: BackgroundTasks):
+def create_travel_document_url_ingest_job(
+    request: TravelDocumentUrlIngestRequest,
+    background_tasks: BackgroundTasks,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     job = create_knowledge_ingest_job("url", "网页入库任务已创建")
     background_tasks.add_task(run_knowledge_ingest_job, job.job_id, request, ingest_travel_document_from_url)
     return ApiResponse[TravelDocumentIngestJobResponse](
@@ -1051,7 +1177,11 @@ def create_travel_document_url_ingest_job(request: TravelDocumentUrlIngestReques
 
 
 @app.post("/api/knowledge/documents/auto/jobs", response_model=ApiResponse[TravelDocumentIngestJobResponse])
-def create_travel_document_auto_ingest_job(request: TravelDocumentAutoIngestRequest, background_tasks: BackgroundTasks):
+def create_travel_document_auto_ingest_job(
+    request: TravelDocumentAutoIngestRequest,
+    background_tasks: BackgroundTasks,
+    _rate_limit: int | None = Depends(_limit_knowledge_write),
+):
     job = create_knowledge_ingest_job("upload", "文件入库任务已创建")
     background_tasks.add_task(run_knowledge_ingest_job, job.job_id, request, ingest_travel_document_auto)
     return ApiResponse[TravelDocumentIngestJobResponse](
@@ -1062,7 +1192,10 @@ def create_travel_document_auto_ingest_job(request: TravelDocumentAutoIngestRequ
 
 
 @app.get("/api/knowledge/documents/jobs/{job_id}", response_model=ApiResponse[TravelDocumentIngestJobStatus])
-def get_travel_document_ingest_job(job_id: str):
+def get_travel_document_ingest_job(
+    job_id: str,
+    _rate_limit: int | None = Depends(_limit_knowledge_read),
+):
     with knowledge_ingest_jobs_lock:
         job = knowledge_ingest_jobs.get(job_id)
     if job is None:
@@ -1075,7 +1208,10 @@ def get_travel_document_ingest_job(job_id: str):
 
 
 @app.post("/api/knowledge/search", response_model=ApiResponse[TravelDocumentSearchResponse])
-def search_travel_documents(request: TravelDocumentSearchRequest):
+def search_travel_documents(
+    request: TravelDocumentSearchRequest,
+    _rate_limit: int | None = Depends(_limit_knowledge_read),
+):
     store = travel_vector_store
     if store is None:
         resources = get_app_resources()
@@ -1240,7 +1376,7 @@ def title_from_url(url: str) -> str:
 
 
 @app.get("/api/news/status")
-def travel_news_status():
+def travel_news_status(_rate_limit: int | None = Depends(_limit_knowledge_read)):
     resources = get_app_resources()
     return {
         "success": True,
@@ -1258,6 +1394,7 @@ def travel_news_status():
 def recalculate_trip(
     request: PlanEditRequest,
     principal: Principal = Depends(get_current_principal),
+    _rate_limit: int | None = Depends(_limit_planning),
 ):
     resources = get_app_resources()
     owner_type, owner_id = principal.principal_type, principal.subject
@@ -1348,6 +1485,7 @@ def get_poi_photo(
     city: str = Query(default="", max_length=40),
     report_id: str | None = Query(default=None, max_length=80),
     principal: Principal | None = Depends(get_current_principal_optional),
+    _rate_limit: int | None = Depends(_limit_map),
 ):
     resources = get_app_resources()
     owner_type = principal.principal_type if principal else ""
@@ -1413,6 +1551,7 @@ def search_map_poi(
     keywords: str = Query(..., min_length=1, max_length=120),
     city: str = Query(default="北京", min_length=1, max_length=40),
     limit: int = Query(default=10, ge=1, le=30),
+    _rate_limit: int | None = Depends(_limit_map),
 ):
     resources = get_app_resources()
     cache_key = asset_cache_key("map_poi", city, keywords, str(limit))
@@ -1437,6 +1576,7 @@ def search_map_poi(
 def get_map_weather(
     city: str = Query(default="北京", min_length=1, max_length=40),
     days: int = Query(default=4, ge=1, le=10),
+    _rate_limit: int | None = Depends(_limit_map),
 ):
     from datetime import date
 
@@ -1455,7 +1595,7 @@ def get_map_weather(
 
 
 @app.post("/api/auth/anonymous", response_model=ApiResponse[PrincipalTokenResponse])
-def create_anonymous_principal():
+def create_anonymous_principal(_rate_limit: int | None = Depends(_limit_anonymous_issue)):
     subject = str(uuid.uuid4())
     token = create_principal_token(
         subject=subject,
@@ -1478,7 +1618,10 @@ def create_anonymous_principal():
 
 
 @app.post("/api/auth/register", response_model=ApiResponse[AuthTokenResponse])
-def register_user(request: UserRegisterRequest):
+def register_user(
+    request: UserRegisterRequest,
+    _rate_limit: int | None = Depends(_limit_register),
+):
     connections = get_auth_connections()
     existing = get_user_by_username(connections, request.username)
     if existing is not None:
@@ -1503,7 +1646,10 @@ def register_user(request: UserRegisterRequest):
 
 
 @app.post("/api/auth/login", response_model=ApiResponse[AuthTokenResponse])
-def login_user(request: UserLoginRequest):
+def login_user(
+    request: UserLoginRequest,
+    _rate_limit: int | None = Depends(_limit_login),
+):
     connections = get_auth_connections()
     user = get_user_by_username(connections, request.username)
     if user is None or not verify_password(request.password, user["password_hash"]):

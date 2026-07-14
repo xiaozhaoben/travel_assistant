@@ -59,6 +59,24 @@ class Settings:
     jwt_algorithm: str
     jwt_expire_minutes: int
     anonymous_jwt_expire_minutes: int
+    redis_url: str | None
+    redis_host: str | None
+    redis_port: int
+    redis_password: str | None
+    redis_db: int
+    redis_connect_timeout_seconds: float
+    redis_read_timeout_seconds: float
+    redis_max_connections: int
+    rate_limit_enabled: bool
+    rate_limit_anonymous_issue_limit: int
+    rate_limit_register_limit: int
+    rate_limit_login_limit: int
+    rate_limit_qa_limit: int
+    rate_limit_planning_limit: int
+    rate_limit_map_limit: int
+    rate_limit_knowledge_read_limit: int
+    rate_limit_knowledge_write_limit: int
+    rate_limit_window_seconds: int
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -85,6 +103,8 @@ def get_settings() -> Settings:
         for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174").split(",")
         if item.strip()
     ]
+    redis_url = _env_str("REDIS_URL")
+    redis_host = _env_str("REDIS_HOST")
 
     return Settings(
         llm_model_id=llm_model_id,
@@ -137,6 +157,24 @@ def get_settings() -> Settings:
         jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
         jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "1440")),
         anonymous_jwt_expire_minutes=int(os.getenv("ANONYMOUS_JWT_EXPIRE_MINUTES", "43200")),
+        redis_url=redis_url,
+        redis_host=redis_host,
+        redis_port=_env_int("REDIS_PORT", 6379),
+        redis_password=_env_str("REDIS_PASSWORD"),
+        redis_db=_env_int("REDIS_DB", 0),
+        redis_connect_timeout_seconds=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "2")),
+        redis_read_timeout_seconds=float(os.getenv("REDIS_READ_TIMEOUT_SECONDS", "2")),
+        redis_max_connections=max(1, _env_int("REDIS_MAX_CONNECTIONS", 20)),
+        rate_limit_enabled=_env_bool("RATE_LIMIT_ENABLED", default=bool(redis_url or redis_host)),
+        rate_limit_anonymous_issue_limit=max(1, _env_int("RATE_LIMIT_ANONYMOUS_ISSUE_LIMIT", 20)),
+        rate_limit_register_limit=max(1, _env_int("RATE_LIMIT_REGISTER_LIMIT", 10)),
+        rate_limit_login_limit=max(1, _env_int("RATE_LIMIT_LOGIN_LIMIT", 10)),
+        rate_limit_qa_limit=max(1, _env_int("RATE_LIMIT_QA_LIMIT", 20)),
+        rate_limit_planning_limit=max(1, _env_int("RATE_LIMIT_PLANNING_LIMIT", 5)),
+        rate_limit_map_limit=max(1, _env_int("RATE_LIMIT_MAP_LIMIT", 60)),
+        rate_limit_knowledge_read_limit=max(1, _env_int("RATE_LIMIT_KNOWLEDGE_READ_LIMIT", 30)),
+        rate_limit_knowledge_write_limit=max(1, _env_int("RATE_LIMIT_KNOWLEDGE_WRITE_LIMIT", 5)),
+        rate_limit_window_seconds=max(1, _env_int("RATE_LIMIT_WINDOW_SECONDS", 60)),
     )
 
 

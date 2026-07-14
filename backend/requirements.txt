@@ -21,3 +21,4 @@ mcp>=1.0.0
 uv>=0.8.0
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
+redis>=7.4.0,<8.0.0
