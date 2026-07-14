@@ -705,21 +705,17 @@ def _persist_qa_exchange(
     question: str,
     result: TravelQAResponse,
     *,
-    user_id: str | None = None,
-    anonymous_id: str | None = None,
+    user_id: str | None,
+    anonymous_id: str | None,
 ) -> TravelQAResponse:
     if conversation is None or resource_qa_store is None:
         logger.info("QA persist skipped: conversation=%s, qa_store=%s", conversation is not None, resource_qa_store is not None)
         return result
     message_id = None
     try:
-        resource_qa_store.append_message(
-            conversation["id"], "user", question,
-            user_id=user_id, anonymous_id=anonymous_id,
-        )
-        assistant_message = resource_qa_store.append_message(
+        assistant_message = resource_qa_store.append_exchange(
             conversation["id"],
-            "assistant",
+            question,
             result.answer,
             sources=result.sources,
             retrieved_count=result.retrieved_count,
@@ -730,6 +726,8 @@ def _persist_qa_exchange(
         )
         message_id = assistant_message.get("id") if isinstance(assistant_message, dict) else None
         logger.info("QA exchange persisted: conversation=%s, message_id=%s, answer_len=%d", conversation["id"], message_id, len(result.answer))
+    except QAConversationNotFound:
+        raise
     except Exception as exc:
         logger.warning("QA conversation memory write failed: %s", exc)
     return result.model_copy(update={"conversation_id": conversation["id"], "message_id": message_id})
@@ -786,8 +784,6 @@ def get_qa_conversation(
         raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
-    if conversation is None:
-        raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
     return ApiResponse[TravelQAConversationDetail](success=True, message="问答会话详情获取成功", data=conversation)
 
 

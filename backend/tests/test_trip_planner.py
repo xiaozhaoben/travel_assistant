@@ -3692,15 +3692,14 @@ def test_api_qa_persists_conversation_history():
         def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
             return self.messages[-limit:]
 
-        def append_message(self, conversation_id, role, content, **kwargs):
-            self.saved.append(
-                {
-                    "conversation_id": conversation_id,
-                    "role": role,
-                    "content": content,
-                    **kwargs,
-                }
+        def append_exchange(self, conversation_id, question, answer, **kwargs):
+            self.saved.extend(
+                [
+                    {"conversation_id": conversation_id, "role": "user", "content": question, **kwargs},
+                    {"conversation_id": conversation_id, "role": "assistant", "content": answer, **kwargs},
+                ]
             )
+            return {"id": "assistant-message-id"}
 
     fake_agent = FakeQAAgent()
     fake_store = FakeQAStore()
@@ -3777,9 +3776,14 @@ def test_api_qa_stream_returns_incremental_answer_events():
         def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
             return []
 
-        def append_message(self, conversation_id, role, content, **kwargs):
-            self.saved.append({"role": role, "content": content, **kwargs})
-            return {"id": f"{role}-message-id"}
+        def append_exchange(self, conversation_id, question, answer, **kwargs):
+            self.saved.extend(
+                [
+                    {"role": "user", "content": question, **kwargs},
+                    {"role": "assistant", "content": answer, **kwargs},
+                ]
+            )
+            return {"id": "assistant-message-id"}
 
     fake_store = FakeQAStore()
     fake_agent = FakeQAAgent()

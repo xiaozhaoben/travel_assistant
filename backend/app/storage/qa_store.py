@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
@@ -159,32 +160,74 @@ class PostgresQAConversationStore:
                 )
                 if conversation is None:
                     raise QAConversationNotFound(conversation_id)
-                row = cur.execute(
-                    """
-                    INSERT INTO travel_qa_messages (
-                        id, conversation_id, role, content, sources_payload, retrieved_count, generation_mode,
-                        used_web_search
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id::text, conversation_id::text, role, content, sources_payload,
-                              retrieved_count, generation_mode, used_web_search, created_at
-                    """,
-                    (
-                        message_id,
-                        conversation_id,
-                        role,
-                        content,
-                        Jsonb(source_payload),
-                        retrieved_count,
-                        generation_mode,
-                        used_web_search,
-                    ),
-                ).fetchone()
+                row = _insert_qa_message(
+                    cur,
+                    message_id=message_id,
+                    conversation_id=conversation_id,
+                    role=role,
+                    content=content,
+                    source_payload=source_payload,
+                    retrieved_count=retrieved_count,
+                    generation_mode=generation_mode,
+                    used_web_search=used_web_search,
+                )
                 cur.execute(
                     "UPDATE travel_qa_conversations SET updated_at = now() WHERE id = %s",
                     (conversation_id,),
                 )
         return dict(row)
+
+    def append_exchange(
+        self,
+        conversation_id: str,
+        question: str,
+        answer: str,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
+        sources: list[TravelKnowledgeSource] | None = None,
+        retrieved_count: int = 0,
+        generation_mode: str | None = None,
+        used_web_search: bool = False,
+    ) -> dict[str, Any]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
+        self._ensure_schema_once()
+        source_payload = [source.model_dump(mode="json") for source in sources or []]
+        with self.connections.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                conversation = _select_owned_conversation(
+                    cur,
+                    conversation_id,
+                    user_id=user_id,
+                    anonymous_id=anonymous_id,
+                    for_update=True,
+                )
+                if conversation is None:
+                    raise QAConversationNotFound(conversation_id)
+                _insert_qa_message(
+                    cur,
+                    message_id=str(uuid4()),
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=question,
+                    source_payload=[],
+                )
+                assistant_message = _insert_qa_message(
+                    cur,
+                    message_id=str(uuid4()),
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=answer,
+                    source_payload=source_payload,
+                    retrieved_count=retrieved_count,
+                    generation_mode=generation_mode,
+                    used_web_search=used_web_search,
+                )
+                cur.execute(
+                    "UPDATE travel_qa_conversations SET updated_at = now() WHERE id = %s",
+                    (conversation_id,),
+                )
+        return dict(assistant_message)
 
     def get_recent_messages(
         self,
@@ -245,7 +288,7 @@ class PostgresQAConversationStore:
         *,
         user_id: str | None,
         anonymous_id: str | None,
-    ) -> TravelQAConversationDetail | None:
+    ) -> TravelQAConversationDetail:
         user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
         with self.connections.connection() as conn:
@@ -298,6 +341,7 @@ class InMemoryQAConversationStore:
     def __init__(self):
         self.conversations: dict[str, dict[str, Any]] = {}
         self.messages: dict[str, list[dict[str, Any]]] = {}
+        self._lock = RLock()
 
     def health(self) -> dict[str, Any]:
         return {"enabled": True, "ok": True, "memory_only": True}
@@ -360,6 +404,79 @@ class InMemoryQAConversationStore:
             self.conversations[conversation_id]["updated_at"] = now
         return row
 
+    def append_exchange(
+        self,
+        conversation_id: str,
+        question: str,
+        answer: str,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
+        sources: list[TravelKnowledgeSource] | None = None,
+        retrieved_count: int = 0,
+        generation_mode: str | None = None,
+        used_web_search: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            return self._append_exchange_locked(
+                conversation_id,
+                question,
+                answer,
+                user_id=user_id,
+                anonymous_id=anonymous_id,
+                sources=sources,
+                retrieved_count=retrieved_count,
+                generation_mode=generation_mode,
+                used_web_search=used_web_search,
+            )
+
+    def _append_exchange_locked(
+        self,
+        conversation_id: str,
+        question: str,
+        answer: str,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
+        sources: list[TravelKnowledgeSource] | None = None,
+        retrieved_count: int = 0,
+        generation_mode: str | None = None,
+        used_web_search: bool = False,
+    ) -> dict[str, Any]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
+        if (
+            conversation_id not in self.conversations
+            or not _owner_matches(self.conversations[conversation_id], user_id, anonymous_id)
+        ):
+            raise QAConversationNotFound(conversation_id)
+        now = datetime.now(timezone.utc)
+        source_payload = [source.model_dump(mode="json") for source in sources or []]
+        user_message = {
+            "id": str(uuid4()),
+            "conversation_id": conversation_id,
+            "role": "user",
+            "content": question,
+            "sources_payload": [],
+            "retrieved_count": 0,
+            "generation_mode": None,
+            "used_web_search": False,
+            "created_at": now,
+        }
+        assistant_message = {
+            "id": str(uuid4()),
+            "conversation_id": conversation_id,
+            "role": "assistant",
+            "content": answer,
+            "sources_payload": source_payload,
+            "retrieved_count": retrieved_count,
+            "generation_mode": generation_mode,
+            "used_web_search": used_web_search,
+            "created_at": now,
+        }
+        self.messages[conversation_id].extend((user_message, assistant_message))
+        self.conversations[conversation_id]["updated_at"] = now
+        return assistant_message
+
     def get_recent_messages(
         self, conversation_id, *, user_id: str | None, anonymous_id: str | None, limit=8
     ):
@@ -384,7 +501,7 @@ class InMemoryQAConversationStore:
 
     def get_conversation(
         self, conversation_id, *, user_id: str | None, anonymous_id: str | None
-    ):
+    ) -> TravelQAConversationDetail:
         user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         row = self.conversations.get(conversation_id)
         if row is None or not _owner_matches(row, user_id, anonymous_id):
@@ -396,6 +513,10 @@ class InMemoryQAConversationStore:
         return None
 
     def merge_anonymous(self, anonymous_id: str, user_id: str) -> tuple[int, int]:
+        with self._lock:
+            return self._merge_anonymous_locked(anonymous_id, user_id)
+
+    def _merge_anonymous_locked(self, anonymous_id: str, user_id: str) -> tuple[int, int]:
         conversations = [
             row for row in self.conversations.values()
             if row.get("anonymous_id") == anonymous_id and not row.get("user_id")
@@ -442,6 +563,41 @@ def _select_owned_conversation(
         WHERE id = %s AND {owner_clause}{lock_clause}
         """,
         (conversation_id, *owner_params),
+    ).fetchone()
+
+
+def _insert_qa_message(
+    cursor,
+    *,
+    message_id: str,
+    conversation_id: str,
+    role: str,
+    content: str,
+    source_payload: list[dict[str, Any]],
+    retrieved_count: int = 0,
+    generation_mode: str | None = None,
+    used_web_search: bool = False,
+):
+    return cursor.execute(
+        """
+        INSERT INTO travel_qa_messages (
+            id, conversation_id, role, content, sources_payload, retrieved_count, generation_mode,
+            used_web_search
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id::text, conversation_id::text, role, content, sources_payload,
+                  retrieved_count, generation_mode, used_web_search, created_at
+        """,
+        (
+            message_id,
+            conversation_id,
+            role,
+            content,
+            Jsonb(source_payload),
+            retrieved_count,
+            generation_mode,
+            used_web_search,
+        ),
     ).fetchone()
 
 

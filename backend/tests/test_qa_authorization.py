@@ -3,10 +3,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from fastapi.testclient import TestClient
 import pytest
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import app.main as main_module
-from app.auth.principal import create_principal_token
+from app.auth.principal import create_principal_token, decode_principal_token
 from app.domain.models import TravelQAResponse
 from app.main import app, settings
 import app.storage.qa_store as qa_store_module
@@ -89,6 +90,7 @@ def test_in_memory_qa_store_rejects_owner_mismatch_for_read_and_write():
         ("get_or_create_conversation", (), {}),
         ("get_recent_messages", ("conversation-1",), {}),
         ("append_message", ("conversation-1", "user", "message"), {}),
+        ("append_exchange", ("conversation-1", "question", "answer"), {}),
         ("list_conversations", (), {}),
         ("get_conversation", ("conversation-1",), {}),
         ("get_or_create_conversation", (), {"user_id": "user-1", "anonymous_id": "anon-1"}),
@@ -96,6 +98,11 @@ def test_in_memory_qa_store_rejects_owner_mismatch_for_read_and_write():
         (
             "append_message",
             ("conversation-1", "user", "message"),
+            {"user_id": "user-1", "anonymous_id": "anon-1"},
+        ),
+        (
+            "append_exchange",
+            ("conversation-1", "question", "answer"),
             {"user_id": "user-1", "anonymous_id": "anon-1"},
         ),
         ("list_conversations", (), {"user_id": "user-1", "anonymous_id": "anon-1"}),
@@ -272,6 +279,136 @@ def test_postgres_merge_counts_messages_only_for_conversations_claimed_atomicall
     assert params == ("user-1", "anon-1")
 
 
+def test_postgres_append_exchange_rolls_back_when_assistant_insert_fails(monkeypatch):
+    class FailingExchangeCursor(RecordingCursor):
+        def __init__(self, connection):
+            super().__init__(connection)
+            self.insert_count = 0
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            if normalized.startswith("INSERT INTO travel_qa_messages"):
+                self.insert_count += 1
+                if self.insert_count == 2:
+                    raise RuntimeError("assistant insert failed")
+            return super().execute(sql, params)
+
+    class FailingExchangeConnection(RecordingConnection):
+        def __init__(self, manager):
+            super().__init__(manager)
+            self.rolled_back = False
+            self.committed = False
+
+        def cursor(self, **_kwargs):
+            return FailingExchangeCursor(self)
+
+    class TransactionManager(RecordingConnectionManager):
+        @contextmanager
+        def connection(self):
+            connection = FailingExchangeConnection(self)
+            self.connections.append(connection)
+            try:
+                yield connection
+            except Exception:
+                connection.rolled_back = True
+                raise
+            else:
+                connection.committed = True
+
+    manager = TransactionManager()
+    store = PostgresQAConversationStore("postgresql://unused", connection_manager=manager)
+    store._schema_ready = True
+    monkeypatch.setattr(qa_store_module, "Jsonb", lambda value: value)
+
+    with pytest.raises(RuntimeError, match="assistant insert failed"):
+        store.append_exchange(
+            "conversation-1",
+            "question",
+            "answer",
+            user_id="user-1",
+            anonymous_id=None,
+        )
+
+    connection = manager.connections[0]
+    assert connection.rolled_back is True
+    assert connection.committed is False
+    assert len(manager.connections) == 1
+    assert "FOR UPDATE" in connection.statements[0][0]
+
+
+def test_in_memory_append_exchange_does_not_leave_user_message_when_assistant_payload_fails():
+    class BrokenSource:
+        def model_dump(self, mode):
+            raise RuntimeError("assistant payload failed")
+
+    store = InMemoryQAConversationStore()
+    conversation = store.get_or_create_conversation(
+        user_id="user-1", anonymous_id=None, title="atomic"
+    )
+
+    with pytest.raises(RuntimeError, match="assistant payload failed"):
+        store.append_exchange(
+            conversation["id"],
+            "question",
+            "answer",
+            sources=[BrokenSource()],
+            user_id="user-1",
+            anonymous_id=None,
+        )
+
+    assert store.get_recent_messages(
+        conversation["id"], user_id="user-1", anonymous_id=None
+    ) == []
+
+
+def test_in_memory_merge_waits_for_atomic_exchange_and_counts_both_messages():
+    payload_started = Event()
+    release_payload = Event()
+    merge_started = Event()
+    merge_finished = Event()
+    merge_result = []
+
+    class BlockingSource:
+        def model_dump(self, mode):
+            payload_started.set()
+            assert release_payload.wait(timeout=2)
+            return {"title": "source", "url": "https://example.com"}
+
+    store = InMemoryQAConversationStore()
+    conversation = store.get_or_create_conversation(
+        user_id=None, anonymous_id="anon-1", title="race"
+    )
+
+    exchange_thread = Thread(
+        target=store.append_exchange,
+        args=(conversation["id"], "question", "answer"),
+        kwargs={
+            "sources": [BlockingSource()],
+            "user_id": None,
+            "anonymous_id": "anon-1",
+        },
+    )
+
+    def merge():
+        merge_started.set()
+        merge_result.append(store.merge_anonymous("anon-1", "user-1"))
+        merge_finished.set()
+
+    merge_thread = Thread(target=merge)
+    exchange_thread.start()
+    assert payload_started.wait(timeout=2)
+    merge_thread.start()
+    assert merge_started.wait(timeout=2)
+    try:
+        assert merge_finished.wait(timeout=0.1) is False
+    finally:
+        release_payload.set()
+        exchange_thread.join(timeout=2)
+        merge_thread.join(timeout=2)
+
+    assert merge_result == [(1, 2)]
+
+
 def test_qa_conversations_are_isolated_and_client_identity_is_ignored(isolated_qa):
     _store, agent = isolated_qa
     with TestClient(app) as client:
@@ -324,15 +461,28 @@ def test_stream_rejects_conversation_idor_before_generation(isolated_qa):
 
 
 def test_merge_requires_anonymous_header_and_is_idempotent(isolated_qa):
-    _store, _agent = isolated_qa
+    store, _agent = isolated_qa
     with TestClient(app) as client:
         anonymous_token = _anonymous_token(client)
+        other_anonymous_token = _anonymous_token(client)
+        anonymous_subject = decode_principal_token(
+            anonymous_token, settings.jwt_secret_key, settings.jwt_algorithm
+        ).subject
+        other_anonymous_subject = decode_principal_token(
+            other_anonymous_token, settings.jwt_secret_key, settings.jwt_algorithm
+        ).subject
         created = client.post(
             "/api/qa/ask",
             headers={"Authorization": f"Bearer {anonymous_token}"},
             json={"question": "question"},
         )
         assert created.status_code == 200
+        other_created = client.post(
+            "/api/qa/ask",
+            headers={"Authorization": f"Bearer {other_anonymous_token}"},
+            json={"question": "other question"},
+        )
+        assert other_created.status_code == 200
         user_token = _user_token()
         headers = {
             "Authorization": f"Bearer {user_token}",
@@ -343,8 +493,21 @@ def test_merge_requires_anonymous_header_and_is_idempotent(isolated_qa):
         assert merged.json()["data"] == {
             "merged_conversations": 1,
             "merged_messages": 2,
-            "anonymous_id": merged.json()["data"]["anonymous_id"],
+            "anonymous_id": anonymous_subject,
         }
+        assert len(store.list_conversations(user_id="user-1", anonymous_id=None)) == 1
+        assert len(
+            store.list_conversations(user_id=None, anonymous_id=other_anonymous_subject)
+        ) == 1
+        other_detail = store.get_conversation(
+            other_created.json()["data"]["conversation_id"],
+            user_id=None,
+            anonymous_id=other_anonymous_subject,
+        )
+        assert [message.content for message in other_detail.messages] == [
+            "other question",
+            "answer:other question",
+        ]
         repeated = client.post("/api/auth/merge-anonymous", headers=headers)
         assert repeated.status_code == 200
         assert repeated.json()["data"]["merged_conversations"] == 0
