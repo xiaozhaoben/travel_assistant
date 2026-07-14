@@ -25,6 +25,7 @@ def _called_by_unittest_loader() -> bool:
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.auth.principal import create_principal_token
 from app.main import app
 from app.core.config import get_settings
 from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest, WeatherInfo
@@ -38,6 +39,19 @@ def _anonymous_auth_headers(client: TestClient) -> dict[str, str]:
     response = client.post("/api/auth/anonymous")
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['data']['access_token']}"}
+
+
+def _user_auth_headers() -> dict[str, str]:
+    settings = get_settings()
+    token = create_principal_token(
+        "knowledge-admin",
+        "user",
+        "admin",
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 class FakeMessage:
@@ -254,7 +268,7 @@ def test_news_ingestion_agent_parses_rss_and_saves_to_vector_store(monkeypatch):
         )
     )
     monkeypatch.setitem(sys.modules, "feedparser", feedparser_stub)
-    monkeypatch.setattr(news_agent, "parse_feed", lambda parser, url: parser.parse(url))
+    monkeypatch.setattr(news_agent, "parse_feed", lambda parser, url, _fetcher: parser.parse(url))
     store = FakeTravelVectorStore()
 
     result = news_agent.TravelNewsIngestionAgent(store).fetch_travel_feeds(["https://feeds.example.test/travel"])
@@ -3646,7 +3660,11 @@ def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
     assert qa_response.json()["data"]["answer"].startswith("回答")
     assert qa_response.json()["data"]["sources"][0]["title"] == "南京端午预约提醒"
 
-    ingest_response = client.post("/api/news/ingest", json={"feed_urls": ["https://feeds.example.test/travel"]})
+    ingest_response = client.post(
+        "/api/news/ingest",
+        json={"feed_urls": ["https://feeds.example.test/travel"]},
+        headers=_user_auth_headers(),
+    )
     assert ingest_response.status_code == 200
     assert ingest_response.json()["data"]["total_added"] == 2
 

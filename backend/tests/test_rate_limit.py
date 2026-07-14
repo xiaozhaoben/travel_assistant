@@ -16,10 +16,24 @@ if str(BACKEND_DIR) not in sys.path:
 
 
 from app.core.api_errors import ApiError
+from app.auth.principal import create_principal_token
 from app.core.config import get_settings
 from app.core.rate_limit import Policy, RateLimiter
 from app.core.redis_client import RedisClient, create_redis_client
 import app.main as main_module
+
+
+def _user_headers(subject: str = "knowledge-admin") -> dict[str, str]:
+    settings = get_settings()
+    token = create_principal_token(
+        subject,
+        "user",
+        "admin",
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 class FakeRedis:
@@ -289,7 +303,7 @@ def test_knowledge_read_is_fail_closed_at_api_boundary(monkeypatch):
     )
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
 
-    response = TestClient(main_module.app).get("/api/news/status")
+    response = TestClient(main_module.app).get("/api/news/status", headers=_user_headers())
 
     assert response.status_code == 503
     assert response.json()["code"] == "REDIS_UNAVAILABLE"

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from app.core.config import ENV_PATH
 from app.knowledge.vector_store import PostgresTravelVectorStore, normalize_text
+from app.security.url_fetcher import SafeURLFetchError, SafeURLFetcher
 
 logger = logging.getLogger(__name__)
 load_dotenv(ENV_PATH, override=False)
@@ -60,8 +61,16 @@ travel_feeds = configured_travel_feeds()
 class TravelNewsIngestionAgent:
     name = "TravelNewsIngestionAgent"
 
-    def __init__(self, vector_store: PostgresTravelVectorStore | None):
+    def __init__(
+        self,
+        vector_store: PostgresTravelVectorStore | None,
+        url_fetcher: SafeURLFetcher | None = None,
+    ):
         self.vector_store = vector_store
+        self.url_fetcher = url_fetcher or SafeURLFetcher(
+            connect_timeout_seconds=min(10.0, feed_timeout_seconds()),
+            read_timeout_seconds=feed_timeout_seconds(),
+        )
 
     def fetch_travel_feeds(self, feed_urls: Iterable[str] | None = None) -> dict[str, Any]:
         if self.vector_store is None:
@@ -92,7 +101,7 @@ class TravelNewsIngestionAgent:
         for feed_url in urls:
             logger.info("正在处理: %s", feed_url)
             try:
-                feed = parse_feed(feedparser, feed_url)
+                feed = parse_feed(feedparser, feed_url, self.url_fetcher)
                 all_entries = list(getattr(feed, "entries", []) or [])
                 entries = all_entries[:max_entries_per_feed()]
                 if len(all_entries) > len(entries):
@@ -121,9 +130,12 @@ class TravelNewsIngestionAgent:
                 total_added += added_for_feed
                 feed_results.append({"url": feed_url, "seen": len(entries), "added": added_for_feed})
                 logger.info("RSS处理完成: %s seen=%s added=%s", feed_url, len(entries), added_for_feed)
+            except SafeURLFetchError as exc:
+                logger.warning("RSS fetch rejected error_code=%s", exc.code)
+                errors.append(exc.code)
             except Exception as exc:
-                logger.warning("RSS处理失败 %s: %s", feed_url, exc)
-                errors.append(f"{feed_url}: {exc}")
+                logger.warning("RSS processing failed exception_type=%s", type(exc).__name__)
+                errors.append("FEED_FETCH_FAILED")
 
         logger.info("RSS获取完成，新增 %s 条", total_added)
         return {
@@ -134,21 +146,9 @@ class TravelNewsIngestionAgent:
         }
 
 
-def parse_feed(feedparser: Any, feed_url: str) -> Any:
-    import httpx
-
-    timeout_seconds = feed_timeout_seconds()
-    response = httpx.get(
-        feed_url,
-        follow_redirects=True,
-        timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds)),
-        headers={
-            "User-Agent": "travel-assistant/1.0 (+https://localhost)",
-            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
-        },
-    )
-    response.raise_for_status()
-    return feedparser.parse(response.content, response_headers=dict(response.headers))
+def parse_feed(feedparser: Any, feed_url: str, url_fetcher: SafeURLFetcher | None = None) -> Any:
+    fetched = (url_fetcher or SafeURLFetcher()).fetch(feed_url)
+    return feedparser.parse(fetched.content, response_headers={"content-type": fetched.content_type})
 
 
 def feed_timeout_seconds() -> float:

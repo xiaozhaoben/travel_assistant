@@ -79,6 +79,7 @@ from .knowledge.prompts import render_travel_document_metadata_prompt
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.qa_checkpointer import create_qa_checkpointer
 from .knowledge.vector_store import create_travel_vector_store, normalize_document_content
+from .security.url_fetcher import SafeURLFetchError, SafeURLFetcher
 from .storage.plan_log import PlanLogRecorder
 from .storage.qa_store import QAConversationNotFound, create_qa_conversation_store
 from .storage.report_store import ReportNotFound, create_report_store
@@ -103,6 +104,7 @@ class AppResources:
     rate_limiter: RateLimiter | None = None
     rate_limit_policies: dict[str, Policy] | None = None
     knowledge_job_store: RedisKnowledgeJobStore | None = None
+    safe_url_fetcher: SafeURLFetcher | None = None
 
 
 orchestrator: TravelAgentOrchestrator | None = None
@@ -117,6 +119,7 @@ redis_client: RedisClient | None = None
 rate_limiter: RateLimiter | None = None
 rate_limit_policies: dict[str, Policy] | None = None
 knowledge_job_store: RedisKnowledgeJobStore | None = None
+safe_url_fetcher: SafeURLFetcher | None = None
 
 
 def create_app_resources() -> AppResources:
@@ -127,7 +130,12 @@ def create_app_resources() -> AppResources:
     resource_qa_checkpointer = create_qa_checkpointer(resource_settings.database_url)
     resource_orchestrator = TravelAgentOrchestrator()
     resource_orchestrator.configure_reflection_memory(resource_vector_store)
-    resource_news_agent = TravelNewsIngestionAgent(resource_vector_store)
+    resource_safe_url_fetcher = SafeURLFetcher(
+        max_bytes=resource_settings.url_fetch_max_bytes,
+        connect_timeout_seconds=resource_settings.url_fetch_connect_timeout_seconds,
+        read_timeout_seconds=resource_settings.url_fetch_read_timeout_seconds,
+    )
+    resource_news_agent = TravelNewsIngestionAgent(resource_vector_store, resource_safe_url_fetcher)
     resource_qa_agent = TravelQuestionAnsweringAgent(
         resource_vector_store,
         llm=resource_orchestrator.planner.llm,
@@ -161,12 +169,13 @@ def create_app_resources() -> AppResources:
         rate_limiter=resource_rate_limiter,
         rate_limit_policies=create_rate_limit_policies(resource_settings),
         knowledge_job_store=resource_knowledge_job_store,
+        safe_url_fetcher=resource_safe_url_fetcher,
     )
 
 
 def bind_app_resources(resources: AppResources) -> None:
     global orchestrator, report_store, travel_vector_store, qa_store, qa_checkpointer, news_agent, qa_agent, image_provider
-    global redis_client, rate_limiter, rate_limit_policies, knowledge_job_store
+    global redis_client, rate_limiter, rate_limit_policies, knowledge_job_store, safe_url_fetcher
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
@@ -181,6 +190,7 @@ def bind_app_resources(resources: AppResources) -> None:
     rate_limiter = resources.rate_limiter
     rate_limit_policies = resources.rate_limit_policies
     knowledge_job_store = resources.knowledge_job_store
+    safe_url_fetcher = resources.safe_url_fetcher
 
 
 def current_global_resources() -> AppResources | None:
@@ -204,6 +214,7 @@ def current_global_resources() -> AppResources | None:
         rate_limiter=rate_limiter,
         rate_limit_policies=rate_limit_policies,
         knowledge_job_store=knowledge_job_store,
+        safe_url_fetcher=safe_url_fetcher,
     )
 
 
@@ -236,6 +247,7 @@ def get_app_resources() -> AppResources:
             rate_limiter=rate_limiter or getattr(state_resources, "rate_limiter", None),
             rate_limit_policies=rate_limit_policies or getattr(state_resources, "rate_limit_policies", None),
             knowledge_job_store=knowledge_job_store or getattr(state_resources, "knowledge_job_store", None),
+            safe_url_fetcher=safe_url_fetcher or getattr(state_resources, "safe_url_fetcher", None),
         )
         app.state.resources = resources
         return resources
@@ -293,6 +305,7 @@ def get_app_resources() -> AppResources:
             rate_limiter=rate_limiter or base_resources.rate_limiter,
             rate_limit_policies=rate_limit_policies or base_resources.rate_limit_policies,
             knowledge_job_store=knowledge_job_store or base_resources.knowledge_job_store,
+            safe_url_fetcher=safe_url_fetcher or base_resources.safe_url_fetcher,
         )
     else:
         resources = global_resources or create_app_resources()
@@ -399,18 +412,16 @@ def _limit_map(
 
 def _limit_knowledge_read(
     http_request: Request,
-    principal: Principal | None = Depends(get_current_principal_optional),
+    principal: Principal = Depends(require_user_principal),
 ):
-    user_principal = principal if principal is not None and principal.principal_type == "user" else None
-    return _enforce_rate_limit("knowledge_read", http_request, user_principal)
+    return _enforce_rate_limit("knowledge_read", http_request, principal)
 
 
 def _limit_knowledge_write(
     http_request: Request,
-    principal: Principal | None = Depends(get_current_principal_optional),
+    principal: Principal = Depends(require_user_principal),
 ):
-    user_principal = principal if principal is not None and principal.principal_type == "user" else None
-    return _enforce_rate_limit("knowledge_write", http_request, user_principal)
+    return _enforce_rate_limit("knowledge_write", http_request, principal)
 
 
 def asset_cache_key(asset_type: str, city: str | None, name: str, extra: str | None = None) -> str:
@@ -1027,20 +1038,15 @@ def ingest_travel_document_from_url(
     if store is None:
         raise HTTPException(status_code=503, detail="Travel knowledge vector store is not configured.")
     try:
-        import httpx
-
-        response = httpx.get(
-            request.source_url,
-            follow_redirects=True,
-            timeout=httpx.Timeout(20.0, connect=8.0),
-            headers={
-                "User-Agent": "travel-assistant/1.0 (+https://localhost)",
-                "Accept": "text/html, text/plain, application/xhtml+xml, */*",
-            },
-        )
-        response.raise_for_status()
-        title = request.title or extract_html_title(response.text) or title_from_url(request.source_url)
-        content = normalize_document_content(response.text)
+        fetcher = safe_url_fetcher
+        if fetcher is None:
+            resources = get_app_resources()
+            fetcher = getattr(resources, "safe_url_fetcher", None)
+        if fetcher is None:
+            raise api_error(503, "URL_FETCH_UNAVAILABLE", "URL fetch service is unavailable")
+        fetched = fetcher.fetch(request.source_url)
+        title = request.title or extract_html_title(fetched.text) or title_from_url(request.source_url)
+        content = normalize_document_content(fetched.text)
         if not content:
             raise ValueError("Fetched URL did not contain readable text.")
         inferred = infer_travel_document_metadata(
@@ -1065,9 +1071,13 @@ def ingest_travel_document_from_url(
             scenic_spot=inferred.get("scenic_spot") or request.scenic_spot,
             metadata={**request.metadata, **dict(inferred.get("metadata") or {}), "ingest_method": "url"},
         )
+    except SafeURLFetchError as exc:
+        raise api_error(exc.status_code, exc.code, exc.public_message) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("Travel document URL ingest failed: %s", exc)
-        raise HTTPException(status_code=503, detail=f"Travel document URL ingest failed: {exc}") from exc
+        logger.warning("Travel document URL ingest failed exception_type=%s", type(exc).__name__)
+        raise api_error(503, "KNOWLEDGE_URL_INGEST_FAILED", "Travel document URL ingest failed") from exc
     return ApiResponse[TravelDocumentIngestResult](
         success=True,
         message="网页旅行文档入库完成",

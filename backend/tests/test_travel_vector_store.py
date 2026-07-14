@@ -4,8 +4,24 @@ from datetime import date
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.auth.principal import create_principal_token
+from app.core.config import get_settings
 from app.knowledge.job_store import RedisKnowledgeJobStore
 from app.main import app
+from app.security.url_fetcher import SafeFetchResult
+
+
+def _user_headers() -> dict[str, str]:
+    settings = get_settings()
+    token = create_principal_token(
+        "knowledge-admin",
+        "user",
+        "admin",
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 class FakeEmbeddingService:
@@ -405,12 +421,16 @@ def test_api_ingests_and_searches_travel_documents():
             ]
 
     store = FakeStore()
+    resources = main_module.get_app_resources()
     original_store = main_module.travel_vector_store
+    original_resource_store = resources.travel_vector_store
     main_module.travel_vector_store = store
+    resources.travel_vector_store = store
     try:
         client = TestClient(app)
         ingest_response = client.post(
             "/api/knowledge/documents",
+            headers=_user_headers(),
             json={
                 "title": "成都旅游信息",
                 "content": "文档正文",
@@ -425,6 +445,7 @@ def test_api_ingests_and_searches_travel_documents():
         )
         search_response = client.post(
             "/api/knowledge/search",
+            headers=_user_headers(),
             json={
                 "query": "成都有哪些适合亲子游的景点？",
                 "province": "四川",
@@ -435,6 +456,7 @@ def test_api_ingests_and_searches_travel_documents():
         )
     finally:
         main_module.travel_vector_store = original_store
+        resources.travel_vector_store = original_resource_store
 
     assert ingest_response.status_code == 200
     assert ingest_response.json()["data"]["chunks_added"] == 2
@@ -454,26 +476,27 @@ def test_api_ingests_travel_document_from_url(monkeypatch):
             self.ingested = kwargs
             return {"doc_id": "doc-url-1", "chunks_added": 1}
 
-    class FakeResponse:
-        text = "<html><head><title>成都亲子游公告</title></head><body><h1>热门景点</h1><p>熊猫基地适合亲子游。</p></body></html>"
-
-        def raise_for_status(self):
-            return None
-
     calls = []
 
-    def fake_get(url, **kwargs):
-        calls.append({"url": url, **kwargs})
-        return FakeResponse()
+    class FakeFetcher:
+        def fetch(self, url):
+            calls.append(url)
+            text = "<html><head><title>成都亲子游公告</title></head><body><h1>热门景点</h1><p>熊猫基地适合亲子游。</p></body></html>"
+            return SafeFetchResult(text=text, content=text.encode(), content_type="text/html")
 
     store = FakeStore()
+    resources = main_module.get_app_resources()
     original_store = main_module.travel_vector_store
+    original_resource_store = resources.travel_vector_store
+    original_fetcher = main_module.safe_url_fetcher
     main_module.travel_vector_store = store
-    monkeypatch.setattr("httpx.get", fake_get)
+    resources.travel_vector_store = store
+    main_module.safe_url_fetcher = FakeFetcher()
     try:
         client = TestClient(app)
         response = client.post(
             "/api/knowledge/documents/from-url",
+            headers=_user_headers(),
             json={
                 "source_url": "https://example.com/chengdu",
                 "source_name": "四川省文化和旅游厅",
@@ -484,10 +507,12 @@ def test_api_ingests_travel_document_from_url(monkeypatch):
         )
     finally:
         main_module.travel_vector_store = original_store
+        resources.travel_vector_store = original_resource_store
+        main_module.safe_url_fetcher = original_fetcher
 
     assert response.status_code == 200
     assert response.json()["data"]["chunks_added"] == 1
-    assert calls[0]["url"] == "https://example.com/chengdu"
+    assert calls[0] == "https://example.com/chengdu"
     assert store.ingested["title"] == "成都亲子游公告"
     assert "熊猫基地适合亲子游" in store.ingested["content"]
     assert store.ingested["source_type"] == "web"
@@ -523,13 +548,17 @@ def test_api_auto_ingest_uses_llm_to_extract_metadata(monkeypatch):
             return FakeMessage()
 
     store = FakeStore()
+    resources = main_module.get_app_resources()
     original_store = main_module.travel_vector_store
+    original_resource_store = resources.travel_vector_store
     main_module.travel_vector_store = store
+    resources.travel_vector_store = store
     monkeypatch.setattr(main_module, "create_llm", lambda: FakeLLM())
     try:
         client = TestClient(app)
         response = client.post(
             "/api/knowledge/documents/auto",
+            headers=_user_headers(),
             json={
                 "file_name": "uploaded-guide.md",
                 "content": "# Chengdu Panda Base\n\nFamily visitors should book morning tickets.",
@@ -537,6 +566,7 @@ def test_api_auto_ingest_uses_llm_to_extract_metadata(monkeypatch):
         )
     finally:
         main_module.travel_vector_store = original_store
+        resources.travel_vector_store = original_resource_store
 
     assert response.status_code == 200
     assert response.json()["data"]["chunks_added"] == 3
@@ -555,25 +585,31 @@ def test_api_url_ingest_accepts_only_url(monkeypatch):
             self.ingested = kwargs
             return {"doc_id": "doc-url-only", "chunks_added": 1}
 
-    class FakeResponse:
-        text = "<html><head><title>Chengdu Notice</title></head><body><p>Chengdu travel notice.</p></body></html>"
-
-        def raise_for_status(self):
-            return None
+    class FakeFetcher:
+        def fetch(self, _url):
+            text = "<html><head><title>Chengdu Notice</title></head><body><p>Chengdu travel notice.</p></body></html>"
+            return SafeFetchResult(text=text, content=text.encode(), content_type="text/html")
 
     store = FakeStore()
+    resources = main_module.get_app_resources()
     original_store = main_module.travel_vector_store
+    original_resource_store = resources.travel_vector_store
+    original_fetcher = main_module.safe_url_fetcher
     main_module.travel_vector_store = store
-    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse())
+    resources.travel_vector_store = store
+    main_module.safe_url_fetcher = FakeFetcher()
     monkeypatch.setattr(main_module, "create_llm", lambda: None)
     try:
         client = TestClient(app)
         response = client.post(
             "/api/knowledge/documents/from-url",
+            headers=_user_headers(),
             json={"source_url": "https://example.com/chengdu"},
         )
     finally:
         main_module.travel_vector_store = original_store
+        resources.travel_vector_store = original_resource_store
+        main_module.safe_url_fetcher = original_fetcher
 
     assert response.status_code == 200
     assert store.ingested["source_url"] == "https://example.com/chengdu"
@@ -590,18 +626,21 @@ def test_api_auto_ingest_job_completes(monkeypatch):
             return {"doc_id": "doc-job-1", "chunks_added": 2}
 
     store = FakeStore()
+    resources = main_module.get_app_resources()
     original_store = main_module.travel_vector_store
+    original_resource_store = resources.travel_vector_store
+    original_resource_job_store = resources.knowledge_job_store
     main_module.travel_vector_store = store
+    resources.travel_vector_store = store
     monkeypatch.setattr(main_module, "create_llm", lambda: None)
-    monkeypatch.setattr(
-        main_module,
-        "knowledge_job_store",
-        RedisKnowledgeJobStore(FakeKnowledgeJobRedis(), ttl_seconds=60),
-    )
+    fake_job_store = RedisKnowledgeJobStore(FakeKnowledgeJobRedis(), ttl_seconds=60)
+    monkeypatch.setattr(main_module, "knowledge_job_store", fake_job_store)
+    resources.knowledge_job_store = fake_job_store
     try:
         client = TestClient(app)
         create_response = client.post(
             "/api/knowledge/documents/auto/jobs",
+            headers=_user_headers(),
             json={
                 "file_name": "chengdu.md",
                 "content": "# Chengdu\n\nFamily travel guide.",
@@ -609,9 +648,11 @@ def test_api_auto_ingest_job_completes(monkeypatch):
         )
         assert create_response.status_code == 200
         job_id = create_response.json()["data"]["job_id"]
-        status_response = client.get(f"/api/knowledge/documents/jobs/{job_id}")
+        status_response = client.get(f"/api/knowledge/documents/jobs/{job_id}", headers=_user_headers())
     finally:
         main_module.travel_vector_store = original_store
+        resources.travel_vector_store = original_resource_store
+        resources.knowledge_job_store = original_resource_job_store
 
     assert status_response.status_code == 200
     payload = status_response.json()["data"]

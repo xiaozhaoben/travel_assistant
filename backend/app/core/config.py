@@ -68,6 +68,9 @@ class Settings:
     redis_read_timeout_seconds: float
     redis_max_connections: int
     knowledge_job_ttl_seconds: int
+    url_fetch_max_bytes: int
+    url_fetch_connect_timeout_seconds: float
+    url_fetch_read_timeout_seconds: float
     rate_limit_enabled: bool
     rate_limit_anonymous_issue_limit: int
     rate_limit_register_limit: int
@@ -171,6 +174,9 @@ def get_settings() -> Settings:
         ),
         redis_max_connections=max(1, _env_int("REDIS_MAX_CONNECTIONS", 20)),
         knowledge_job_ttl_seconds=max(1, _env_int("KNOWLEDGE_JOB_TTL_SECONDS", 7 * 24 * 60 * 60)),
+        url_fetch_max_bytes=max(1, _env_int("URL_FETCH_MAX_BYTES", 2 * 1024 * 1024)),
+        url_fetch_connect_timeout_seconds=max(0.1, float(os.getenv("URL_FETCH_CONNECT_TIMEOUT_SECONDS", "8"))),
+        url_fetch_read_timeout_seconds=max(0.1, float(os.getenv("URL_FETCH_READ_TIMEOUT_SECONDS", "20"))),
         rate_limit_enabled=_env_bool("RATE_LIMIT_ENABLED", default=bool(redis_url or redis_host)),
         rate_limit_anonymous_issue_limit=max(1, _env_int("RATE_LIMIT_ANONYMOUS_ISSUE_LIMIT", 20)),
         rate_limit_register_limit=max(1, _env_int("RATE_LIMIT_REGISTER_LIMIT", 10)),

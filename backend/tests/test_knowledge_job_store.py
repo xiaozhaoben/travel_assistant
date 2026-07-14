@@ -16,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 
 from app.core.config import get_settings
+from app.auth.principal import create_principal_token
 from app.knowledge.job_store import (
     KnowledgeJobInvalidTransition,
     KnowledgeJobNotFound,
@@ -23,6 +24,19 @@ from app.knowledge.job_store import (
     RedisKnowledgeJobStore,
 )
 import app.main as main_module
+
+
+def _user_headers() -> dict[str, str]:
+    settings = get_settings()
+    token = create_principal_token(
+        "knowledge-admin",
+        "user",
+        "admin",
+        settings.jwt_secret_key,
+        settings.jwt_algorithm,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 class FakeRedis:
@@ -374,8 +388,12 @@ def test_job_status_endpoint_delegates_to_resource_store_and_maps_errors(monkeyp
     resources = SimpleNamespace(knowledge_job_store=store)
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
 
-    response = TestClient(main_module.app).get(f"/api/knowledge/documents/jobs/{job.job_id}")
-    missing = TestClient(main_module.app).get("/api/knowledge/documents/jobs/missing")
+    response = TestClient(main_module.app).get(
+        f"/api/knowledge/documents/jobs/{job.job_id}", headers=_user_headers()
+    )
+    missing = TestClient(main_module.app).get(
+        "/api/knowledge/documents/jobs/missing", headers=_user_headers()
+    )
 
     assert response.status_code == 200
     assert response.json()["data"]["job_id"] == job.job_id
@@ -387,7 +405,9 @@ def test_job_status_endpoint_has_no_in_memory_fallback(monkeypatch):
     resources = SimpleNamespace(knowledge_job_store=RedisKnowledgeJobStore(None, ttl_seconds=60))
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
 
-    response = TestClient(main_module.app).get("/api/knowledge/documents/jobs/any")
+    response = TestClient(main_module.app).get(
+        "/api/knowledge/documents/jobs/any", headers=_user_headers()
+    )
 
     assert response.status_code == 503
     assert response.json()["code"] == "KNOWLEDGE_JOB_STORE_UNAVAILABLE"
@@ -400,6 +420,7 @@ def test_create_job_endpoint_maps_missing_resource_store_to_stable_503(monkeypat
 
     response = TestClient(main_module.app, raise_server_exceptions=False).post(
         "/api/knowledge/documents/auto/jobs",
+        headers=_user_headers(),
         json={"file_name": "guide.md", "content": "private travel notes"},
     )
 
