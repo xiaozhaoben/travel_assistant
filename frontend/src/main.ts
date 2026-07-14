@@ -32,6 +32,7 @@ import {
 import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
 import './styles.css'
+import { ensureAnonymousToken, hasStoredUserPrincipal } from '@/services/authSession'
 
 const Home = () => import('./views/Home.vue')
 const Login = () => import('./views/Login.vue')
@@ -46,15 +47,17 @@ const router = createRouter({
     { path: '/', name: 'QA', component: QA },
     { path: '/login', name: 'Login', component: Login, meta: { guest: true } },
     { path: '/plan', name: 'Home', component: Home },
-    { path: '/knowledge', name: 'Knowledge', component: Knowledge },
+    { path: '/knowledge', name: 'Knowledge', component: Knowledge, meta: { requiresUser: true } },
     { path: '/reports', name: 'Reports', component: Reports },
     { path: '/result', name: 'Result', component: Result },
   ],
 })
 
 router.beforeEach((to, _from, next) => {
-  const token = localStorage.getItem('travel_auth_token')
-  if (to.meta.guest && token) {
+  const hasUserPrincipal = hasStoredUserPrincipal()
+  if (to.meta.requiresUser && !hasUserPrincipal) {
+    next({ name: 'Login', query: { redirect: to.fullPath } })
+  } else if (to.meta.guest && hasUserPrincipal) {
     next({ name: 'QA' })
   } else {
     next()
@@ -92,4 +95,14 @@ app.use(router)
   Tabs,
   Tag,
 ].forEach((component) => app.use(component))
-app.mount('#app')
+
+async function bootstrapApp() {
+  try {
+    await ensureAnonymousToken()
+  } catch {
+    // 首次签发失败时仍渲染应用；第一个受保护请求会通过共享 Promise 重试。
+  }
+  app.mount('#app')
+}
+
+void bootstrapApp()

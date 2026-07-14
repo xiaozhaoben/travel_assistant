@@ -13,7 +13,7 @@
           <MessageOutlined />
           <span>智能问答</span>
         </router-link>
-        <router-link to="/knowledge" class="nav-link" active-class="nav-link-active">
+        <router-link v-if="auth.isAuthenticated.value" to="/knowledge" class="nav-link" active-class="nav-link-active">
           <DatabaseOutlined />
           <span>知识库</span>
         </router-link>
@@ -55,14 +55,21 @@
 
 <script setup lang="ts">
 import { CompassOutlined, DatabaseOutlined, FileTextOutlined, MessageOutlined } from '@ant-design/icons-vue'
+import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '@/services/auth'
 
 const auth = useAuth()
 const router = useRouter()
 
-function handleLogout() {
-  auth.logout()
+onMounted(() => {
+  if (auth.isAuthenticated.value && auth.anonymousMergePending.value) {
+    void auth.mergeAnonymousConversations()
+  }
+})
+
+async function handleLogout() {
+  await auth.logout()
   router.push('/')
 }
 </script>

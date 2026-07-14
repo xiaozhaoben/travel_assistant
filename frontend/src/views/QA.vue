@@ -130,13 +130,10 @@ import {
 import { useAuth } from '@/services/auth'
 import type { TravelQAChatMessage, TravelQAConversationSummary } from '@/types'
 
-const ANON_KEY = 'travel_qa_anonymous_id'
 const auth = useAuth()
-
 const conversations = ref<TravelQAConversationSummary[]>([])
 const messages = ref<TravelQAChatMessage[]>([])
 const activeConversationId = ref<string | null>(null)
-const anonymousId = ref(getAnonymousId())
 const question = ref('')
 const asking = ref(false)
 const loadingConversations = ref(false)
@@ -147,25 +144,10 @@ onMounted(() => {
   refreshConversations()
 })
 
-function getAnonymousId(): string {
-  const existing = localStorage.getItem(ANON_KEY)
-  if (existing) return existing
-  const next = `anon-${crypto.randomUUID()}`
-  localStorage.setItem(ANON_KEY, next)
-  return next
-}
-
-function identityParams() {
-  if (auth.isAuthenticated.value && auth.user.value) {
-    return { user_id: auth.user.value.user_id, anonymous_id: null }
-  }
-  return { anonymous_id: anonymousId.value, user_id: null }
-}
-
 async function refreshConversations() {
   loadingConversations.value = true
   try {
-    conversations.value = await listQAConversations(identityParams())
+    conversations.value = await listQAConversations()
   } catch (error: any) {
     message.error(error.message || '问答历史加载失败')
   } finally {
@@ -281,7 +263,6 @@ async function handleAsk() {
     await streamTravelQuestion(content, {
       topK: 5,
       conversation_id: activeConversationId.value,
-      ...identityParams(),
       onStart: (data) => {
         if (data.conversation_id) {
           activeConversationId.value = data.conversation_id

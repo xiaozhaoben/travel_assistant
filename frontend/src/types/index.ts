@@ -361,9 +361,23 @@ export interface TravelDocumentSearchResponse {
 
 export interface AuthTokenResponse {
   access_token: string
-  token_type: string
+  token_type: 'bearer'
   user_id: string
   username: string
+}
+
+export interface PrincipalTokenResponse {
+  access_token: string
+  token_type: 'bearer'
+  principal_type: 'anonymous' | 'user'
+  subject: string
+  expires_in: number
+}
+
+export interface AnonymousMergeResponse {
+  merged_conversations: number
+  merged_messages: number
+  anonymous_id: string
 }
 
 export interface AuthUser {

@@ -1,10 +1,12 @@
 import axios from 'axios'
 import { z } from 'zod'
 import type {
+  AnonymousMergeResponse,
   AuthTokenResponse,
   AuthUser,
   Budget,
   DayPlan,
+  PrincipalTokenResponse,
   ResearchSnippet,
   ServiceHealth,
   TravelDocumentAutoIngestPayload,
@@ -26,6 +28,11 @@ import type {
   TripReportDetail,
   TripReportSummary,
 } from '@/types'
+import {
+  configureAnonymousTokenIssuer,
+  invalidateBearerToken,
+  resolveBearerToken,
+} from '@/services/authSession'
 
 const _rtConfig = (window as any).__APP_CONFIG__ || {}
 const API_BASE_URL = _rtConfig.API_BASE_URL || import.meta.env.VITE_API_BASE_URL || ''
@@ -41,18 +48,22 @@ const apiClient = axios.create({
   },
 })
 
+const publicApiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: Number.isFinite(API_TIMEOUT_MS) && API_TIMEOUT_MS > 0 ? API_TIMEOUT_MS : DEFAULT_API_TIMEOUT_MS,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+})
+
 function apiUrl(path: string): string {
   if (!API_BASE_URL) return path
   return `${API_BASE_URL.replace(/\/$/, '')}${path}`
 }
 
-const TOKEN_KEY = 'travel_auth_token'
-
-apiClient.interceptors.request.use((config) => {
-  const token = localStorage.getItem(TOKEN_KEY)
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
+apiClient.interceptors.request.use(async (config) => {
+  const accessToken = await resolveBearerToken()
+  config.headers.Authorization = `Bearer ${accessToken}`
   return config
 })
 
@@ -60,8 +71,10 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem(TOKEN_KEY)
-      localStorage.removeItem('travel_auth_user')
+      const authorization = error.config?.headers?.Authorization
+      if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+        invalidateBearerToken(authorization.slice('Bearer '.length))
+      }
     }
     return Promise.reject(error)
   },
@@ -415,21 +428,19 @@ function denormalizePlan(plan: TripPlan): any {
 }
 
 export async function healthCheck(): Promise<ServiceHealth> {
-  const response = await apiClient.get('/api/health')
+  const response = await publicApiClient.get('/api/health')
   return response.data
 }
 
 export async function askTravelQuestion(
   question: string,
   topK = 5,
-  options: { conversation_id?: string | null; user_id?: string | null; anonymous_id?: string | null } = {},
+  options: { conversation_id?: string | null } = {},
 ): Promise<TravelQAResponse> {
   const response = await apiClient.post('/api/qa/ask', {
     question,
     top_k: topK,
     conversation_id: options.conversation_id || undefined,
-    user_id: options.user_id || undefined,
-    anonymous_id: options.anonymous_id || undefined,
   })
   return requireApiData<TravelQAResponse>(response.data, 'Travel QA request failed')
 }
@@ -439,16 +450,16 @@ export async function streamTravelQuestion(
   options: {
     topK?: number
     conversation_id?: string | null
-    user_id?: string | null
-    anonymous_id?: string | null
     onStart?: (data: { conversation_id?: string | null; question?: string }) => void
     onDelta?: (content: string) => void
     onDone?: (response: TravelQAResponse) => void
   } = {},
 ): Promise<TravelQAResponse> {
-  const authToken = localStorage.getItem(TOKEN_KEY)
-  const fetchHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (authToken) fetchHeaders['Authorization'] = `Bearer ${authToken}`
+  const accessToken = await resolveBearerToken()
+  const fetchHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${accessToken}`,
+  }
   const response = await fetch(apiUrl('/api/qa/ask/stream'), {
     method: 'POST',
     headers: fetchHeaders,
@@ -456,8 +467,6 @@ export async function streamTravelQuestion(
       question,
       top_k: options.topK || 5,
       conversation_id: options.conversation_id || undefined,
-      user_id: options.user_id || undefined,
-      anonymous_id: options.anonymous_id || undefined,
     }),
   })
   if (!response.ok || !response.body) {
@@ -509,15 +518,11 @@ function parseSseEvent(rawEvent: string): { event: string; data: unknown } | nul
   return { event, data: dataText ? JSON.parse(dataText) : {} }
 }
 
-export async function listQAConversations(options: {
-  user_id?: string | null
-  anonymous_id?: string | null
-  limit?: number
-} = {}): Promise<TravelQAConversationSummary[]> {
+export async function listQAConversations(
+  options: { limit?: number } = {},
+): Promise<TravelQAConversationSummary[]> {
   const response = await apiClient.get('/api/qa/conversations', {
     params: {
-      user_id: options.user_id || undefined,
-      anonymous_id: options.anonymous_id || undefined,
       limit: options.limit || 50,
     },
   })
@@ -596,18 +601,33 @@ export async function getAttractionPhoto(
 }
 
 export async function registerUser(username: string, password: string): Promise<AuthTokenResponse> {
-  const response = await apiClient.post('/api/auth/register', { username, password })
+  const response = await publicApiClient.post('/api/auth/register', { username, password })
   return requireApiData<AuthTokenResponse>(response.data, '注册失败')
 }
 
 export async function loginUser(username: string, password: string): Promise<AuthTokenResponse> {
-  const response = await apiClient.post('/api/auth/login', { username, password })
+  const response = await publicApiClient.post('/api/auth/login', { username, password })
   return requireApiData<AuthTokenResponse>(response.data, '登录失败')
 }
 
-export async function mergeAnonymousSessions(anonymousId: string): Promise<{ merged_count: number }> {
-  const response = await apiClient.post('/api/auth/merge-anonymous', { anonymous_id: anonymousId })
-  return requireApiData<{ merged_count: number }>(response.data, '匿名会话合并失败')
+export async function issueAnonymousPrincipal(): Promise<PrincipalTokenResponse> {
+  const response = await publicApiClient.post('/api/auth/anonymous')
+  return requireApiData<PrincipalTokenResponse>(response.data, '匿名身份签发失败')
+}
+
+configureAnonymousTokenIssuer(issueAnonymousPrincipal)
+
+export async function mergeAnonymousSessions(
+  anonymousToken: string,
+  userToken: string,
+): Promise<AnonymousMergeResponse> {
+  const response = await publicApiClient.post('/api/auth/merge-anonymous', undefined, {
+    headers: {
+      Authorization: `Bearer ${userToken}`,
+      'X-Anonymous-Token': anonymousToken,
+    },
+  })
+  return requireApiData<AnonymousMergeResponse>(response.data, '匿名会话合并失败')
 }
 
 export async function getAuthMe(): Promise<AuthUser> {
