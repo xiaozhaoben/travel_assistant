@@ -25,10 +25,22 @@ import app.main as main_module
 
 
 class FakeRedis:
-    def __init__(self, *, error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        expire_error: Exception | None = None,
+        execute_error: Exception | None = None,
+    ):
         self.error = error
+        self.expire_error = expire_error
+        self.execute_error = execute_error
         self.hashes: dict[str, dict[str, str]] = {}
         self.calls: list[tuple] = []
+
+    def pipeline(self, transaction=True):
+        self.calls.append(("pipeline", transaction))
+        return FakePipeline(self)
 
     def hset(self, key, mapping):
         self.calls.append(("hset", key, dict(mapping)))
@@ -45,9 +57,37 @@ class FakeRedis:
 
     def expire(self, key, ttl):
         self.calls.append(("expire", key, ttl))
-        if self.error is not None:
-            raise self.error
+        if self.expire_error is not None:
+            raise self.expire_error
         return key in self.hashes
+
+
+class FakePipeline:
+    def __init__(self, redis: FakeRedis):
+        self.redis = redis
+        self.commands: list[tuple] = []
+
+    def hset(self, key, mapping):
+        self.redis.calls.append(("hset", key, dict(mapping)))
+        self.commands.append(("hset", key, dict(mapping)))
+        return self
+
+    def expire(self, key, ttl):
+        self.redis.calls.append(("expire", key, ttl))
+        if self.redis.expire_error is not None:
+            raise self.redis.expire_error
+        self.commands.append(("expire", key, ttl))
+        return self
+
+    def execute(self):
+        self.redis.calls.append(("execute",))
+        if self.redis.execute_error is not None:
+            raise self.redis.execute_error
+        for command in self.commands:
+            if command[0] == "hset":
+                _, key, mapping = command
+                self.redis.hashes.setdefault(key, {}).update({str(k): str(v) for k, v in mapping.items()})
+        return [len(self.commands[0][2]), True]
 
 
 def test_create_get_and_update_refresh_ttl_and_round_trip_json_result():
@@ -67,6 +107,10 @@ def test_create_get_and_update_refresh_ttl_and_round_trip_json_result():
     assert loaded == created
     assert updated.status == "completed"
     assert updated.result == {"doc_id": "doc-1", "chunks_added": 2}
+    assert [call for call in redis.calls if call[0] == "pipeline"] == [
+        ("pipeline", True),
+        ("pipeline", True),
+    ]
     key = f"travel-assistant:knowledge-job:{created.job_id}"
     assert [call for call in redis.calls if call[0] == "expire"] == [
         ("expire", key, 123),
@@ -99,6 +143,26 @@ def test_hash_schema_never_contains_request_or_user_content():
     assert "request" not in redis.hashes[key]
     assert "content" not in redis.hashes[key]
     assert "url" not in redis.hashes[key]
+
+
+def test_expire_queue_failure_does_not_leave_hash_without_ttl():
+    redis = FakeRedis(expire_error=RuntimeError("expire failed"))
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+
+    with pytest.raises(KnowledgeJobStoreUnavailable):
+        store.create(source_type="upload", message="queued")
+
+    assert redis.hashes == {}
+
+
+def test_transaction_execute_failure_does_not_leave_hash_without_ttl():
+    redis = FakeRedis(execute_error=RuntimeError("execute failed"))
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+
+    with pytest.raises(KnowledgeJobStoreUnavailable):
+        store.create(source_type="upload", message="queued")
+
+    assert redis.hashes == {}
 
 
 def test_unknown_job_has_stable_not_found_exception():
@@ -180,6 +244,19 @@ def test_job_status_endpoint_has_no_in_memory_fallback(monkeypatch):
     assert response.status_code == 503
     assert response.json()["code"] == "KNOWLEDGE_JOB_STORE_UNAVAILABLE"
     assert not hasattr(main_module, "knowledge_ingest_jobs")
+
+
+def test_create_job_endpoint_maps_missing_resource_store_to_stable_503(monkeypatch):
+    resources = SimpleNamespace(knowledge_job_store=None)
+    monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
+
+    response = TestClient(main_module.app, raise_server_exceptions=False).post(
+        "/api/knowledge/documents/auto/jobs",
+        json={"file_name": "guide.md", "content": "private travel notes"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "KNOWLEDGE_JOB_STORE_UNAVAILABLE"
 
 
 class _FakeOrchestrator:

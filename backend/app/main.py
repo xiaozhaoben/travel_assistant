@@ -1122,8 +1122,8 @@ def ingest_travel_document_auto(
 
 
 def create_knowledge_ingest_job(source_type: str, message: str) -> KnowledgeIngestJob:
-    store = _get_knowledge_job_store()
     try:
+        store = _get_knowledge_job_store()
         return store.create(source_type=source_type, message=message)
     except KnowledgeJobStoreUnavailable as exc:
         raise api_error(503, "KNOWLEDGE_JOB_STORE_UNAVAILABLE", "Knowledge job store is unavailable") from exc

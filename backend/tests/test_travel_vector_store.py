@@ -38,15 +38,28 @@ class BatchEmbeddingService:
 class FakeKnowledgeJobRedis:
     def __init__(self):
         self.hashes = {}
+        self.commands = []
+
+    def pipeline(self, transaction=True):
+        assert transaction is True
+        self.commands = []
+        return self
 
     def hset(self, key, mapping):
-        self.hashes.setdefault(key, {}).update(mapping)
+        self.commands.append(("hset", key, mapping))
+        return self
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
 
     def expire(self, key, _ttl):
-        return key in self.hashes
+        self.commands.append(("expire", key, _ttl))
+        return self
+
+    def execute(self):
+        _, key, mapping = self.commands[0]
+        self.hashes.setdefault(key, {}).update(mapping)
+        return [len(mapping), True]
 
 
 class FakeCursor:

@@ -90,8 +90,12 @@ class RedisKnowledgeJobStore:
         key = self._key(job.job_id)
         payload = self._serialize(job)
         try:
-            client.hset(key, mapping=payload)
-            client.expire(key, self.ttl_seconds)
+            pipeline = client.pipeline(transaction=True)
+            pipeline.hset(key, mapping=payload)
+            pipeline.expire(key, self.ttl_seconds)
+            results = pipeline.execute()
+            if len(results) != 2 or not bool(results[1]):
+                raise RuntimeError("Knowledge job TTL transaction failed")
         except Exception as exc:
             self._raise_unavailable("write", exc)
 
