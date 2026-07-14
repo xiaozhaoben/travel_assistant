@@ -3,11 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import logging
+from threading import Lock
+from time import monotonic
 
 from app.core.api_errors import api_error
 
 
 logger = logging.getLogger(__name__)
+_WARNING_INTERVAL_SECONDS = 60.0
+_warning_lock = Lock()
+_warning_timestamps: dict[tuple[str, str], float] = {}
 
 FIXED_WINDOW_SCRIPT = """
 local current = redis.call('INCR', KEYS[1])
@@ -61,14 +66,26 @@ class RateLimiter:
 
     @staticmethod
     def _redis_unavailable(policy: Policy, exception_type: str) -> int:
-        logger.warning(
-            "Redis rate limit check failed policy=%s exception_type=%s",
-            policy.name,
-            exception_type,
-        )
+        _log_redis_warning(policy.name, exception_type)
         if policy.fail_open:
             return policy.limit
         raise api_error(503, "REDIS_UNAVAILABLE", "限流服务暂时不可用")
+
+
+def _log_redis_warning(policy_name: str, exception_type: str) -> None:
+    key = (policy_name, exception_type)
+    now = monotonic()
+    with _warning_lock:
+        last_logged = _warning_timestamps.get(key)
+        if last_logged is not None and now - last_logged < _WARNING_INTERVAL_SECONDS:
+            return
+        _warning_timestamps[key] = now
+    logger.warning(
+        "Redis rate limit check failed policy=%s exception_type=%s",
+        policy_name,
+        exception_type,
+        extra={"policy": policy_name, "exception_type": exception_type},
+    )
 
 
 def create_rate_limit_policies(settings) -> dict[str, Policy]:

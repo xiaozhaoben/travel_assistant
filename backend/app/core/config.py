@@ -163,7 +163,11 @@ def get_settings() -> Settings:
         redis_password=_env_str("REDIS_PASSWORD"),
         redis_db=_env_int("REDIS_DB", 0),
         redis_connect_timeout_seconds=float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "2")),
-        redis_read_timeout_seconds=float(os.getenv("REDIS_READ_TIMEOUT_SECONDS", "2")),
+        redis_read_timeout_seconds=float(
+            _env_str("REDIS_SOCKET_TIMEOUT_SECONDS")
+            or _env_str("REDIS_READ_TIMEOUT_SECONDS", "2")
+            or "2"
+        ),
         redis_max_connections=max(1, _env_int("REDIS_MAX_CONNECTIONS", 20)),
         rate_limit_enabled=_env_bool("RATE_LIMIT_ENABLED", default=bool(redis_url or redis_host)),
         rate_limit_anonymous_issue_limit=max(1, _env_int("RATE_LIMIT_ANONYMOUS_ISSUE_LIMIT", 20)),

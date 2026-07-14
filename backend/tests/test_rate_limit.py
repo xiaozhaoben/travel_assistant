@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -157,6 +158,61 @@ def test_create_redis_client_uses_safe_pool_options(monkeypatch):
     }
 
 
+def test_create_redis_client_supports_host_connection_fields(monkeypatch):
+    captured = {}
+
+    class FakeRedisFactory:
+        def __new__(cls, **kwargs):
+            captured.update(kwargs)
+            return FakeRedis()
+
+    monkeypatch.setattr("app.core.redis_client.Redis", FakeRedisFactory)
+    settings = replace(
+        get_settings(),
+        redis_url=None,
+        redis_host="cache.internal.test",
+        redis_port=6380,
+        redis_password="test-placeholder-password",
+        redis_db=4,
+        redis_connect_timeout_seconds=1.25,
+        redis_read_timeout_seconds=2.25,
+        redis_max_connections=12,
+    )
+
+    resource = create_redis_client(settings)
+
+    assert resource.enabled is True
+    assert captured == {
+        "host": "cache.internal.test",
+        "port": 6380,
+        "password": "test-placeholder-password",
+        "db": 4,
+        "decode_responses": True,
+        "socket_connect_timeout": 1.25,
+        "socket_timeout": 2.25,
+        "health_check_interval": 30,
+        "max_connections": 12,
+    }
+
+
+def test_standard_redis_socket_timeout_takes_priority(monkeypatch):
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT_SECONDS", "3.5")
+    monkeypatch.setenv("REDIS_READ_TIMEOUT_SECONDS", "9.5")
+
+    settings = get_settings()
+
+    assert settings.redis_read_timeout_seconds == 3.5
+
+
+def test_legacy_redis_read_timeout_remains_supported(monkeypatch):
+    monkeypatch.delenv("REDIS_SOCKET_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("REDIS_READ_TIMEOUT_SECONDS", "4.5")
+
+    settings = get_settings()
+
+    assert settings.redis_read_timeout_seconds == 4.5
+
+
 def test_rate_limit_defaults_are_disabled_without_redis(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("REDIS_HOST", raising=False)
@@ -200,6 +256,68 @@ def test_anonymous_endpoint_uses_socket_ip_and_ignores_forwarded_header(monkeypa
 
     assert response.status_code == 200
     assert limiter.calls == [(resources.rate_limit_policies["anonymous_issue"], "ip:testclient")]
+
+
+def test_api_rate_limit_response_includes_stable_code_and_retry_after(monkeypatch):
+    fake = FakeRedis()
+    resources = SimpleNamespace(
+        rate_limiter=RateLimiter(fake, enabled=True),
+        rate_limit_policies={
+            "anonymous_issue": Policy("anonymous_issue", 1, 37, False),
+        },
+    )
+    monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
+    client = TestClient(main_module.app)
+
+    assert client.post("/api/auth/anonymous").status_code == 200
+    response = client.post("/api/auth/anonymous")
+
+    assert response.status_code == 429
+    assert response.json()["code"] == "RATE_LIMITED"
+    assert response.headers["Retry-After"] == "37"
+
+
+def test_knowledge_read_is_fail_closed_at_api_boundary(monkeypatch):
+    resources = SimpleNamespace(
+        rate_limiter=RateLimiter(
+            FakeRedis(eval_error=ConnectionError("private cache details")),
+            enabled=True,
+        ),
+        rate_limit_policies={
+            "knowledge_read": Policy("knowledge_read", 30, 60, False),
+        },
+    )
+    monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
+
+    response = TestClient(main_module.app).get("/api/news/status")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "REDIS_UNAVAILABLE"
+
+
+def test_redis_failure_warning_is_throttled_per_policy_and_exception(monkeypatch, caplog):
+    from app.core import rate_limit as rate_limit_module
+
+    now = [100.0]
+    monkeypatch.setattr(rate_limit_module, "monotonic", lambda: now[0])
+    rate_limit_module._warning_timestamps.clear()
+    limiter = RateLimiter(FakeRedis(eval_error=ConnectionError("private")), enabled=True)
+    qa_policy = Policy("qa-throttle-test", 20, 60, True)
+    planning_policy = Policy("planning-throttle-test", 5, 60, True)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.rate_limit"):
+        limiter.enforce(qa_policy, "one")
+        limiter.enforce(qa_policy, "two")
+        limiter.enforce(planning_policy, "one")
+        now[0] += 61
+        limiter.enforce(qa_policy, "three")
+
+    warnings = [record for record in caplog.records if "Redis rate limit check failed" in record.message]
+    assert [(record.policy, record.exception_type) for record in warnings] == [
+        ("qa-throttle-test", "ConnectionError"),
+        ("planning-throttle-test", "ConnectionError"),
+        ("qa-throttle-test", "ConnectionError"),
+    ]
 
 
 def test_health_exposes_only_safe_redis_flags(monkeypatch):
