@@ -3561,13 +3561,18 @@ def test_budget_recalculates_after_deleting_attraction():
 def test_api_health_plan_and_recalculate_endpoints():
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
     health = client.get("/api/health")
     assert health.status_code == 200
     assert "llm" in health.json()
     assert health.json()["amap_transport"] == "mcp-stdio"
 
-    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 3 天，喜欢历史文化，预算中等"})
+    response = client.post(
+        "/api/trip/plan",
+        json={"prompt": "我想去北京玩 3 天，喜欢历史文化，预算中等"},
+        headers=auth_headers,
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -3585,7 +3590,7 @@ def test_api_health_plan_and_recalculate_endpoints():
         if paid_index is not None:
             del day["attractions"][paid_index]
             break
-    recalc = client.post("/api/trip/recalculate", json={"plan": plan})
+    recalc = client.post("/api/trip/recalculate", json={"plan": plan}, headers=auth_headers)
 
     assert recalc.status_code == 200
     assert recalc.json()["data"]["budget"]["total"] < original_total
@@ -3899,8 +3904,10 @@ def test_api_plan_persists_report_and_returns_report_id():
         def health(self):
             return {"enabled": True, "ok": True}
 
-        def save_report(self, request, result):
-            self.saved.append({"request": request, "result": result})
+        def save_report(self, request, result, *, owner_type, owner_id):
+            self.saved.append(
+                {"request": request, "result": result, "owner_type": owner_type, "owner_id": owner_id}
+            )
             return {
                 "id": "11111111-1111-1111-1111-111111111111",
                 "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
@@ -3925,12 +3932,16 @@ def test_api_plan_persists_report_and_returns_report_id():
                 }
             )
 
-        def update_report_attraction_image(self, report_id, attraction_name, image_url):
+        def update_report_attraction_image(
+            self, report_id, attraction_name, image_url, *, owner_type, owner_id
+        ):
             self.updated_images.append(
                 {
                     "report_id": report_id,
                     "attraction_name": attraction_name,
                     "image_url": image_url,
+                    "owner_type": owner_type,
+                    "owner_id": owner_id,
                 }
             )
 
@@ -3943,8 +3954,13 @@ def test_api_plan_persists_report_and_returns_report_id():
     main_module.report_store = store
     main_module.image_provider = FakeImageProvider()
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
-    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+    response = client.post(
+        "/api/trip/plan",
+        json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"},
+        headers=auth_headers,
+    )
 
     assert response.status_code == 200
     payload = response.json()["data"]
@@ -3952,6 +3968,8 @@ def test_api_plan_persists_report_and_returns_report_id():
     assert payload["report_created_at"] == "2026-05-19T08:00:00Z"
     assert store.saved[0]["request"].prompt == "我想去北京玩 1 天，喜欢历史文化，预算中等"
     assert store.saved[0]["result"].selected_option_id == "balanced"
+    assert store.saved[0]["owner_type"] == "anonymous"
+    assert store.saved[0]["owner_id"]
     assert store.saved_logs[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
     assert store.cached_assets
     assert store.updated_images
@@ -3973,8 +3991,13 @@ def test_api_poi_photo_uses_cached_asset_and_updates_report_without_provider_cal
             assert "故宫博物院" in cache_key
             return {"value": "https://img.example.test/cached.jpg"}
 
-        def update_report_attraction_image(self, report_id, attraction_name, image_url):
-            self.updated_images.append((report_id, attraction_name, image_url))
+        def get_report(self, report_id, *, owner_type, owner_id):
+            return {"id": report_id}
+
+        def update_report_attraction_image(
+            self, report_id, attraction_name, image_url, *, owner_type, owner_id
+        ):
+            self.updated_images.append((report_id, attraction_name, image_url, owner_type, owner_id))
 
     class ForbiddenImageProvider:
         def image_for(self, query):
@@ -3984,6 +4007,7 @@ def test_api_poi_photo_uses_cached_asset_and_updates_report_without_provider_cal
     main_module.report_store = store
     main_module.image_provider = ForbiddenImageProvider()
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
     response = client.get(
         "/api/poi/photo",
@@ -3992,13 +4016,18 @@ def test_api_poi_photo_uses_cached_asset_and_updates_report_without_provider_cal
             "city": "北京",
             "report_id": "11111111-1111-1111-1111-111111111111",
         },
+        headers=auth_headers,
     )
 
     assert response.status_code == 200
     assert response.json()["data"]["photo_url"] == "https://img.example.test/cached.jpg"
-    assert store.updated_images == [
-        ("11111111-1111-1111-1111-111111111111", "故宫博物院", "https://img.example.test/cached.jpg")
-    ]
+    assert store.updated_images[0][:4] == (
+        "11111111-1111-1111-1111-111111111111",
+        "故宫博物院",
+        "https://img.example.test/cached.jpg",
+        "anonymous",
+    )
+    assert store.updated_images[0][4]
     main_module.report_store = None
     main_module.image_provider = None
 
@@ -4018,8 +4047,13 @@ def test_api_poi_photo_caches_provider_result_and_updates_report():
         def upsert_asset_cache(self, asset_type, cache_key, city, name, value, response_payload=None):
             self.cached_assets.append((asset_type, cache_key, city, name, value, response_payload))
 
-        def update_report_attraction_image(self, report_id, attraction_name, image_url):
-            self.updated_images.append((report_id, attraction_name, image_url))
+        def get_report(self, report_id, *, owner_type, owner_id):
+            return {"id": report_id}
+
+        def update_report_attraction_image(
+            self, report_id, attraction_name, image_url, *, owner_type, owner_id
+        ):
+            self.updated_images.append((report_id, attraction_name, image_url, owner_type, owner_id))
 
     class FakeImageProvider:
         def __init__(self):
@@ -4034,6 +4068,7 @@ def test_api_poi_photo_caches_provider_result_and_updates_report():
     main_module.report_store = store
     main_module.image_provider = provider
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
     response = client.get(
         "/api/poi/photo",
@@ -4042,6 +4077,7 @@ def test_api_poi_photo_caches_provider_result_and_updates_report():
             "city": "北京",
             "report_id": "11111111-1111-1111-1111-111111111111",
         },
+        headers=auth_headers,
     )
 
     assert response.status_code == 200
@@ -4050,9 +4086,13 @@ def test_api_poi_photo_caches_provider_result_and_updates_report():
     assert store.cached_assets[0][0] == "attraction_image"
     assert store.cached_assets[0][2] == "北京"
     assert store.cached_assets[0][3] == "故宫博物院"
-    assert store.updated_images == [
-        ("11111111-1111-1111-1111-111111111111", "故宫博物院", "https://img.example.test/fresh.jpg")
-    ]
+    assert store.updated_images[0][:4] == (
+        "11111111-1111-1111-1111-111111111111",
+        "故宫博物院",
+        "https://img.example.test/fresh.jpg",
+        "anonymous",
+    )
+    assert store.updated_images[0][4]
     main_module.report_store = None
     main_module.image_provider = None
 
@@ -4109,20 +4149,27 @@ def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
         def health(self):
             return {"enabled": True, "ok": True}
 
-        def save_report(self, request, result):
+        def save_report(self, request, result, *, owner_type, owner_id):
             return {
                 "id": "11111111-1111-1111-1111-111111111111",
                 "created_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
                 "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
             }
 
-        def update_report_plan(self, report_id, plan, operation, research_context):
+        def get_report(self, report_id, *, owner_type, owner_id):
+            return {"id": report_id}
+
+        def update_report_plan(
+            self, report_id, plan, operation, research_context, *, owner_type, owner_id
+        ):
             self.updated.append(
                 {
                     "report_id": report_id,
                     "plan": plan,
                     "operation": operation,
                     "research_context": research_context,
+                    "owner_type": owner_type,
+                    "owner_id": owner_id,
                 }
             )
 
@@ -4130,7 +4177,12 @@ def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     main_module.report_store = store
     client = TestClient(app)
-    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"})
+    auth_headers = _anonymous_auth_headers(client)
+    response = client.post(
+        "/api/trip/plan",
+        json={"prompt": "我想去北京玩 1 天，喜欢历史文化，预算中等"},
+        headers=auth_headers,
+    )
     plan = response.json()["data"]["options"][0]["plan"]
 
     recalc = client.post(
@@ -4141,11 +4193,14 @@ def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
             "operation": "reorder_day",
             "day_index": 1,
         },
+        headers=auth_headers,
     )
 
     assert recalc.status_code == 200
     assert store.updated[0]["report_id"] == "11111111-1111-1111-1111-111111111111"
     assert store.updated[0]["operation"] == "reorder_day"
+    assert store.updated[0]["owner_type"] == "anonymous"
+    assert store.updated[0]["owner_id"]
     assert store.updated[0]["plan"].budget.total == recalc.json()["data"]["budget"]["total"]
     main_module.report_store = None
 
@@ -4165,13 +4220,19 @@ def test_api_plan_get_returns_usage_hint():
 def test_api_recalculate_can_refill_day_after_deleting_attractions():
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     client = TestClient(app)
-    response = client.post("/api/trip/plan", json={"prompt": "我想去北京玩 2 天，喜欢历史文化，预算中等"})
+    auth_headers = _anonymous_auth_headers(client)
+    response = client.post(
+        "/api/trip/plan",
+        json={"prompt": "我想去北京玩 2 天，喜欢历史文化，预算中等"},
+        headers=auth_headers,
+    )
     plan = response.json()["data"]["options"][0]["plan"]
     plan["days"][0]["attractions"] = plan["days"][0]["attractions"][:1]
 
     recalc = client.post(
         "/api/trip/recalculate",
         json={"plan": plan, "operation": "refill_day", "day_index": 1},
+        headers=auth_headers,
     )
 
     assert recalc.status_code == 200
@@ -4181,6 +4242,7 @@ def test_api_recalculate_can_refill_day_after_deleting_attractions():
 def test_api_plan_honors_structured_dates_and_days():
     main_module.orchestrator = TravelAgentOrchestrator(disable_llm=True, disable_external_api=True)
     client = TestClient(app)
+    auth_headers = _anonymous_auth_headers(client)
 
     response = client.post(
         "/api/trip/plan",
@@ -4189,6 +4251,7 @@ def test_api_plan_honors_structured_dates_and_days():
             "start_date": "2026-06-01",
             "days": 2,
         },
+        headers=auth_headers,
     )
 
     assert response.status_code == 200

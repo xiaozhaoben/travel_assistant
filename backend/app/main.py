@@ -62,6 +62,7 @@ from .auth.principal import (
     create_principal_token,
     decode_principal_token,
     get_current_principal,
+    get_current_principal_optional,
     require_user_principal,
 )
 from .core.api_errors import api_error, install_api_error_handlers
@@ -73,7 +74,7 @@ from .knowledge.qa_checkpointer import create_qa_checkpointer
 from .knowledge.vector_store import create_travel_vector_store, normalize_document_content
 from .storage.plan_log import PlanLogRecorder
 from .storage.qa_store import QAConversationNotFound, create_qa_conversation_store
-from .storage.report_store import create_report_store
+from .storage.report_store import ReportNotFound, create_report_store
 from .workflows.agents import TravelAgentOrchestrator
 
 settings = get_settings()
@@ -319,13 +320,26 @@ def _iter_unique_attractions(result: TripPlanningResult):
                 yield city, attraction
 
 
-def _write_report_attraction_image(report_id: str | None, store: object | None, name: str, image_url: str) -> None:
+def _write_report_attraction_image(
+    report_id: str | None,
+    store: object | None,
+    name: str,
+    image_url: str,
+    *,
+    owner_type: str,
+    owner_id: str,
+) -> None:
     if not report_id or store is None or not image_url:
         return
-    try:
-        _call_if_present(store, "update_report_attraction_image", report_id, name, image_url)
-    except Exception as exc:  # pragma: no cover - defensive for background enrichment
-        logger.warning("Failed to update report attraction image for %s: %s", name, exc)
+    _call_if_present(
+        store,
+        "update_report_attraction_image",
+        report_id,
+        name,
+        image_url,
+        owner_type=owner_type,
+        owner_id=owner_id,
+    )
 
 
 def _cache_asset(
@@ -380,7 +394,14 @@ def _cached_asset_payload(store: object | None, asset_type: str, cache_key: str)
     return None
 
 
-def hydrate_report_assets(report_id: str, result: TripPlanningResult, store: object | None, provider: UnsplashMCPClient) -> None:
+def hydrate_report_assets(
+    report_id: str,
+    result: TripPlanningResult,
+    store: object | None,
+    provider: UnsplashMCPClient,
+    owner_type: str,
+    owner_id: str,
+) -> None:
     for city, attraction in _iter_unique_attractions(result):
         existing = _valid_cached_url(attraction.image_url)
         key = asset_cache_key("attraction_image", city, attraction.name)
@@ -402,7 +423,21 @@ def hydrate_report_assets(report_id: str, result: TripPlanningResult, store: obj
             image_url,
             response_payload={"photo_url": image_url},
         )
-        _write_report_attraction_image(report_id, store, attraction.name, image_url)
+        try:
+            _write_report_attraction_image(
+                report_id,
+                store,
+                attraction.name,
+                image_url,
+                owner_type=owner_type,
+                owner_id=owner_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive for background enrichment
+            logger.warning(
+                "Background report image update failed for %s (%s)",
+                attraction.name,
+                exc.__class__.__name__,
+            )
 
 
 app = FastAPI(title="Travel Assistant API", version="1.0.0", lifespan=lifespan)
@@ -478,17 +513,28 @@ def plan_trip_usage():
 
 
 @app.post("/api/trip/plan", response_model=ApiResponse[TripPlanningResult])
-def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
+def plan_trip(
+    request: TripPlanRequest,
+    background_tasks: BackgroundTasks,
+    principal: Principal = Depends(get_current_principal),
+):
     resources = get_app_resources()
+    owner_type, owner_id = principal.principal_type, principal.subject
     with PlanLogRecorder() as plan_logs:
         result = resources.orchestrator.plan(request)
     if resources.report_store is not None:
         try:
-            report = resources.report_store.save_report(request, result)
+            report = resources.report_store.save_report(
+                request,
+                result,
+                owner_type=owner_type,
+                owner_id=owner_id,
+            )
             if hasattr(resources.report_store, "save_plan_logs"):
                 resources.report_store.save_plan_logs(report["id"], plan_logs.entries)
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"报告数据库写入失败: {exc}") from exc
+            logger.warning("Report write failed (%s)", exc.__class__.__name__)
+            raise api_error(503, "REPORT_STORE_ERROR", "报告数据库写入失败") from exc
         result = result.model_copy(
             update={
                 "report_id": report["id"],
@@ -502,6 +548,8 @@ def plan_trip(request: TripPlanRequest, background_tasks: BackgroundTasks):
             result,
             resources.report_store,
             resources.image_provider,
+            owner_type,
+            owner_id,
         )
     return ApiResponse[TripPlanningResult](success=True, message="行程计划生成成功", data=result)
 
@@ -1207,36 +1255,67 @@ def travel_news_status():
 
 
 @app.post("/api/trip/recalculate", response_model=ApiResponse[TripPlan])
-def recalculate_trip(request: PlanEditRequest):
+def recalculate_trip(
+    request: PlanEditRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     resources = get_app_resources()
+    owner_type, owner_id = principal.principal_type, principal.subject
+    if request.report_id:
+        if resources.report_store is None:
+            raise api_error(503, "REPORT_STORE_UNAVAILABLE", "报告数据库未启用")
+        try:
+            resources.report_store.get_report(
+                request.report_id,
+                owner_type=owner_type,
+                owner_id=owner_id,
+            )
+        except ReportNotFound as exc:
+            raise api_error(404, "REPORT_NOT_FOUND", "报告不存在") from exc
+        except Exception as exc:
+            logger.warning("Report ownership check failed (%s)", exc.__class__.__name__)
+            raise api_error(503, "REPORT_STORE_ERROR", "报告数据库查询失败") from exc
     plan = resources.orchestrator.recalculate(
         request.plan,
         operation=request.operation,
         research_context=request.research_context,
         day_index=request.day_index,
     )
-    if request.report_id and resources.report_store is not None:
+    if request.report_id:
         try:
             resources.report_store.update_report_plan(
                 request.report_id,
                 plan,
                 operation=request.operation,
                 research_context=request.research_context,
+                owner_type=owner_type,
+                owner_id=owner_id,
             )
+        except ReportNotFound as exc:
+            raise api_error(404, "REPORT_NOT_FOUND", "报告不存在") from exc
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"报告修订写入失败: {exc}") from exc
+            logger.warning("Report revision write failed (%s)", exc.__class__.__name__)
+            raise api_error(503, "REPORT_STORE_ERROR", "报告修订写入失败") from exc
     return ApiResponse[TripPlan](success=True, message="行程已更新", data=plan)
 
 
 @app.get("/api/reports", response_model=ApiResponse[list[TripReportSummary]])
-def list_reports(limit: int = Query(default=50, ge=1, le=200)):
+def list_reports(
+    limit: int = Query(default=50, ge=1, le=200),
+    principal: Principal = Depends(get_current_principal),
+):
     resources = get_app_resources()
     if resources.report_store is None:
         return ApiResponse[list[TripReportSummary]](success=True, message="数据库未启用", data=[])
     try:
-        reports = resources.report_store.list_reports(limit=limit)
+        reports = resources.report_store.list_reports(
+            owner_type=principal.principal_type,
+            owner_id=principal.subject,
+            limit=limit,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
+        logger.warning("Report list query failed (%s)", exc.__class__.__name__)
+        raise api_error(503, "REPORT_STORE_ERROR", "报告数据库查询失败") from exc
     return ApiResponse[list[TripReportSummary]](
         success=True,
         message="报告列表获取成功",
@@ -1245,16 +1324,21 @@ def list_reports(limit: int = Query(default=50, ge=1, le=200)):
 
 
 @app.get("/api/reports/{report_id}", response_model=ApiResponse[TripReportDetail])
-def get_report(report_id: str):
+def get_report(report_id: str, principal: Principal = Depends(get_current_principal)):
     resources = get_app_resources()
     if resources.report_store is None:
         raise HTTPException(status_code=503, detail="数据库未启用")
     try:
-        report = resources.report_store.get_report(report_id)
+        report = resources.report_store.get_report(
+            report_id,
+            owner_type=principal.principal_type,
+            owner_id=principal.subject,
+        )
+    except ReportNotFound as exc:
+        raise api_error(404, "REPORT_NOT_FOUND", "报告不存在") from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"报告数据库查询失败: {exc}") from exc
-    if report is None:
-        raise HTTPException(status_code=404, detail="报告不存在")
+        logger.warning("Report detail query failed (%s)", exc.__class__.__name__)
+        raise api_error(503, "REPORT_STORE_ERROR", "报告数据库查询失败") from exc
     return ApiResponse[TripReportDetail](success=True, message="报告详情获取成功", data=report)
 
 
@@ -1263,8 +1347,27 @@ def get_poi_photo(
     name: str = Query(..., min_length=1, max_length=120),
     city: str = Query(default="", max_length=40),
     report_id: str | None = Query(default=None, max_length=80),
+    principal: Principal | None = Depends(get_current_principal_optional),
 ):
     resources = get_app_resources()
+    owner_type = principal.principal_type if principal else ""
+    owner_id = principal.subject if principal else ""
+    if report_id:
+        if principal is None:
+            raise api_error(401, "AUTH_REQUIRED", "需要 Bearer 认证令牌")
+        if resources.report_store is None:
+            raise api_error(503, "REPORT_STORE_UNAVAILABLE", "报告数据库未启用")
+        try:
+            resources.report_store.get_report(
+                report_id,
+                owner_type=owner_type,
+                owner_id=owner_id,
+            )
+        except ReportNotFound as exc:
+            raise api_error(404, "REPORT_NOT_FOUND", "报告不存在") from exc
+        except Exception as exc:
+            logger.warning("Photo report ownership check failed (%s)", exc.__class__.__name__)
+            raise api_error(503, "REPORT_STORE_ERROR", "报告数据库查询失败") from exc
     cache_key = asset_cache_key("attraction_image", city, name)
     photo_url = _cached_asset_value(resources.report_store, "attraction_image", cache_key)
     if not photo_url:
@@ -1280,7 +1383,21 @@ def get_poi_photo(
                 photo_url,
                 response_payload={"photo_url": photo_url},
             )
-    _write_report_attraction_image(report_id, resources.report_store, name, photo_url)
+    if report_id:
+        try:
+            _write_report_attraction_image(
+                report_id,
+                resources.report_store,
+                name,
+                photo_url,
+                owner_type=owner_type,
+                owner_id=owner_id,
+            )
+        except ReportNotFound as exc:
+            raise api_error(404, "REPORT_NOT_FOUND", "报告不存在") from exc
+        except Exception as exc:
+            logger.warning("Report image write failed (%s)", exc.__class__.__name__)
+            raise api_error(503, "REPORT_STORE_ERROR", "报告图片写入失败") from exc
     return {
         "success": True,
         "message": "获取图片成功",

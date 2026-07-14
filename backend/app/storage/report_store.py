@@ -21,6 +21,18 @@ from app.storage.plan_log import PlanLogEntry
 logger = logging.getLogger(__name__)
 
 
+class ReportNotFound(LookupError):
+    """Raised when a report does not exist for the requested owner."""
+
+
+def _validate_owner(owner_type: str, owner_id: str) -> tuple[str, str]:
+    if owner_type not in ("user", "anonymous"):
+        raise ValueError("owner_type must be 'user' or 'anonymous'")
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise ValueError("owner_id must be a non-empty string")
+    return owner_type, owner_id
+
+
 def _set_attraction_image_in_plan_payload(plan_payload: dict[str, Any], attraction_name: str, image_url: str) -> bool:
     changed = False
     for day in plan_payload.get("days") or []:
@@ -45,6 +57,8 @@ def _set_attraction_image_in_result_payload(result_payload: dict[str, Any], attr
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS trip_reports (
     id uuid PRIMARY KEY,
+    owner_type text,
+    owner_id text,
     prompt text NOT NULL,
     request_payload jsonb NOT NULL,
     result_payload jsonb NOT NULL,
@@ -56,6 +70,9 @@ CREATE TABLE IF NOT EXISTS trip_reports (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE trip_reports ADD COLUMN IF NOT EXISTS owner_type text;
+ALTER TABLE trip_reports ADD COLUMN IF NOT EXISTS owner_id text;
 
 CREATE TABLE IF NOT EXISTS trip_report_revisions (
     id uuid PRIMARY KEY,
@@ -97,6 +114,8 @@ CREATE TABLE IF NOT EXISTS trip_asset_cache (
 
 CREATE INDEX IF NOT EXISTS idx_trip_reports_created_at ON trip_reports (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trip_reports_city ON trip_reports (city);
+CREATE INDEX IF NOT EXISTS idx_trip_reports_owner_created_at
+    ON trip_reports (owner_type, owner_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trip_report_revisions_report_id ON trip_report_revisions (report_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_report_id ON plan_execution_logs (report_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_plan_execution_logs_event_type ON plan_execution_logs (event_type, created_at DESC);
@@ -131,7 +150,15 @@ class PostgresReportStore:
             logger.warning("PostgreSQL health check failed: %s", exc)
             return {"enabled": True, "ok": False, "error": str(exc)}
 
-    def save_report(self, request: TripPlanRequest, result: TripPlanningResult) -> dict[str, Any]:
+    def save_report(
+        self,
+        request: TripPlanRequest,
+        result: TripPlanningResult,
+        *,
+        owner_type: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
         self._ensure_schema_once()
         report_id = str(uuid4())
         selected_plan = result.selected_plan
@@ -144,14 +171,16 @@ class PostgresReportStore:
                 row = cur.execute(
                     """
                     INSERT INTO trip_reports (
-                        id, prompt, request_payload, result_payload, selected_plan_payload,
+                        id, owner_type, owner_id, prompt, request_payload, result_payload, selected_plan_payload,
                         city, days_count, budget_total, generation_mode
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id::text, created_at, updated_at
                     """,
                     (
                         report_id,
+                        owner_type,
+                        owner_id,
                         request.prompt,
                         Jsonb(request_payload),
                         Jsonb(result_payload),
@@ -170,7 +199,11 @@ class PostgresReportStore:
         plan: TripPlan,
         operation: str,
         research_context: list[ResearchSnippet] | None = None,
+        *,
+        owner_type: str,
+        owner_id: str,
     ) -> None:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
         self._ensure_schema_once()
         revision_id = str(uuid4())
         plan_payload = plan.model_dump(mode="json")
@@ -187,7 +220,7 @@ class PostgresReportStore:
                         budget_total = %s,
                         generation_mode = %s,
                         updated_at = now()
-                    WHERE id = %s
+                    WHERE id = %s AND owner_type = %s AND owner_id = %s
                     RETURNING id
                     """,
                     (
@@ -197,10 +230,12 @@ class PostgresReportStore:
                         plan.budget.total,
                         plan.generation_mode,
                         report_id,
+                        owner_type,
+                        owner_id,
                     ),
                 ).fetchone()
                 if updated is None:
-                    raise ValueError(f"Report not found: {report_id}")
+                    raise ReportNotFound(report_id)
                 cur.execute(
                     """
                     INSERT INTO trip_report_revisions (
@@ -306,7 +341,16 @@ class PostgresReportStore:
                     ),
                 )
 
-    def update_report_attraction_image(self, report_id: str, attraction_name: str, image_url: str) -> bool:
+    def update_report_attraction_image(
+        self,
+        report_id: str,
+        attraction_name: str,
+        image_url: str,
+        *,
+        owner_type: str,
+        owner_id: str,
+    ) -> bool:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
         self._ensure_schema_once()
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -314,12 +358,12 @@ class PostgresReportStore:
                     """
                     SELECT result_payload, selected_plan_payload
                     FROM trip_reports
-                    WHERE id = %s
+                    WHERE id = %s AND owner_type = %s AND owner_id = %s
                     """,
-                    (report_id,),
+                    (report_id, owner_type, owner_id),
                 ).fetchone()
                 if row is None:
-                    raise ValueError(f"Report not found: {report_id}")
+                    raise ReportNotFound(report_id)
 
                 result_payload = dict(row["result_payload"])
                 selected_plan_payload = dict(row["selected_plan_payload"])
@@ -334,17 +378,20 @@ class PostgresReportStore:
                     SET result_payload = %s,
                         selected_plan_payload = %s,
                         updated_at = now()
-                    WHERE id = %s
+                    WHERE id = %s AND owner_type = %s AND owner_id = %s
                     """,
                     (
                         Jsonb(result_payload),
                         Jsonb(selected_plan_payload),
                         report_id,
+                        owner_type,
+                        owner_id,
                     ),
                 )
         return True
 
-    def list_reports(self, limit: int = 50) -> list[TripReportSummary]:
+    def list_reports(self, *, owner_type: str, owner_id: str, limit: int = 50) -> list[TripReportSummary]:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
         self._ensure_schema_once()
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -352,14 +399,16 @@ class PostgresReportStore:
                     """
                     SELECT id::text, prompt, city, days_count, budget_total, generation_mode, created_at, updated_at
                     FROM trip_reports
+                    WHERE owner_type = %s AND owner_id = %s
                     ORDER BY created_at DESC
                     LIMIT %s
                     """,
-                    (max(1, min(limit, 200)),),
+                    (owner_type, owner_id, max(1, min(limit, 200))),
                 ).fetchall()
         return [TripReportSummary.model_validate(dict(row)) for row in rows]
 
-    def get_report(self, report_id: str) -> TripReportDetail | None:
+    def get_report(self, report_id: str, *, owner_type: str, owner_id: str) -> TripReportDetail:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
         self._ensure_schema_once()
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -369,12 +418,12 @@ class PostgresReportStore:
                         id::text, prompt, city, days_count, budget_total, generation_mode,
                         created_at, updated_at, request_payload, result_payload, selected_plan_payload
                     FROM trip_reports
-                    WHERE id = %s
+                    WHERE id = %s AND owner_type = %s AND owner_id = %s
                     """,
-                    (report_id,),
+                    (report_id, owner_type, owner_id),
                 ).fetchone()
                 if report is None:
-                    return None
+                    raise ReportNotFound(report_id)
                 revisions = cur.execute(
                     """
                     SELECT
