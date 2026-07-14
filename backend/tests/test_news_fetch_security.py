@@ -113,4 +113,3 @@ def test_news_agent_returns_stable_code_when_feedparser_is_unavailable(monkeypat
     )
 
     assert result["errors"] == ["NEWS_PARSER_UNAVAILABLE"]
-

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from threading import Event
+from time import monotonic
 
 import httpx
 import pytest
@@ -263,3 +265,90 @@ def test_total_deadline_stops_slow_drip_and_closes_stream():
 
     assert raised.value.code == "URL_FETCH_FAILED"
     assert client.stream_closed is True
+
+
+def test_request_pins_validated_ip_and_preserves_host_and_https_sni():
+    client = FakeClient(FakeResponse())
+    fetcher = SafeURLFetcher(
+        resolver=lambda _host, _port: ["93.184.216.34"],
+        client=client,
+    )
+
+    fetcher.fetch("https://example.com:8443/guide?q=chengdu")
+
+    call = client.calls[0]
+    assert call["url"] == "https://93.184.216.34:8443/guide?q=chengdu"
+    assert call["headers"]["Host"] == "example.com:8443"
+    assert call["extensions"]["sni_hostname"] == "example.com"
+
+
+def test_ipv6_pinned_request_uses_brackets():
+    client = FakeClient(FakeResponse())
+    fetcher = SafeURLFetcher(
+        resolver=lambda _host, _port: ["2606:2800:220:1:248:1893:25c8:1946"],
+        client=client,
+    )
+
+    fetcher.fetch("https://example.com/guide")
+
+    assert client.calls[0]["url"].startswith(
+        "https://[2606:2800:220:1:248:1893:25c8:1946]:443/guide"
+    )
+    assert client.calls[0]["headers"]["Host"] == "example.com"
+
+
+def _assert_hard_timeout(fetcher: SafeURLFetcher):
+    started = monotonic()
+    with pytest.raises(SafeURLFetchError) as raised:
+        fetcher.fetch("https://example.com/blocked")
+    elapsed = monotonic() - started
+
+    assert raised.value.code == "URL_FETCH_FAILED"
+    assert elapsed < 0.4
+
+
+def test_hard_total_timeout_interrupts_blocking_resolver():
+    blocker = Event()
+    fetcher = SafeURLFetcher(
+        resolver=lambda _host, _port: (blocker.wait(0.5) or ["93.184.216.34"]),
+        client=FakeClient(FakeResponse()),
+        total_timeout_seconds=0.05,
+    )
+
+    _assert_hard_timeout(fetcher)
+
+
+def test_hard_total_timeout_interrupts_blocking_stream_entry():
+    blocker = Event()
+
+    class BlockingClient(FakeClient):
+        @contextmanager
+        def stream(self, method, url, **kwargs):
+            self.calls.append({"method": method, "url": url, **kwargs})
+            blocker.wait(0.5)
+            yield self.response
+
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=BlockingClient(FakeResponse()),
+        total_timeout_seconds=0.05,
+    )
+
+    _assert_hard_timeout(fetcher)
+
+
+def test_hard_total_timeout_interrupts_blocking_stream_read():
+    blocker = Event()
+
+    class BlockingResponse(FakeResponse):
+        def iter_bytes(self):
+            blocker.wait(0.5)
+            yield b"late"
+
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=FakeClient(BlockingResponse()),
+        total_timeout_seconds=0.05,
+    )
+
+    _assert_hard_timeout(fetcher)

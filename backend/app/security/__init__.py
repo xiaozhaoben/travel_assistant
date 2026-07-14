@@ -3,4 +3,3 @@
 from .url_fetcher import SafeFetchResult, SafeURLFetchError, SafeURLFetcher
 
 __all__ = ["SafeFetchResult", "SafeURLFetchError", "SafeURLFetcher"]
-
