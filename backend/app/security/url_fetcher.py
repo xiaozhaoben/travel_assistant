@@ -10,17 +10,11 @@ import httpx
 
 
 DEFAULT_MAX_BYTES = 2 * 1024 * 1024
-ALLOWED_CONTENT_TYPES = {
-    "text/plain",
+DOCUMENT_CONTENT_TYPES = frozenset({
     "text/html",
-    "application/json",
-    "application/xml",
-    "text/xml",
-    "text/markdown",
-    "text/x-markdown",
-    "application/markdown",
-    "application/x-markdown",
-}
+    "text/plain",
+    "application/xhtml+xml",
+})
 LOCAL_HOST_SUFFIXES = (
     ".localhost",
     ".local",
@@ -66,14 +60,23 @@ class SafeURLFetcher:
         max_bytes: int = DEFAULT_MAX_BYTES,
         connect_timeout_seconds: float = 8.0,
         read_timeout_seconds: float = 20.0,
+        allowed_content_types: Iterable[str] | None = None,
     ):
         self.resolver = resolver or _resolve_addresses
         self.client = client
         self.max_bytes = max(1, int(max_bytes))
         self.connect_timeout_seconds = max(0.1, float(connect_timeout_seconds))
         self.read_timeout_seconds = max(0.1, float(read_timeout_seconds))
+        self.allowed_content_types = _normalize_content_types(
+            allowed_content_types or DOCUMENT_CONTENT_TYPES
+        )
 
-    def fetch(self, url: str) -> SafeFetchResult:
+    def fetch(
+        self,
+        url: str,
+        *,
+        allowed_content_types: Iterable[str] | None = None,
+    ) -> SafeFetchResult:
         parsed = _parse_url(url)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self._validate_destination(parsed.hostname or "", port)
@@ -83,11 +86,16 @@ class SafeURLFetcher:
             write=self.read_timeout_seconds,
             pool=self.connect_timeout_seconds,
         )
+        effective_content_types = (
+            _normalize_content_types(allowed_content_types)
+            if allowed_content_types is not None
+            else self.allowed_content_types
+        )
         if self.client is not None:
-            return self._fetch_with_client(self.client, url, timeout)
+            return self._fetch_with_client(self.client, url, timeout, effective_content_types)
         try:
             with httpx.Client() as client:
-                return self._fetch_with_client(client, url, timeout)
+                return self._fetch_with_client(client, url, timeout, effective_content_types)
         except SafeURLFetchError:
             raise
         except Exception as exc:
@@ -120,7 +128,13 @@ class SafeURLFetcher:
         if any(not _is_public_address(address) for address in parsed_addresses):
             raise SafeURLFetchError("URL_FORBIDDEN", 403, "URL destination is not allowed")
 
-    def _fetch_with_client(self, client: object, url: str, timeout: httpx.Timeout) -> SafeFetchResult:
+    def _fetch_with_client(
+        self,
+        client: object,
+        url: str,
+        timeout: httpx.Timeout,
+        allowed_content_types: frozenset[str],
+    ) -> SafeFetchResult:
         try:
             with client.stream(
                 "GET",
@@ -129,7 +143,7 @@ class SafeURLFetcher:
                 timeout=timeout,
                 headers={
                     "User-Agent": "travel-assistant/1.0 (+https://localhost)",
-                    "Accept": "text/html, text/plain, application/json, application/xml, text/xml, text/markdown",
+                    "Accept": ", ".join(sorted(allowed_content_types)),
                 },
             ) as response:
                 status_code = int(response.status_code)
@@ -142,7 +156,7 @@ class SafeURLFetcher:
                 if status_code < 200 or status_code >= 300:
                     raise _fetch_failed()
                 content_type = _content_type(response.headers)
-                if content_type not in ALLOWED_CONTENT_TYPES:
+                if content_type not in allowed_content_types:
                     raise SafeURLFetchError(
                         "URL_CONTENT_TYPE_UNSUPPORTED",
                         415,
@@ -223,6 +237,10 @@ def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -
 def _content_type(headers: object) -> str:
     value = str(headers.get("Content-Type", ""))
     return value.split(";", 1)[0].strip().lower()
+
+
+def _normalize_content_types(content_types: Iterable[str]) -> frozenset[str]:
+    return frozenset(str(item).strip().lower() for item in content_types if str(item).strip())
 
 
 def _content_length(headers: object) -> int | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import httpx
 import pytest
 
 from app.security.url_fetcher import SafeURLFetchError, SafeURLFetcher
@@ -149,6 +150,46 @@ def test_allows_public_https_text_and_returns_decoded_content():
     assert client.calls[0]["method"] == "GET"
 
 
+def test_allows_xhtml_document_content():
+    client = FakeClient(
+        FakeResponse(
+            headers={"Content-Type": "application/xhtml+xml"},
+            chunks=[b"<html><body>guide</body></html>"],
+        )
+    )
+    fetcher = SafeURLFetcher(resolver=public_resolver, client=client)
+
+    result = fetcher.fetch("https://example.com/guide.xhtml")
+
+    assert result.content_type == "application/xhtml+xml"
+
+
+def test_default_document_allowlist_rejects_json():
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=FakeClient(FakeResponse(headers={"Content-Type": "application/json"})),
+    )
+
+    with pytest.raises(SafeURLFetchError) as raised:
+        fetcher.fetch("https://example.com/guide.json")
+
+    assert raised.value.code == "URL_CONTENT_TYPE_UNSUPPORTED"
+
+
+def test_per_fetch_allowlist_can_enable_rss_content_type():
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=FakeClient(FakeResponse(headers={"Content-Type": "application/rss+xml"})),
+    )
+
+    result = fetcher.fetch(
+        "https://example.com/feed.xml",
+        allowed_content_types={"application/rss+xml"},
+    )
+
+    assert result.content_type == "application/rss+xml"
+
+
 def test_network_error_uses_stable_code_without_leaking_details():
     secret = "https://internal.example/secret?token=value"
     fetcher = SafeURLFetcher(
@@ -162,3 +203,15 @@ def test_network_error_uses_stable_code_without_leaking_details():
     assert raised.value.code == "URL_FETCH_FAILED"
     assert secret not in str(raised.value)
 
+
+def test_httpx_timeout_maps_to_url_fetch_failed():
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=FakeClient(httpx.ReadTimeout("private upstream timed out")),
+    )
+
+    with pytest.raises(SafeURLFetchError) as raised:
+        fetcher.fetch("https://example.com/guide")
+
+    assert raised.value.code == "URL_FETCH_FAILED"
+    assert "private upstream" not in str(raised.value)

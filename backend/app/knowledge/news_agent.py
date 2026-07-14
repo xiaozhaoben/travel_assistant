@@ -20,6 +20,15 @@ load_dotenv(ENV_PATH, override=False)
 DEFAULT_RSSHUB_BASE_URL = "https://rsshub.app"
 DEFAULT_FEED_TIMEOUT_SECONDS = 20.0
 DEFAULT_MAX_ENTRIES_PER_FEED = 5
+NEWS_FEED_CONTENT_TYPES = frozenset(
+    {
+        "application/rss+xml",
+        "application/atom+xml",
+        "application/xml",
+        "text/xml",
+        "text/plain",
+    }
+)
 
 DEFAULT_RSSHUB_ROUTES = [
     # ── 官方文旅公告 ──────────────────────────────────────
@@ -78,7 +87,7 @@ class TravelNewsIngestionAgent:
                 "total_seen": 0,
                 "total_added": 0,
                 "feeds": [],
-                "errors": ["PostgreSQL vector store is not configured."],
+                "errors": ["NEWS_STORE_UNAVAILABLE"],
             }
 
         urls = [url for url in (feed_urls or travel_feeds) if is_usable_feed_url(url)]
@@ -91,28 +100,35 @@ class TravelNewsIngestionAgent:
         try:
             import feedparser
         except Exception as exc:
+            logger.warning(
+                "News parser unavailable category=NEWS_PARSER_UNAVAILABLE exception_type=%s",
+                type(exc).__name__,
+            )
             return {
                 "total_seen": 0,
                 "total_added": 0,
                 "feeds": [],
-                "errors": [f"feedparser is required: {exc}"],
+                "errors": ["NEWS_PARSER_UNAVAILABLE"],
             }
 
         for feed_url in urls:
-            logger.info("正在处理: %s", feed_url)
+            logger.info("Processing configured travel feed")
             try:
                 feed = parse_feed(feedparser, feed_url, self.url_fetcher)
                 all_entries = list(getattr(feed, "entries", []) or [])
                 entries = all_entries[:max_entries_per_feed()]
                 if len(all_entries) > len(entries):
                     logger.info(
-                        "RSS条目过多，仅处理前 %s 条: %s total=%s",
+                        "RSS entry limit applied selected=%s total=%s",
                         len(entries),
-                        feed_url,
                         len(all_entries),
                     )
                 if not all_entries and getattr(feed, "bozo", False):
-                    errors.append(f"{feed_url}: {getattr(feed, 'bozo_exception', 'RSS parsed 0 entries')}")
+                    logger.warning(
+                        "RSS parse failed category=NEWS_FEED_PARSE_FAILED exception_type=%s",
+                        type(getattr(feed, "bozo_exception", None)).__name__,
+                    )
+                    errors.append("NEWS_FEED_PARSE_FAILED")
                 added_for_feed = 0
                 for entry in entries:
                     total_seen += 1
@@ -129,13 +145,20 @@ class TravelNewsIngestionAgent:
                     )
                 total_added += added_for_feed
                 feed_results.append({"url": feed_url, "seen": len(entries), "added": added_for_feed})
-                logger.info("RSS处理完成: %s seen=%s added=%s", feed_url, len(entries), added_for_feed)
+                logger.info("RSS processing completed seen=%s added=%s", len(entries), added_for_feed)
             except SafeURLFetchError as exc:
-                logger.warning("RSS fetch rejected error_code=%s", exc.code)
-                errors.append(exc.code)
+                logger.warning(
+                    "RSS fetch failed category=NEWS_FEED_FETCH_FAILED exception_type=%s cause_code=%s",
+                    type(exc).__name__,
+                    exc.code,
+                )
+                errors.append("NEWS_FEED_FETCH_FAILED")
             except Exception as exc:
-                logger.warning("RSS processing failed exception_type=%s", type(exc).__name__)
-                errors.append("FEED_FETCH_FAILED")
+                logger.warning(
+                    "RSS processing failed category=NEWS_FEED_PARSE_FAILED exception_type=%s",
+                    type(exc).__name__,
+                )
+                errors.append("NEWS_FEED_PARSE_FAILED")
 
         logger.info("RSS获取完成，新增 %s 条", total_added)
         return {
@@ -147,7 +170,10 @@ class TravelNewsIngestionAgent:
 
 
 def parse_feed(feedparser: Any, feed_url: str, url_fetcher: SafeURLFetcher | None = None) -> Any:
-    fetched = (url_fetcher or SafeURLFetcher()).fetch(feed_url)
+    fetched = (url_fetcher or SafeURLFetcher()).fetch(
+        feed_url,
+        allowed_content_types=NEWS_FEED_CONTENT_TYPES,
+    )
     return feedparser.parse(fetched.content, response_headers={"content-type": fetched.content_type})
 
 

@@ -987,7 +987,7 @@ def ingest_travel_news(
     feed_urls = request.feed_urls or configured_travel_feeds()
     result = TravelNewsIngestResult.model_validate(resources.news_agent.fetch_travel_feeds(feed_urls))
     if result.errors and result.total_seen == 0:
-        raise HTTPException(status_code=503, detail="; ".join(result.errors))
+        raise api_error(503, "NEWS_INGEST_FAILED", "Travel news ingestion failed")
     return ApiResponse[TravelNewsIngestResult](success=True, message="旅行资讯入库完成", data=result)
 
 

@@ -133,3 +133,33 @@ def test_knowledge_limit_uses_required_user_principal_subject(monkeypatch):
 
     assert response.status_code == 200
     assert limiter.calls[0][1] == "principal:user:user-42"
+
+
+def test_news_ingest_failure_uses_stable_api_error_without_raw_details(monkeypatch):
+    secret = "private feed exception and URL"
+
+    class NewsAgent:
+        def fetch_travel_feeds(self, _urls):
+            return {
+                "total_seen": 0,
+                "total_added": 0,
+                "feeds": [],
+                "errors": [secret],
+            }
+
+    resources = SimpleNamespace(
+        rate_limiter=None,
+        rate_limit_policies=None,
+        news_agent=NewsAgent(),
+    )
+    monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
+
+    response = TestClient(main_module.app).post(
+        "/api/news/ingest",
+        headers=auth_headers("user", "user-1"),
+        json={"feed_urls": ["https://feeds.example.com/travel"]},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "NEWS_INGEST_FAILED"
+    assert secret not in response.text
