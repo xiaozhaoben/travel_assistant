@@ -17,7 +17,7 @@ let anonymousIssuePromise: Promise<string> | null = null
 const authSessionListeners = new Set<() => void>()
 
 // 旧版本没有记录目标用户，无法安全判断归属，因此不能迁移。
-localStorage.removeItem(LEGACY_PENDING_ANONYMOUS_MERGES_KEY)
+storageRemove(LEGACY_PENDING_ANONYMOUS_MERGES_KEY)
 
 export function subscribeToAuthSession(listener: () => void): () => void {
   authSessionListeners.add(listener)
@@ -33,7 +33,7 @@ export function configureAnonymousTokenIssuer(issuer: () => Promise<PrincipalTok
 }
 
 export function getStoredUserToken(): string | null {
-  const accessToken = localStorage.getItem(USER_TOKEN_KEY)
+  const accessToken = storageGet(USER_TOKEN_KEY)
   if (!accessToken) return null
   if (tokenExpiresSoon(accessToken)) {
     clearStoredUserPrincipal()
@@ -44,7 +44,7 @@ export function getStoredUserToken(): string | null {
 
 export function getStoredUser(): AuthUser | null {
   try {
-    const raw = localStorage.getItem(USER_KEY)
+    const raw = storageGet(USER_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<AuthUser>
     if (typeof parsed.user_id !== 'string' || typeof parsed.username !== 'string') return null
@@ -59,15 +59,20 @@ export function hasStoredUserPrincipal(): boolean {
 }
 
 export function persistUserPrincipal(accessToken: string, authUser: AuthUser): void {
-  localStorage.setItem(USER_TOKEN_KEY, accessToken)
-  localStorage.setItem(USER_KEY, JSON.stringify(authUser))
+  const previousToken = storageGet(USER_TOKEN_KEY)
+  const previousUser = storageGet(USER_KEY)
+  if (!storageSet(USER_KEY, JSON.stringify(authUser)) || !storageSet(USER_TOKEN_KEY, accessToken)) {
+    restoreStorage(USER_KEY, previousUser)
+    restoreStorage(USER_TOKEN_KEY, previousToken)
+    throw new Error('Browser storage is unavailable')
+  }
   notifyAuthSessionChanged()
 }
 
 export function clearStoredUserPrincipal(): void {
-  const changed = Boolean(localStorage.getItem(USER_TOKEN_KEY) || localStorage.getItem(USER_KEY))
-  localStorage.removeItem(USER_TOKEN_KEY)
-  localStorage.removeItem(USER_KEY)
+  const changed = Boolean(storageGet(USER_TOKEN_KEY) || storageGet(USER_KEY))
+  storageRemove(USER_TOKEN_KEY)
+  storageRemove(USER_KEY)
   if (changed) notifyAuthSessionChanged()
 }
 
@@ -75,15 +80,15 @@ export function getStoredAnonymousToken(): string | null {
   const principal = readAnonymousPrincipal(ANONYMOUS_PRINCIPAL_KEY)
   if (!principal) return null
   if (principal.expires_at <= Date.now() + 30_000) {
-    localStorage.removeItem(ANONYMOUS_PRINCIPAL_KEY)
+    storageRemove(ANONYMOUS_PRINCIPAL_KEY)
     return null
   }
   return principal.access_token
 }
 
 export function clearAnonymousPrincipal(): void {
-  const changed = localStorage.getItem(ANONYMOUS_PRINCIPAL_KEY) !== null
-  localStorage.removeItem(ANONYMOUS_PRINCIPAL_KEY)
+  const changed = storageGet(ANONYMOUS_PRINCIPAL_KEY) !== null
+  storageRemove(ANONYMOUS_PRINCIPAL_KEY)
   if (changed) notifyAuthSessionChanged()
 }
 
@@ -127,12 +132,16 @@ export async function ensureAnonymousToken(): Promise<string> {
       if (principal.principal_type !== 'anonymous' || !principal.access_token || !principal.subject) {
         throw new Error('Anonymous token response is invalid')
       }
+      const currentUserToken = getStoredUserToken()
+      if (currentUserToken && getStoredUser()) return currentUserToken
       const stored: StoredAnonymousPrincipal = {
         access_token: principal.access_token,
         subject: principal.subject,
         expires_at: Date.now() + principal.expires_in * 1000,
       }
-      localStorage.setItem(ANONYMOUS_PRINCIPAL_KEY, JSON.stringify(stored))
+      if (!storageSet(ANONYMOUS_PRINCIPAL_KEY, JSON.stringify(stored))) {
+        throw new Error('Browser storage is unavailable')
+      }
       notifyAuthSessionChanged()
       return principal.access_token
     })
@@ -149,7 +158,7 @@ export async function resolveBearerToken(): Promise<string> {
 }
 
 export function invalidateBearerToken(accessToken: string): void {
-  if (localStorage.getItem(USER_TOKEN_KEY) === accessToken) {
+  if (storageGet(USER_TOKEN_KEY) === accessToken) {
     clearStoredUserPrincipal()
     return
   }
@@ -158,7 +167,7 @@ export function invalidateBearerToken(accessToken: string): void {
 
 function readAnonymousPrincipal(key: string): StoredAnonymousPrincipal | null {
   try {
-    const raw = localStorage.getItem(key)
+    const raw = storageGet(key)
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<StoredAnonymousPrincipal>
     if (
@@ -180,7 +189,7 @@ function pendingAnonymousMergesKey(targetUserId: string): string {
 
 function readPendingAnonymousPrincipals(targetUserId: string): StoredAnonymousPrincipal[] {
   try {
-    const raw = localStorage.getItem(pendingAnonymousMergesKey(targetUserId))
+    const raw = storageGet(pendingAnonymousMergesKey(targetUserId))
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
@@ -201,23 +210,53 @@ function readPendingAnonymousPrincipals(targetUserId: string): StoredAnonymousPr
 function writePendingAnonymousPrincipals(targetUserId: string, principals: StoredAnonymousPrincipal[]): void {
   const storageKey = pendingAnonymousMergesKey(targetUserId)
   if (principals.length === 0) {
-    localStorage.removeItem(storageKey)
+    storageRemove(storageKey)
     notifyAuthSessionChanged()
     return
   }
-  localStorage.setItem(storageKey, JSON.stringify(principals))
+  if (!storageSet(storageKey, JSON.stringify(principals))) return
   notifyAuthSessionChanged()
 }
 
 function tokenExpiresSoon(accessToken: string): boolean {
   try {
     const payload = accessToken.split('.')[1]
-    if (!payload) return false
+    if (!payload) return true
     const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
     const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
     const parsed = JSON.parse(atob(padded)) as { exp?: unknown }
-    return typeof parsed.exp === 'number' && parsed.exp * 1000 <= Date.now() + 30_000
+    return typeof parsed.exp !== 'number' || parsed.exp * 1000 <= Date.now() + 30_000
+  } catch {
+    return true
+  }
+}
+
+function storageGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function storageSet(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value)
+    return true
   } catch {
     return false
   }
+}
+
+function storageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Storage can be blocked by browser privacy settings; keep the in-memory UI usable.
+  }
+}
+
+function restoreStorage(key: string, value: string | null): void {
+  if (value === null) storageRemove(key)
+  else storageSet(key, value)
 }

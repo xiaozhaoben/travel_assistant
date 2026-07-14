@@ -96,13 +96,10 @@ app.use(router)
   Tag,
 ].forEach((component) => app.use(component))
 
-async function bootstrapApp() {
-  try {
-    await ensureAnonymousToken()
-  } catch {
-    // 首次签发失败时仍渲染应用；第一个受保护请求会通过共享 Promise 重试。
-  }
+function bootstrapApp() {
+  // 首次签发失败时仍渲染应用；第一个受保护请求会通过共享 Promise 重试。
+  void ensureAnonymousToken().catch(() => undefined)
   app.mount('#app')
 }
 
-void bootstrapApp()
+bootstrapApp()

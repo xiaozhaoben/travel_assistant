@@ -470,6 +470,7 @@ export async function streamTravelQuestion(
     }),
   })
   if (!response.ok || !response.body) {
+    if (response.status === 401) invalidateBearerToken(accessToken)
     throw new Error(`Travel QA stream failed: ${response.status}`)
   }
 

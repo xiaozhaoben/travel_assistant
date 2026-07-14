@@ -127,6 +127,50 @@ def test_logout_anonymous_issue_is_fail_soft_and_jwt_payload_is_padded():
         re.DOTALL,
     )
     assert logout_match is not None
-    assert "try" in logout_match.group("body")
-    assert "catch" in logout_match.group("body")
+    assert "void ensureAnonymousToken().catch" in logout_match.group("body")
     assert ".padEnd(" in session_source
+
+
+def test_anonymous_bootstrap_does_not_block_render_or_overwrite_a_logged_in_user():
+    main_source = _read("main.ts")
+    session_source = _read("services/authSession.ts")
+
+    assert "await ensureAnonymousToken()" not in main_source
+    assert "void ensureAnonymousToken().catch" in main_source
+    assert main_source.index("ensureAnonymousToken()") < main_source.index("app.mount('#app')")
+    assert re.search(
+        r"const currentUserToken = getStoredUserToken\(\).*?"
+        r"if \(currentUserToken && getStoredUser\(\)\) return currentUserToken.*?"
+        r"storageSet\(ANONYMOUS_PRINCIPAL_KEY",
+        session_source,
+        re.DOTALL,
+    )
+
+
+def test_auth_races_and_sse_unauthorized_response_are_recoverable():
+    auth_source = _read("services/auth.ts")
+    api_source = _read("services/api.ts")
+    logout_body = re.search(
+        r"async\s+function\s+logout\b(?P<body>.*?)(?=\n\s*async\s+function\s+)",
+        auth_source,
+        re.DOTALL,
+    )
+
+    assert logout_body is not None
+    assert "await ensureAnonymousToken()" not in logout_body.group("body")
+    assert "void ensureAnonymousToken().catch" in logout_body.group("body")
+    assert "mergeRerunRequested" in auth_source
+    assert re.search(r"while\s*\(true\).*?getPendingAnonymousTokens\(targetUserId\)", auth_source, re.DOTALL)
+    assert re.search(r"response\.status === 401\).*?invalidateBearerToken", api_source)
+
+
+def test_browser_storage_and_malformed_jwt_fail_closed():
+    session_source = _read("services/authSession.ts")
+
+    assert "function storageGet" in session_source
+    assert "function storageSet" in session_source
+    assert "function storageRemove" in session_source
+    assert re.search(
+        r"typeof parsed\.exp !== 'number'\s*\|\|\s*parsed\.exp \* 1000 <=",
+        session_source,
+    )

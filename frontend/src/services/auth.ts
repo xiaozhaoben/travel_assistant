@@ -22,6 +22,7 @@ const token = ref<string | null>(initialToken)
 const user = ref<AuthUser | null>(initialUser)
 const anonymousMergePending = ref(initialUser ? hasPendingAnonymousMerge(initialUser.user_id) : false)
 const mergePromises = new Map<string, Promise<AnonymousMergeState>>()
+const mergeRerunRequested = new Set<string>()
 
 subscribeToAuthSession(() => {
   token.value = getStoredUserToken()
@@ -52,11 +53,8 @@ export function useAuth() {
     token.value = null
     user.value = null
     clearStoredUserPrincipal()
-    try {
-      await ensureAnonymousToken()
-    } catch {
-      // 登出已经完成；后续受保护请求会安全重试匿名令牌签发。
-    }
+    // 登出已经完成；后续受保护请求会安全重试匿名令牌签发。
+    void ensureAnonymousToken().catch(() => undefined)
   }
 
   async function mergeAnonymousConversations(
@@ -64,7 +62,10 @@ export function useAuth() {
   ): Promise<AnonymousMergeState> {
     if (!targetUserId) return 'not_needed'
     const existingPromise = mergePromises.get(targetUserId)
-    if (existingPromise) return existingPromise
+    if (existingPromise) {
+      mergeRerunRequested.add(targetUserId)
+      return existingPromise
+    }
     const storedUser = getStoredUser()
     const userToken = getStoredUserToken()
     const pendingTokens = getPendingAnonymousTokens(targetUserId)
@@ -75,12 +76,18 @@ export function useAuth() {
 
     const mergePromise = (async () => {
       let failed = false
-      for (const anonymousToken of pendingTokens) {
-        try {
-          await mergeAnonymousSessions(anonymousToken, userToken)
-          clearMergedAnonymousToken(targetUserId, anonymousToken)
-        } catch {
-          failed = true
+      const attempted = new Set<string>()
+      while (true) {
+        const nextTokens = getPendingAnonymousTokens(targetUserId).filter((value) => !attempted.has(value))
+        if (nextTokens.length === 0) break
+        for (const anonymousToken of nextTokens) {
+          attempted.add(anonymousToken)
+          try {
+            await mergeAnonymousSessions(anonymousToken, userToken)
+            clearMergedAnonymousToken(targetUserId, anonymousToken)
+          } catch {
+            failed = true
+          }
         }
       }
       const stillPending = hasPendingAnonymousMerge(targetUserId)
@@ -88,6 +95,14 @@ export function useAuth() {
       return failed || stillPending ? 'pending' : 'merged'
     })().finally(() => {
       mergePromises.delete(targetUserId)
+      const shouldRerun = mergeRerunRequested.delete(targetUserId)
+      if (
+        shouldRerun &&
+        getStoredUser()?.user_id === targetUserId &&
+        hasPendingAnonymousMerge(targetUserId)
+      ) {
+        queueMicrotask(() => void mergeAnonymousConversations(targetUserId))
+      }
     })
     mergePromises.set(targetUserId, mergePromise)
     return mergePromise
@@ -106,7 +121,5 @@ export function useAuth() {
 }
 
 function persistAuth(accessToken: string, authUser: AuthUser): void {
-  token.value = accessToken
-  user.value = authUser
   persistUserPrincipal(accessToken, authUser)
 }
