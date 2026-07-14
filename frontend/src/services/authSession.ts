@@ -98,7 +98,7 @@ export function stageCurrentAnonymousForMerge(targetUserId: string): void {
   const pending = readPendingAnonymousPrincipals(targetUserId)
   if (!pending.some((item) => item.access_token === principal.access_token)) {
     pending.push(principal)
-    writePendingAnonymousPrincipals(targetUserId, pending)
+    if (!writePendingAnonymousPrincipals(targetUserId, pending)) return
   }
   clearAnonymousPrincipal()
 }
@@ -207,15 +207,16 @@ function readPendingAnonymousPrincipals(targetUserId: string): StoredAnonymousPr
   }
 }
 
-function writePendingAnonymousPrincipals(targetUserId: string, principals: StoredAnonymousPrincipal[]): void {
+function writePendingAnonymousPrincipals(targetUserId: string, principals: StoredAnonymousPrincipal[]): boolean {
   const storageKey = pendingAnonymousMergesKey(targetUserId)
   if (principals.length === 0) {
     storageRemove(storageKey)
     notifyAuthSessionChanged()
-    return
+    return true
   }
-  if (!storageSet(storageKey, JSON.stringify(principals))) return
+  if (!storageSet(storageKey, JSON.stringify(principals))) return false
   notifyAuthSessionChanged()
+  return true
 }
 
 function tokenExpiresSoon(accessToken: string): boolean {

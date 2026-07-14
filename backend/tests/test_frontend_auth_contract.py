@@ -174,3 +174,25 @@ def test_browser_storage_and_malformed_jwt_fail_closed():
         r"typeof parsed\.exp !== 'number'\s*\|\|\s*parsed\.exp \* 1000 <=",
         session_source,
     )
+
+
+def test_anonymous_merge_token_is_cleared_only_after_pending_state_is_durable():
+    session_source = _read("services/authSession.ts")
+
+    stage_body = re.search(
+        r"export function stageCurrentAnonymousForMerge\b(?P<body>.*?)"
+        r"(?=\nexport function getPendingAnonymousTokens)",
+        session_source,
+        re.DOTALL,
+    )
+    assert stage_body is not None
+    assert re.search(
+        r"if \(!writePendingAnonymousPrincipals\(targetUserId, pending\)\) return.*?"
+        r"clearAnonymousPrincipal\(\)",
+        stage_body.group("body"),
+        re.DOTALL,
+    )
+    assert re.search(
+        r"function writePendingAnonymousPrincipals\([^)]*\)\s*:\s*boolean",
+        session_source,
+    )
