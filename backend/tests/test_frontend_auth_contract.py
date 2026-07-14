@@ -83,3 +83,50 @@ def test_router_guest_and_knowledge_access_are_based_on_user_principal():
     assert "hasStoredUserPrincipal" in main_source
     assert re.search(r"/knowledge.*requiresUser", main_source)
     assert "travel_auth_token" not in main_source
+
+
+def test_pending_anonymous_merges_are_partitioned_by_target_user():
+    session_source = _read("services/authSession.ts")
+    auth_source = _read("services/auth.ts")
+
+    for function_name in (
+        "stageCurrentAnonymousForMerge",
+        "getPendingAnonymousTokens",
+        "clearMergedAnonymousToken",
+        "hasPendingAnonymousMerge",
+    ):
+        assert re.search(
+            rf"function\s+{function_name}\s*\(\s*targetUserId\s*:\s*string",
+            session_source,
+        )
+    assert re.search(r"pendingAnonymous\w*Key\s*\(\s*targetUserId", session_source)
+    assert re.search(r"stageCurrentAnonymousForMerge\(result\.user_id\)", auth_source)
+    assert re.search(r"getPendingAnonymousTokens\(targetUserId\)", auth_source)
+    assert re.search(r"clearMergedAnonymousToken\(targetUserId,\s*anonymousToken\)", auth_source)
+    assert re.search(r"expires_at\s*>\s*Date\.now\(\)\s*\+\s*30_000", session_source)
+
+
+def test_auth_reactive_state_subscribes_to_storage_session_changes():
+    session_source = _read("services/authSession.ts")
+    auth_source = _read("services/auth.ts")
+
+    assert "subscribeToAuthSession" in session_source
+    assert "notifyAuthSessionChanged" in session_source
+    assert "subscribeToAuthSession" in auth_source
+    assert re.search(r"token\.value\s*=\s*getStoredUserToken\(\)", auth_source)
+    assert re.search(r"user\.value\s*=\s*getStoredUser\(\)", auth_source)
+
+
+def test_logout_anonymous_issue_is_fail_soft_and_jwt_payload_is_padded():
+    auth_source = _read("services/auth.ts")
+    session_source = _read("services/authSession.ts")
+
+    logout_match = re.search(
+        r"async\s+function\s+logout\b(?P<body>.*?)(?=\n\s*async\s+function\s+)",
+        auth_source,
+        re.DOTALL,
+    )
+    assert logout_match is not None
+    assert "try" in logout_match.group("body")
+    assert "catch" in logout_match.group("body")
+    assert ".padEnd(" in session_source

@@ -11,14 +11,23 @@ import {
   hasPendingAnonymousMerge,
   persistUserPrincipal,
   stageCurrentAnonymousForMerge,
+  subscribeToAuthSession,
 } from '@/services/authSession'
 
 export type AnonymousMergeState = 'not_needed' | 'merged' | 'pending'
 
-const token = ref<string | null>(getStoredUserToken())
-const user = ref<AuthUser | null>(getStoredUser())
-const anonymousMergePending = ref(hasPendingAnonymousMerge())
-let mergePromise: Promise<AnonymousMergeState> | null = null
+const initialToken = getStoredUserToken()
+const initialUser = initialToken ? getStoredUser() : null
+const token = ref<string | null>(initialToken)
+const user = ref<AuthUser | null>(initialUser)
+const anonymousMergePending = ref(initialUser ? hasPendingAnonymousMerge(initialUser.user_id) : false)
+const mergePromises = new Map<string, Promise<AnonymousMergeState>>()
+
+subscribeToAuthSession(() => {
+  token.value = getStoredUserToken()
+  user.value = getStoredUser()
+  anonymousMergePending.value = user.value ? hasPendingAnonymousMerge(user.value.user_id) : false
+})
 
 export function useAuth() {
   const isAuthenticated = computed(() => Boolean(token.value && user.value))
@@ -26,16 +35,16 @@ export function useAuth() {
   async function login(username: string, password: string): Promise<AuthUser> {
     const result = await loginUser(username, password)
     persistAuth(result.access_token, { user_id: result.user_id, username: result.username })
-    stageCurrentAnonymousForMerge()
-    await mergeAnonymousConversations()
+    stageCurrentAnonymousForMerge(result.user_id)
+    await mergeAnonymousConversations(result.user_id)
     return user.value!
   }
 
   async function register(username: string, password: string): Promise<AuthUser> {
     const result = await registerUser(username, password)
     persistAuth(result.access_token, { user_id: result.user_id, username: result.username })
-    stageCurrentAnonymousForMerge()
-    await mergeAnonymousConversations()
+    stageCurrentAnonymousForMerge(result.user_id)
+    await mergeAnonymousConversations(result.user_id)
     return user.value!
   }
 
@@ -43,33 +52,44 @@ export function useAuth() {
     token.value = null
     user.value = null
     clearStoredUserPrincipal()
-    await ensureAnonymousToken()
+    try {
+      await ensureAnonymousToken()
+    } catch {
+      // 登出已经完成；后续受保护请求会安全重试匿名令牌签发。
+    }
   }
 
-  async function mergeAnonymousConversations(): Promise<AnonymousMergeState> {
-    if (mergePromise) return mergePromise
+  async function mergeAnonymousConversations(
+    targetUserId = user.value?.user_id,
+  ): Promise<AnonymousMergeState> {
+    if (!targetUserId) return 'not_needed'
+    const existingPromise = mergePromises.get(targetUserId)
+    if (existingPromise) return existingPromise
+    const storedUser = getStoredUser()
     const userToken = getStoredUserToken()
-    const pendingTokens = getPendingAnonymousTokens()
-    if (!userToken || pendingTokens.length === 0) {
-      anonymousMergePending.value = pendingTokens.length > 0
+    const pendingTokens = getPendingAnonymousTokens(targetUserId)
+    if (!userToken || storedUser?.user_id !== targetUserId || pendingTokens.length === 0) {
+      if (user.value?.user_id === targetUserId) anonymousMergePending.value = pendingTokens.length > 0
       return pendingTokens.length > 0 ? 'pending' : 'not_needed'
     }
 
-    mergePromise = (async () => {
+    const mergePromise = (async () => {
       let failed = false
       for (const anonymousToken of pendingTokens) {
         try {
           await mergeAnonymousSessions(anonymousToken, userToken)
-          clearMergedAnonymousToken(anonymousToken)
+          clearMergedAnonymousToken(targetUserId, anonymousToken)
         } catch {
           failed = true
         }
       }
-      anonymousMergePending.value = hasPendingAnonymousMerge()
-      return failed || anonymousMergePending.value ? 'pending' : 'merged'
+      const stillPending = hasPendingAnonymousMerge(targetUserId)
+      if (user.value?.user_id === targetUserId) anonymousMergePending.value = stillPending
+      return failed || stillPending ? 'pending' : 'merged'
     })().finally(() => {
-      mergePromise = null
+      mergePromises.delete(targetUserId)
     })
+    mergePromises.set(targetUserId, mergePromise)
     return mergePromise
   }
 
