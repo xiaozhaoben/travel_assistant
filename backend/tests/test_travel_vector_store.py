@@ -4,6 +4,7 @@ from datetime import date
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.knowledge.job_store import RedisKnowledgeJobStore
 from app.main import app
 
 
@@ -32,6 +33,20 @@ class BatchEmbeddingService:
     def embed_documents(self, texts):
         self.document_batches.append(list(texts))
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+class FakeKnowledgeJobRedis:
+    def __init__(self):
+        self.hashes = {}
+
+    def hset(self, key, mapping):
+        self.hashes.setdefault(key, {}).update(mapping)
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def expire(self, key, _ttl):
+        return key in self.hashes
 
 
 class FakeCursor:
@@ -539,8 +554,11 @@ def test_api_auto_ingest_job_completes(monkeypatch):
     original_store = main_module.travel_vector_store
     main_module.travel_vector_store = store
     monkeypatch.setattr(main_module, "create_llm", lambda: None)
-    if hasattr(main_module, "knowledge_ingest_jobs"):
-        main_module.knowledge_ingest_jobs.clear()
+    monkeypatch.setattr(
+        main_module,
+        "knowledge_job_store",
+        RedisKnowledgeJobStore(FakeKnowledgeJobRedis(), ttl_seconds=60),
+    )
     try:
         client = TestClient(app)
         create_response = client.post(

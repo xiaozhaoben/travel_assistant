@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 import logging
 import re
-import threading
 import uuid
 from urllib.parse import urlparse
 
@@ -70,6 +68,12 @@ from .core.rate_limit import Policy, RateLimiter, create_rate_limit_policies
 from .core.redis_client import RedisClient, create_redis_client
 from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
+from .knowledge.job_store import (
+    KnowledgeIngestJob,
+    KnowledgeJobNotFound,
+    KnowledgeJobStoreUnavailable,
+    RedisKnowledgeJobStore,
+)
 from .knowledge.prompts import render_travel_document_metadata_prompt
 from .knowledge.qa_agent import TravelQuestionAnsweringAgent
 from .knowledge.qa_checkpointer import create_qa_checkpointer
@@ -97,18 +101,7 @@ class AppResources:
     redis_client: RedisClient | None = None
     rate_limiter: RateLimiter | None = None
     rate_limit_policies: dict[str, Policy] | None = None
-
-
-@dataclass
-class KnowledgeIngestJob:
-    job_id: str
-    status: str
-    message: str
-    source_type: str
-    result: dict | None
-    error: str | None
-    created_at: datetime
-    updated_at: datetime
+    knowledge_job_store: RedisKnowledgeJobStore | None = None
 
 
 orchestrator: TravelAgentOrchestrator | None = None
@@ -122,8 +115,7 @@ image_provider: UnsplashMCPClient | None = None
 redis_client: RedisClient | None = None
 rate_limiter: RateLimiter | None = None
 rate_limit_policies: dict[str, Policy] | None = None
-knowledge_ingest_jobs: dict[str, KnowledgeIngestJob] = {}
-knowledge_ingest_jobs_lock = threading.Lock()
+knowledge_job_store: RedisKnowledgeJobStore | None = None
 
 
 def create_app_resources() -> AppResources:
@@ -151,6 +143,10 @@ def create_app_resources() -> AppResources:
         resource_redis_client.client,
         enabled=resource_settings.rate_limit_enabled,
     )
+    resource_knowledge_job_store = RedisKnowledgeJobStore(
+        resource_redis_client.client,
+        ttl_seconds=resource_settings.knowledge_job_ttl_seconds,
+    )
     return AppResources(
         orchestrator=resource_orchestrator,
         report_store=resource_report_store,
@@ -163,12 +159,13 @@ def create_app_resources() -> AppResources:
         redis_client=resource_redis_client,
         rate_limiter=resource_rate_limiter,
         rate_limit_policies=create_rate_limit_policies(resource_settings),
+        knowledge_job_store=resource_knowledge_job_store,
     )
 
 
 def bind_app_resources(resources: AppResources) -> None:
     global orchestrator, report_store, travel_vector_store, qa_store, qa_checkpointer, news_agent, qa_agent, image_provider
-    global redis_client, rate_limiter, rate_limit_policies
+    global redis_client, rate_limiter, rate_limit_policies, knowledge_job_store
     orchestrator = resources.orchestrator
     report_store = resources.report_store
     travel_vector_store = resources.travel_vector_store
@@ -182,6 +179,7 @@ def bind_app_resources(resources: AppResources) -> None:
     redis_client = resources.redis_client
     rate_limiter = resources.rate_limiter
     rate_limit_policies = resources.rate_limit_policies
+    knowledge_job_store = resources.knowledge_job_store
 
 
 def current_global_resources() -> AppResources | None:
@@ -204,6 +202,7 @@ def current_global_resources() -> AppResources | None:
         redis_client=redis_client,
         rate_limiter=rate_limiter,
         rate_limit_policies=rate_limit_policies,
+        knowledge_job_store=knowledge_job_store,
     )
 
 
@@ -216,6 +215,10 @@ def get_app_resources() -> AppResources:
         or (qa_store is not None and qa_store is not getattr(state_resources, "qa_store", None))
         or (qa_checkpointer is not None and qa_checkpointer is not getattr(state_resources, "qa_checkpointer", None))
         or (image_provider is not None and image_provider is not getattr(state_resources, "image_provider", None))
+        or (
+            knowledge_job_store is not None
+            and knowledge_job_store is not getattr(state_resources, "knowledge_job_store", None)
+        )
     ):
         resources = AppResources(
             orchestrator=orchestrator or state_resources.orchestrator,
@@ -231,6 +234,7 @@ def get_app_resources() -> AppResources:
             redis_client=redis_client or getattr(state_resources, "redis_client", None),
             rate_limiter=rate_limiter or getattr(state_resources, "rate_limiter", None),
             rate_limit_policies=rate_limit_policies or getattr(state_resources, "rate_limit_policies", None),
+            knowledge_job_store=knowledge_job_store or getattr(state_resources, "knowledge_job_store", None),
         )
         app.state.resources = resources
         return resources
@@ -250,12 +254,28 @@ def get_app_resources() -> AppResources:
             or (news_agent is not None and state_resources.news_agent is not global_resources.news_agent)
             or (qa_agent is not None and state_resources.qa_agent is not global_resources.qa_agent)
             or (image_provider is not None and state_resources.image_provider is not global_resources.image_provider)
+            or (
+                knowledge_job_store is not None
+                and getattr(state_resources, "knowledge_job_store", None) is not global_resources.knowledge_job_store
+            )
         ):
             app.state.resources = global_resources
             return global_resources
     if state_resources is not None:
         return state_resources
-    if global_resources is None and any(item is not None for item in (news_agent, qa_agent, image_provider)):
+    if global_resources is None and any(
+        item is not None
+        for item in (
+            report_store,
+            travel_vector_store,
+            qa_store,
+            qa_checkpointer,
+            news_agent,
+            qa_agent,
+            image_provider,
+            knowledge_job_store,
+        )
+    ):
         base_resources = create_app_resources()
         resources = AppResources(
             orchestrator=orchestrator or base_resources.orchestrator,
@@ -271,6 +291,7 @@ def get_app_resources() -> AppResources:
             redis_client=redis_client or base_resources.redis_client,
             rate_limiter=rate_limiter or base_resources.rate_limiter,
             rate_limit_policies=rate_limit_policies or base_resources.rate_limit_policies,
+            knowledge_job_store=knowledge_job_store or base_resources.knowledge_job_store,
         )
     else:
         resources = global_resources or create_app_resources()
@@ -1101,31 +1122,23 @@ def ingest_travel_document_auto(
 
 
 def create_knowledge_ingest_job(source_type: str, message: str) -> KnowledgeIngestJob:
-    now = datetime.now(timezone.utc)
-    job = KnowledgeIngestJob(
-        job_id=uuid.uuid4().hex,
-        status="queued",
-        message=message,
-        source_type=source_type,
-        result=None,
-        error=None,
-        created_at=now,
-        updated_at=now,
-    )
-    with knowledge_ingest_jobs_lock:
-        knowledge_ingest_jobs[job.job_id] = job
-    return job
+    store = _get_knowledge_job_store()
+    try:
+        return store.create(source_type=source_type, message=message)
+    except KnowledgeJobStoreUnavailable as exc:
+        raise api_error(503, "KNOWLEDGE_JOB_STORE_UNAVAILABLE", "Knowledge job store is unavailable") from exc
 
 
-def update_knowledge_ingest_job(job_id: str, **changes) -> KnowledgeIngestJob | None:
-    with knowledge_ingest_jobs_lock:
-        job = knowledge_ingest_jobs.get(job_id)
-        if job is None:
-            return None
-        for key, value in changes.items():
-            setattr(job, key, value)
-        job.updated_at = datetime.now(timezone.utc)
-        return job
+def update_knowledge_ingest_job(job_id: str, **changes) -> KnowledgeIngestJob:
+    return _get_knowledge_job_store().update(job_id, **changes)
+
+
+def _get_knowledge_job_store() -> RedisKnowledgeJobStore:
+    resources = get_app_resources()
+    store = getattr(resources, "knowledge_job_store", None)
+    if store is None:
+        raise KnowledgeJobStoreUnavailable("Knowledge job store is unavailable")
+    return store
 
 
 def knowledge_ingest_job_status(job: KnowledgeIngestJob) -> TravelDocumentIngestJobStatus:
@@ -1135,30 +1148,50 @@ def knowledge_ingest_job_status(job: KnowledgeIngestJob) -> TravelDocumentIngest
         status=job.status,
         message=job.message,
         result=result,
-        error=job.error,
+        error=job.error_code,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
 
 
 def run_knowledge_ingest_job(job_id: str, request, runner) -> None:
-    update_knowledge_ingest_job(job_id, status="running", message="正在解析并写入向量库")
+    if not _safe_update_knowledge_ingest_job(job_id, status="running", message="正在解析并写入向量库"):
+        return
     try:
         response = runner(request)
         result = getattr(response, "data", None)
         result_payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
-        update_knowledge_ingest_job(
+        _safe_update_knowledge_ingest_job(
             job_id,
             status="completed",
             message="入库完成",
             result=result_payload,
-            error=None,
+            error_code=None,
         )
-    except HTTPException as exc:
-        update_knowledge_ingest_job(job_id, status="failed", message="入库失败", error=str(exc.detail))
+    except HTTPException:
+        _safe_update_knowledge_ingest_job(
+            job_id,
+            status="failed",
+            message="入库失败",
+            error_code="KNOWLEDGE_INGEST_FAILED",
+        )
     except Exception as exc:  # pragma: no cover - defensive background boundary
-        logger.exception("Knowledge ingest job failed: %s", exc)
-        update_knowledge_ingest_job(job_id, status="failed", message="入库失败", error=str(exc))
+        logger.error("Knowledge ingest job failed exception_type=%s", type(exc).__name__)
+        _safe_update_knowledge_ingest_job(
+            job_id,
+            status="failed",
+            message="入库失败",
+            error_code="KNOWLEDGE_INGEST_FAILED",
+        )
+
+
+def _safe_update_knowledge_ingest_job(job_id: str, **changes) -> bool:
+    try:
+        update_knowledge_ingest_job(job_id, **changes)
+        return True
+    except (KnowledgeJobNotFound, KnowledgeJobStoreUnavailable) as exc:
+        logger.warning("Knowledge ingest job status update failed exception_type=%s", type(exc).__name__)
+        return False
 
 
 @app.post("/api/knowledge/documents/from-url/jobs", response_model=ApiResponse[TravelDocumentIngestJobResponse])
@@ -1196,10 +1229,12 @@ def get_travel_document_ingest_job(
     job_id: str,
     _rate_limit: int | None = Depends(_limit_knowledge_read),
 ):
-    with knowledge_ingest_jobs_lock:
-        job = knowledge_ingest_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Knowledge ingest job not found.")
+    try:
+        job = _get_knowledge_job_store().get(job_id)
+    except KnowledgeJobNotFound as exc:
+        raise api_error(404, "KNOWLEDGE_JOB_NOT_FOUND", "Knowledge ingest job not found") from exc
+    except KnowledgeJobStoreUnavailable as exc:
+        raise api_error(503, "KNOWLEDGE_JOB_STORE_UNAVAILABLE", "Knowledge job store is unavailable") from exc
     return ApiResponse[TravelDocumentIngestJobStatus](
         success=True,
         message=job.message,
