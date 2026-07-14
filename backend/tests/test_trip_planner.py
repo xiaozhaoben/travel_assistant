@@ -3689,7 +3689,7 @@ def test_api_qa_persists_conversation_history():
                 "updated_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
             }
 
-        def get_recent_messages(self, conversation_id, limit=8):
+        def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
             return self.messages[-limit:]
 
         def append_message(self, conversation_id, role, content, **kwargs):
@@ -3774,7 +3774,7 @@ def test_api_qa_stream_returns_incremental_answer_events():
                 "updated_at": datetime(2026, 6, 14, tzinfo=timezone.utc),
             }
 
-        def get_recent_messages(self, conversation_id, limit=8):
+        def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
             return []
 
         def append_message(self, conversation_id, role, content, **kwargs):
@@ -3849,21 +3849,29 @@ def test_in_memory_qa_store_returns_conversation_history_and_detail():
     store = InMemoryQAConversationStore()
     conversation = store.get_or_create_conversation(
         user_id="user-1",
-        anonymous_id="anon-1",
+        anonymous_id=None,
         title="端午去南京三天有哪些预约建议？",
     )
-    store.append_message(conversation["id"], "user", "端午去南京三天有哪些预约建议？")
+    store.append_message(
+        conversation["id"],
+        "user",
+        "端午去南京三天有哪些预约建议？",
+        user_id="user-1",
+        anonymous_id=None,
+    )
     store.append_message(
         conversation["id"],
         "assistant",
         "热门场馆建议提前预约。",
+        user_id="user-1",
+        anonymous_id=None,
         generation_mode="fallback",
         used_web_search=True,
     )
 
-    recent = store.get_recent_messages(conversation["id"])
-    summaries = store.list_conversations(user_id="user-1")
-    detail = store.get_conversation(conversation["id"])
+    recent = store.get_recent_messages(conversation["id"], user_id="user-1", anonymous_id=None)
+    summaries = store.list_conversations(user_id="user-1", anonymous_id=None)
+    detail = store.get_conversation(conversation["id"], user_id="user-1", anonymous_id=None)
 
     assert recent == [
         {"role": "user", "content": "端午去南京三天有哪些预约建议？"},

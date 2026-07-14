@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from fastapi.testclient import TestClient
 import pytest
 from types import SimpleNamespace
@@ -8,7 +9,8 @@ import app.main as main_module
 from app.auth.principal import create_principal_token
 from app.domain.models import TravelQAResponse
 from app.main import app, settings
-from app.storage.qa_store import InMemoryQAConversationStore, QAConversationNotFound
+import app.storage.qa_store as qa_store_module
+from app.storage.qa_store import InMemoryQAConversationStore, PostgresQAConversationStore, QAConversationNotFound
 
 
 class FakeQAAgent:
@@ -66,17 +68,208 @@ def isolated_qa(monkeypatch):
 def test_in_memory_qa_store_rejects_owner_mismatch_for_read_and_write():
     store = InMemoryQAConversationStore()
     conversation = store.get_or_create_conversation(
-        conversation_id="conversation-1",
         user_id="user-a",
+        anonymous_id=None,
         title="owned",
     )
 
     with pytest.raises(QAConversationNotFound):
-        store.get_conversation(conversation["id"], user_id="user-b")
+        store.get_conversation(conversation["id"], user_id="user-b", anonymous_id=None)
     with pytest.raises(QAConversationNotFound):
-        store.get_recent_messages(conversation["id"], user_id="user-b")
+        store.get_recent_messages(conversation["id"], user_id="user-b", anonymous_id=None)
     with pytest.raises(QAConversationNotFound):
-        store.append_message(conversation["id"], "user", "forged", user_id="user-b")
+        store.append_message(
+            conversation["id"], "user", "forged", user_id="user-b", anonymous_id=None
+        )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args", "kwargs"),
+    [
+        ("get_or_create_conversation", (), {}),
+        ("get_recent_messages", ("conversation-1",), {}),
+        ("append_message", ("conversation-1", "user", "message"), {}),
+        ("list_conversations", (), {}),
+        ("get_conversation", ("conversation-1",), {}),
+        ("get_or_create_conversation", (), {"user_id": "user-1", "anonymous_id": "anon-1"}),
+        ("get_recent_messages", ("conversation-1",), {"user_id": "user-1", "anonymous_id": "anon-1"}),
+        (
+            "append_message",
+            ("conversation-1", "user", "message"),
+            {"user_id": "user-1", "anonymous_id": "anon-1"},
+        ),
+        ("list_conversations", (), {"user_id": "user-1", "anonymous_id": "anon-1"}),
+        ("get_conversation", ("conversation-1",), {"user_id": "user-1", "anonymous_id": "anon-1"}),
+    ],
+)
+def test_qa_store_requires_exactly_one_owner(method_name, args, kwargs):
+    store = InMemoryQAConversationStore()
+
+    with pytest.raises((TypeError, ValueError)):
+        getattr(store, method_name)(*args, **kwargs)
+
+
+class RecordingCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self._one = None
+        self._all = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        self.connection.statements.append((normalized, tuple(params)))
+        if normalized.startswith("SELECT id::text"):
+            self._one = {
+                "id": "conversation-1",
+                "user_id": params[1] if "user_id = %s" in normalized else None,
+                "anonymous_id": params[1] if "anonymous_id = %s" in normalized else None,
+                "title": "owned",
+                "created_at": "2026-07-14T00:00:00Z",
+                "updated_at": "2026-07-14T00:00:00Z",
+            }
+        elif normalized.startswith("INSERT INTO travel_qa_messages"):
+            self._one = {
+                "id": "message-1",
+                "conversation_id": "conversation-1",
+                "role": "user",
+                "content": "hello",
+                "sources_payload": [],
+                "retrieved_count": 0,
+                "generation_mode": None,
+                "used_web_search": False,
+                "created_at": "2026-07-14T00:00:00Z",
+            }
+        return self
+
+    def fetchone(self):
+        return self._one
+
+    def fetchall(self):
+        return self._all
+
+
+class RecordingConnection:
+    def __init__(self, manager):
+        self.manager = manager
+        self.statements = []
+
+    def cursor(self, **_kwargs):
+        return RecordingCursor(self)
+
+
+class RecordingConnectionManager:
+    def __init__(self):
+        self.connections = []
+
+    @contextmanager
+    def connection(self):
+        connection = RecordingConnection(self)
+        self.connections.append(connection)
+        yield connection
+
+    def close(self):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("owner_kwargs", "expected_sql", "unexpected_sql", "owner_id"),
+    [
+        ({"user_id": "user-1", "anonymous_id": None}, "user_id = %s AND anonymous_id IS NULL", "anonymous_id = %s", "user-1"),
+        ({"user_id": None, "anonymous_id": "anon-1"}, "anonymous_id = %s AND user_id IS NULL", "user_id = %s", "anon-1"),
+    ],
+)
+def test_postgres_append_locks_owned_conversation_and_writes_in_same_connection(
+    monkeypatch, owner_kwargs, expected_sql, unexpected_sql, owner_id
+):
+    manager = RecordingConnectionManager()
+    store = PostgresQAConversationStore("postgresql://unused", connection_manager=manager)
+    store._schema_ready = True
+    monkeypatch.setattr(qa_store_module, "Jsonb", lambda value: value)
+
+    store.append_message("conversation-1", "user", "hello", **owner_kwargs)
+
+    assert len(manager.connections) == 1
+    statements = manager.connections[0].statements
+    owner_sql, owner_params = statements[0]
+    assert "FOR UPDATE" in owner_sql
+    assert expected_sql in owner_sql
+    assert unexpected_sql not in owner_sql
+    assert owner_params == ("conversation-1", owner_id)
+    assert statements[1][0].startswith("INSERT INTO travel_qa_messages")
+    assert statements[2][0].startswith("UPDATE travel_qa_conversations")
+
+
+@pytest.mark.parametrize(
+    ("method_name", "expected_params"),
+    [
+        ("get_or_create_conversation", ("conversation-1", "user-1")),
+        ("get_recent_messages", ("conversation-1", "user-1")),
+        ("list_conversations", ("user-1", 50)),
+        ("get_conversation", ("conversation-1", "user-1")),
+    ],
+)
+def test_postgres_reads_always_use_mutually_exclusive_owner_predicate(method_name, expected_params):
+    manager = RecordingConnectionManager()
+    store = PostgresQAConversationStore("postgresql://unused", connection_manager=manager)
+    store._schema_ready = True
+    owner_kwargs = {"user_id": "user-1", "anonymous_id": None}
+
+    if method_name == "get_or_create_conversation":
+        store.get_or_create_conversation("conversation-1", **owner_kwargs)
+    elif method_name == "get_recent_messages":
+        store.get_recent_messages("conversation-1", **owner_kwargs)
+    elif method_name == "list_conversations":
+        store.list_conversations(**owner_kwargs)
+    else:
+        store.get_conversation("conversation-1", **owner_kwargs)
+
+    conversation_sql = next(
+        (sql, params)
+        for connection in manager.connections
+        for sql, params in connection.statements
+        if "FROM travel_qa_conversations" in sql
+    )
+    assert "user_id = %s AND anonymous_id IS NULL" in conversation_sql[0]
+    assert "anonymous_id = %s" not in conversation_sql[0]
+    assert conversation_sql[1] == expected_params
+
+
+def test_postgres_merge_counts_messages_only_for_conversations_claimed_atomically():
+    class MergeCursor(RecordingCursor):
+        def execute(self, sql, params=()):
+            super().execute(sql, params)
+            self._one = (0, 0)
+            return self
+
+    class MergeConnection(RecordingConnection):
+        def cursor(self, **_kwargs):
+            return MergeCursor(self)
+
+    class MergeManager(RecordingConnectionManager):
+        @contextmanager
+        def connection(self):
+            connection = MergeConnection(self)
+            self.connections.append(connection)
+            yield connection
+
+    manager = MergeManager()
+    store = PostgresQAConversationStore("postgresql://unused", connection_manager=manager)
+    store._schema_ready = True
+
+    assert store.merge_anonymous("anon-1", "user-1") == (0, 0)
+    assert len(manager.connections[0].statements) == 1
+    sql, params = manager.connections[0].statements[0]
+    assert "WITH claimed AS" in sql
+    assert "UPDATE travel_qa_conversations" in sql
+    assert "JOIN claimed" in sql
+    assert params == ("user-1", "anon-1")
 
 
 def test_qa_conversations_are_isolated_and_client_identity_is_ignored(isolated_qa):

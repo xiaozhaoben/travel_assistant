@@ -89,17 +89,18 @@ class PostgresQAConversationStore:
     def get_or_create_conversation(
         self,
         conversation_id: str | None = None,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
         title: str | None = None,
     ) -> dict[str, Any]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
         if conversation_id:
             existing = self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id)
             if existing is not None:
                 return existing
-            if self._get_conversation_row(conversation_id) is not None:
-                raise QAConversationNotFound(conversation_id)
+            raise QAConversationNotFound(conversation_id)
 
         new_id = str(uuid4())
         conversation_title = _conversation_title(title or "新的旅行问答")
@@ -119,20 +120,15 @@ class PostgresQAConversationStore:
         self,
         conversation_id: str,
         *,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        user_id: str | None,
+        anonymous_id: str | None,
     ) -> dict[str, Any] | None:
-        owner_clause, owner_params = _owner_predicate(user_id, anonymous_id)
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    f"""
-                    SELECT id::text, user_id, anonymous_id, title, created_at, updated_at
-                    FROM travel_qa_conversations
-                    WHERE id = %s {owner_clause}
-                    """,
-                    (conversation_id, *owner_params),
-                ).fetchone()
+                row = _select_owned_conversation(
+                    cur, conversation_id, user_id=user_id, anonymous_id=anonymous_id
+                )
         return dict(row) if row else None
 
     def append_message(
@@ -141,21 +137,28 @@ class PostgresQAConversationStore:
         role: str,
         content: str,
         *,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        user_id: str | None,
+        anonymous_id: str | None,
         sources: list[TravelKnowledgeSource] | None = None,
         retrieved_count: int = 0,
         generation_mode: str | None = None,
         used_web_search: bool = False,
     ) -> dict[str, Any]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
-        if user_id or anonymous_id:
-            if self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id) is None:
-                raise QAConversationNotFound(conversation_id)
         message_id = str(uuid4())
         source_payload = [source.model_dump(mode="json") for source in sources or []]
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                conversation = _select_owned_conversation(
+                    cur,
+                    conversation_id,
+                    user_id=user_id,
+                    anonymous_id=anonymous_id,
+                    for_update=True,
+                )
+                if conversation is None:
+                    raise QAConversationNotFound(conversation_id)
                 row = cur.execute(
                     """
                     INSERT INTO travel_qa_messages (
@@ -186,17 +189,19 @@ class PostgresQAConversationStore:
     def get_recent_messages(
         self,
         conversation_id: str,
-        limit: int = 8,
         *,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        user_id: str | None,
+        anonymous_id: str | None,
+        limit: int = 8,
     ) -> list[dict[str, str]]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
-        if user_id or anonymous_id:
-            if self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id) is None:
-                raise QAConversationNotFound(conversation_id)
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                if _select_owned_conversation(
+                    cur, conversation_id, user_id=user_id, anonymous_id=anonymous_id
+                ) is None:
+                    raise QAConversationNotFound(conversation_id)
                 rows = cur.execute(
                     """
                     SELECT role, content
@@ -211,27 +216,22 @@ class PostgresQAConversationStore:
 
     def list_conversations(
         self,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
         limit: int = 50,
     ) -> list[TravelQAConversationSummary]:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
-        where_clause = ""
-        params: list[Any] = []
-        if user_id:
-            where_clause = "WHERE user_id = %s"
-            params.append(user_id)
-        elif anonymous_id:
-            where_clause = "WHERE anonymous_id = %s"
-            params.append(anonymous_id)
-        params.append(limit)
+        owner_clause, owner_params = _owner_predicate(user_id, anonymous_id)
+        params = [*owner_params, limit]
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     f"""
                     SELECT id::text, user_id, anonymous_id, title, created_at, updated_at
                     FROM travel_qa_conversations
-                    {where_clause}
+                    WHERE {owner_clause}
                     ORDER BY updated_at DESC
                     LIMIT %s
                     """,
@@ -243,17 +243,18 @@ class PostgresQAConversationStore:
         self,
         conversation_id: str,
         *,
-        user_id: str | None = None,
-        anonymous_id: str | None = None,
+        user_id: str | None,
+        anonymous_id: str | None,
     ) -> TravelQAConversationDetail | None:
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         self._ensure_schema_once()
-        conversation = self._get_conversation_row(conversation_id, user_id=user_id, anonymous_id=anonymous_id)
-        if (user_id or anonymous_id) and conversation is None:
-            raise QAConversationNotFound(conversation_id)
-        if conversation is None:
-            return None
         with self.connections.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
+                conversation_row = _select_owned_conversation(
+                    cur, conversation_id, user_id=user_id, anonymous_id=anonymous_id
+                )
+                if conversation_row is None:
+                    raise QAConversationNotFound(conversation_id)
                 rows = cur.execute(
                     """
                     SELECT id::text, conversation_id::text, role, content, sources_payload,
@@ -264,6 +265,7 @@ class PostgresQAConversationStore:
                     """,
                     (conversation_id,),
                 ).fetchall()
+        conversation = dict(conversation_row)
         messages = [_message_from_row(dict(row)) for row in rows]
         return TravelQAConversationDetail.model_validate({**conversation, "messages": messages})
 
@@ -274,25 +276,22 @@ class PostgresQAConversationStore:
         self._ensure_schema_once()
         with self.connections.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                row = cur.execute(
                     """
-                    SELECT count(*) FROM travel_qa_messages m
-                    JOIN travel_qa_conversations c ON c.id = m.conversation_id
-                    WHERE c.anonymous_id = %s AND c.user_id IS NULL
-                    """,
-                    (anonymous_id,),
-                )
-                merged_messages = int(cur.fetchone()[0] or 0)
-                cur.execute(
-                    """
-                    UPDATE travel_qa_conversations
-                    SET user_id = %s, anonymous_id = NULL
-                    WHERE anonymous_id = %s AND user_id IS NULL
+                    WITH claimed AS (
+                        UPDATE travel_qa_conversations
+                        SET user_id = %s, anonymous_id = NULL
+                        WHERE anonymous_id = %s AND user_id IS NULL
+                        RETURNING id
+                    )
+                    SELECT
+                        (SELECT count(*) FROM claimed) AS merged_conversations,
+                        (SELECT count(*) FROM travel_qa_messages m JOIN claimed c ON c.id = m.conversation_id)
+                            AS merged_messages
                     """,
                     (user_id, anonymous_id),
-                )
-                merged_conversations = cur.rowcount or 0
-        return merged_conversations, merged_messages
+                ).fetchone()
+        return int(row[0] or 0), int(row[1] or 0)
 
 
 class InMemoryQAConversationStore:
@@ -303,12 +302,17 @@ class InMemoryQAConversationStore:
     def health(self) -> dict[str, Any]:
         return {"enabled": True, "ok": True, "memory_only": True}
 
-    def get_or_create_conversation(self, conversation_id=None, user_id=None, anonymous_id=None, title=None):
+    def get_or_create_conversation(
+        self, conversation_id=None, *, user_id: str | None, anonymous_id: str | None, title=None
+    ):
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         if conversation_id and conversation_id in self.conversations:
             row = self.conversations[conversation_id]
-            if (user_id or anonymous_id) and not _owner_matches(row, user_id, anonymous_id):
+            if not _owner_matches(row, user_id, anonymous_id):
                 raise QAConversationNotFound(conversation_id)
             return row
+        if conversation_id:
+            raise QAConversationNotFound(conversation_id)
         now = datetime.now(timezone.utc)
         conversation_id = conversation_id or str(uuid4())
         row = {
@@ -323,10 +327,18 @@ class InMemoryQAConversationStore:
         self.messages.setdefault(conversation_id, [])
         return row
 
-    def append_message(self, conversation_id, role, content, **kwargs):
-        user_id = kwargs.pop("user_id", None)
-        anonymous_id = kwargs.pop("anonymous_id", None)
-        if (user_id or anonymous_id) and (
+    def append_message(
+        self,
+        conversation_id,
+        role,
+        content,
+        *,
+        user_id: str | None,
+        anonymous_id: str | None,
+        **kwargs,
+    ):
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
+        if (
             conversation_id not in self.conversations
             or not _owner_matches(self.conversations[conversation_id], user_id, anonymous_id)
         ):
@@ -348,8 +360,11 @@ class InMemoryQAConversationStore:
             self.conversations[conversation_id]["updated_at"] = now
         return row
 
-    def get_recent_messages(self, conversation_id, limit=8, *, user_id=None, anonymous_id=None):
-        if (user_id or anonymous_id) and (
+    def get_recent_messages(
+        self, conversation_id, *, user_id: str | None, anonymous_id: str | None, limit=8
+    ):
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
+        if (
             conversation_id not in self.conversations
             or not _owner_matches(self.conversations[conversation_id], user_id, anonymous_id)
         ):
@@ -357,21 +372,23 @@ class InMemoryQAConversationStore:
         rows = self.messages.get(conversation_id, [])[-limit:]
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
-    def list_conversations(self, user_id=None, anonymous_id=None, limit=50):
+    def list_conversations(self, *, user_id: str | None, anonymous_id: str | None, limit=50):
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         rows = list(self.conversations.values())
         if user_id:
-            rows = [row for row in rows if row.get("user_id") == user_id]
-        elif anonymous_id:
-            rows = [row for row in rows if row.get("anonymous_id") == anonymous_id]
+            rows = [row for row in rows if row.get("user_id") == user_id and not row.get("anonymous_id")]
+        else:
+            rows = [row for row in rows if row.get("anonymous_id") == anonymous_id and not row.get("user_id")]
         rows = sorted(rows, key=lambda row: row["updated_at"], reverse=True)[:limit]
         return [TravelQAConversationSummary.model_validate(row) for row in rows]
 
-    def get_conversation(self, conversation_id, *, user_id=None, anonymous_id=None):
+    def get_conversation(
+        self, conversation_id, *, user_id: str | None, anonymous_id: str | None
+    ):
+        user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
         row = self.conversations.get(conversation_id)
-        if row is None or ((user_id or anonymous_id) and not _owner_matches(row, user_id, anonymous_id)):
-            if user_id or anonymous_id:
-                raise QAConversationNotFound(conversation_id)
-            return None
+        if row is None or not _owner_matches(row, user_id, anonymous_id):
+            raise QAConversationNotFound(conversation_id)
         messages = [_message_from_row(item) for item in self.messages.get(conversation_id, [])]
         return TravelQAConversationDetail.model_validate({**row, "messages": messages})
 
@@ -391,12 +408,41 @@ class InMemoryQAConversationStore:
         return len(conversations), message_count
 
 
+def _validate_owner(
+    user_id: str | None, anonymous_id: str | None
+) -> tuple[str | None, str | None]:
+    normalized_user_id = user_id.strip() if isinstance(user_id, str) else None
+    normalized_anonymous_id = anonymous_id.strip() if isinstance(anonymous_id, str) else None
+    if bool(normalized_user_id) == bool(normalized_anonymous_id):
+        raise ValueError("exactly one QA conversation owner is required")
+    return normalized_user_id, normalized_anonymous_id
+
+
 def _owner_predicate(user_id: str | None, anonymous_id: str | None) -> tuple[str, tuple[str, ...]]:
+    user_id, anonymous_id = _validate_owner(user_id, anonymous_id)
     if user_id:
-        return "AND user_id = %s", (user_id,)
-    if anonymous_id:
-        return "AND anonymous_id = %s", (anonymous_id,)
-    return "", ()
+        return "user_id = %s AND anonymous_id IS NULL", (user_id,)
+    return "anonymous_id = %s AND user_id IS NULL", (anonymous_id,)
+
+
+def _select_owned_conversation(
+    cursor,
+    conversation_id: str,
+    *,
+    user_id: str | None,
+    anonymous_id: str | None,
+    for_update: bool = False,
+):
+    owner_clause, owner_params = _owner_predicate(user_id, anonymous_id)
+    lock_clause = " FOR UPDATE" if for_update else ""
+    return cursor.execute(
+        f"""
+        SELECT id::text, user_id, anonymous_id, title, created_at, updated_at
+        FROM travel_qa_conversations
+        WHERE id = %s AND {owner_clause}{lock_clause}
+        """,
+        (conversation_id, *owner_params),
+    ).fetchone()
 
 
 def _owner_matches(row: dict[str, Any], user_id: str | None, anonymous_id: str | None) -> bool:

@@ -642,14 +642,9 @@ def _prepare_qa_memory(
             anonymous_id=anonymous_id,
             title=request.question,
         )
-        try:
-            conversation_history = resource_qa_store.get_recent_messages(
-                conversation["id"], limit=8, user_id=user_id, anonymous_id=anonymous_id
-            )
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            conversation_history = resource_qa_store.get_recent_messages(conversation["id"], limit=8)
+        conversation_history = resource_qa_store.get_recent_messages(
+            conversation["id"], limit=8, user_id=user_id, anonymous_id=anonymous_id
+        )
     except QAConversationNotFound:
         raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
     except Exception as exc:
@@ -793,7 +788,6 @@ def get_qa_conversation(
         raise HTTPException(status_code=503, detail=f"问答会话查询失败: {exc}") from exc
     if conversation is None:
         raise api_error(404, "QA_CONVERSATION_NOT_FOUND", "QA conversation not found")
-        raise HTTPException(status_code=404, detail="问答会话不存在")
     return ApiResponse[TravelQAConversationDetail](success=True, message="问答会话详情获取成功", data=conversation)
 
 
