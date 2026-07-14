@@ -243,6 +243,7 @@ def test_rate_limit_defaults_are_disabled_without_redis(monkeypatch):
     assert settings.rate_limit_map_limit == 60
     assert settings.rate_limit_knowledge_read_limit == 30
     assert settings.rate_limit_knowledge_write_limit == 5
+    assert settings.url_fetch_total_timeout_seconds == 30.0
 
 
 def test_anonymous_endpoint_uses_socket_ip_and_ignores_forwarded_header(monkeypatch):

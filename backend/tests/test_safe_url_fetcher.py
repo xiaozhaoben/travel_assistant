@@ -215,3 +215,51 @@ def test_httpx_timeout_maps_to_url_fetch_failed():
 
     assert raised.value.code == "URL_FETCH_FAILED"
     assert "private upstream" not in str(raised.value)
+
+
+def test_total_deadline_stops_slow_drip_and_closes_stream():
+    class FakeClock:
+        def __init__(self):
+            self.now = 100.0
+
+        def __call__(self):
+            return self.now
+
+    class SlowResponse(FakeResponse):
+        def __init__(self, clock):
+            super().__init__(headers={"Content-Type": "text/plain"})
+            self.clock = clock
+
+        def iter_bytes(self):
+            for chunk in (b"one", b"two", b"three"):
+                self.clock.now += 0.6
+                yield chunk
+
+    class ClosingClient(FakeClient):
+        def __init__(self, response):
+            super().__init__(response)
+            self.stream_closed = False
+
+        @contextmanager
+        def stream(self, method, url, **kwargs):
+            self.calls.append({"method": method, "url": url, **kwargs})
+            try:
+                yield self.response
+            finally:
+                self.stream_closed = True
+
+    clock = FakeClock()
+    client = ClosingClient(SlowResponse(clock))
+    fetcher = SafeURLFetcher(
+        resolver=public_resolver,
+        client=client,
+        read_timeout_seconds=5.0,
+        total_timeout_seconds=1.0,
+        clock=clock,
+    )
+
+    with pytest.raises(SafeURLFetchError) as raised:
+        fetcher.fetch("https://example.com/slow")
+
+    assert raised.value.code == "URL_FETCH_FAILED"
+    assert client.stream_closed is True

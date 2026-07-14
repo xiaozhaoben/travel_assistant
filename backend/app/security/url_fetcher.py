@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import socket
+from time import monotonic
 from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
@@ -60,13 +61,17 @@ class SafeURLFetcher:
         max_bytes: int = DEFAULT_MAX_BYTES,
         connect_timeout_seconds: float = 8.0,
         read_timeout_seconds: float = 20.0,
+        total_timeout_seconds: float = 30.0,
         allowed_content_types: Iterable[str] | None = None,
+        clock: Callable[[], float] = monotonic,
     ):
         self.resolver = resolver or _resolve_addresses
         self.client = client
         self.max_bytes = max(1, int(max_bytes))
         self.connect_timeout_seconds = max(0.1, float(connect_timeout_seconds))
         self.read_timeout_seconds = max(0.1, float(read_timeout_seconds))
+        self.total_timeout_seconds = max(0.1, float(total_timeout_seconds))
+        self.clock = clock
         self.allowed_content_types = _normalize_content_types(
             allowed_content_types or DOCUMENT_CONTENT_TYPES
         )
@@ -77,31 +82,49 @@ class SafeURLFetcher:
         *,
         allowed_content_types: Iterable[str] | None = None,
     ) -> SafeFetchResult:
+        deadline = self.clock() + self.total_timeout_seconds
+        self._check_deadline(deadline)
         parsed = _parse_url(url)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        self._validate_destination(parsed.hostname or "", port)
+        self._validate_destination(parsed.hostname or "", port, deadline)
         timeout = httpx.Timeout(
             connect=self.connect_timeout_seconds,
             read=self.read_timeout_seconds,
             write=self.read_timeout_seconds,
             pool=self.connect_timeout_seconds,
         )
+        self._check_deadline(deadline)
         effective_content_types = (
             _normalize_content_types(allowed_content_types)
             if allowed_content_types is not None
             else self.allowed_content_types
         )
         if self.client is not None:
-            return self._fetch_with_client(self.client, url, timeout, effective_content_types)
+            return self._fetch_with_client(
+                self.client,
+                url,
+                timeout,
+                effective_content_types,
+                deadline,
+            )
         try:
+            self._check_deadline(deadline)
             with httpx.Client() as client:
-                return self._fetch_with_client(client, url, timeout, effective_content_types)
+                self._check_deadline(deadline)
+                return self._fetch_with_client(
+                    client,
+                    url,
+                    timeout,
+                    effective_content_types,
+                    deadline,
+                )
         except SafeURLFetchError:
             raise
         except Exception as exc:
             raise _fetch_failed() from exc
 
-    def _validate_destination(self, host: str, port: int) -> None:
+    def _validate_destination(self, host: str, port: int, deadline: float) -> None:
+        self._check_deadline(deadline)
         normalized_host = host.rstrip(".").lower()
         if (
             normalized_host == "localhost"
@@ -114,7 +137,9 @@ class SafeURLFetcher:
             addresses = [normalized_host]
         else:
             try:
+                self._check_deadline(deadline)
                 addresses = list(self.resolver(normalized_host, port))
+                self._check_deadline(deadline)
             except SafeURLFetchError:
                 raise
             except Exception as exc:
@@ -134,8 +159,10 @@ class SafeURLFetcher:
         url: str,
         timeout: httpx.Timeout,
         allowed_content_types: frozenset[str],
+        deadline: float,
     ) -> SafeFetchResult:
         try:
+            self._check_deadline(deadline)
             with client.stream(
                 "GET",
                 url,
@@ -146,6 +173,7 @@ class SafeURLFetcher:
                     "Accept": ", ".join(sorted(allowed_content_types)),
                 },
             ) as response:
+                self._check_deadline(deadline)
                 status_code = int(response.status_code)
                 if 300 <= status_code < 400:
                     raise SafeURLFetchError(
@@ -171,7 +199,14 @@ class SafeURLFetcher:
                     )
                 chunks: list[bytes] = []
                 size = 0
-                for chunk in response.iter_bytes():
+                iterator = iter(response.iter_bytes())
+                while True:
+                    self._check_deadline(deadline)
+                    try:
+                        chunk = next(iterator)
+                    except StopIteration:
+                        break
+                    self._check_deadline(deadline)
                     size += len(chunk)
                     if size > self.max_bytes:
                         raise SafeURLFetchError(
@@ -180,6 +215,7 @@ class SafeURLFetcher:
                             "URL content is too large",
                         )
                     chunks.append(chunk)
+                self._check_deadline(deadline)
                 content = b"".join(chunks)
                 return SafeFetchResult(
                     text=content.decode(_charset(response.headers), errors="replace"),
@@ -190,6 +226,10 @@ class SafeURLFetcher:
             raise
         except Exception as exc:
             raise _fetch_failed() from exc
+
+    def _check_deadline(self, deadline: float) -> None:
+        if self.clock() >= deadline:
+            raise _fetch_failed()
 
 
 def _parse_url(url: str):

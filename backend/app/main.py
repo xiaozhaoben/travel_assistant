@@ -134,6 +134,7 @@ def create_app_resources() -> AppResources:
         max_bytes=resource_settings.url_fetch_max_bytes,
         connect_timeout_seconds=resource_settings.url_fetch_connect_timeout_seconds,
         read_timeout_seconds=resource_settings.url_fetch_read_timeout_seconds,
+        total_timeout_seconds=resource_settings.url_fetch_total_timeout_seconds,
     )
     resource_news_agent = TravelNewsIngestionAgent(resource_vector_store, resource_safe_url_fetcher)
     resource_qa_agent = TravelQuestionAnsweringAgent(
