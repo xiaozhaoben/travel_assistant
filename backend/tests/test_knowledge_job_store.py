@@ -17,6 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.knowledge.job_store import (
+    KnowledgeJobInvalidTransition,
     KnowledgeJobNotFound,
     KnowledgeJobStoreUnavailable,
     RedisKnowledgeJobStore,
@@ -31,10 +32,12 @@ class FakeRedis:
         error: Exception | None = None,
         expire_error: Exception | None = None,
         execute_error: Exception | None = None,
+        eval_error: Exception | None = None,
     ):
         self.error = error
         self.expire_error = expire_error
         self.execute_error = execute_error
+        self.eval_error = eval_error
         self.hashes: dict[str, dict[str, str]] = {}
         self.calls: list[tuple] = []
 
@@ -60,6 +63,48 @@ class FakeRedis:
         if self.expire_error is not None:
             raise self.expire_error
         return key in self.hashes
+
+    def eval(self, script, numkeys, key, *args):
+        self.calls.append(("eval", script, numkeys, key, *args))
+        if self.eval_error is not None:
+            raise self.eval_error
+        if key not in self.hashes:
+            return 0
+        (
+            status_flag,
+            status,
+            message_flag,
+            message,
+            result_flag,
+            result_json,
+            error_flag,
+            error_code,
+            updated_at,
+            ttl,
+        ) = args
+        current = self.hashes[key]["status"]
+        if status_flag == "1":
+            allowed = {
+                "queued": {"running", "completed", "failed"},
+                "pending": {"running", "completed", "failed"},
+                "running": {"running", "completed", "failed"},
+                "completed": {"completed"},
+                "failed": {"failed"},
+            }
+            if status not in allowed.get(current, set()):
+                return -1
+        mapping = {"updated_at": updated_at}
+        for flag, field, value in (
+            (status_flag, "status", status),
+            (message_flag, "message", message),
+            (result_flag, "result_json", result_json),
+            (error_flag, "error_code", error_code),
+        ):
+            if flag == "1":
+                mapping[field] = value
+        self.hashes[key].update(mapping)
+        self.calls.append(("expire", key, int(ttl)))
+        return 1
 
 
 class FakePipeline:
@@ -109,8 +154,8 @@ def test_create_get_and_update_refresh_ttl_and_round_trip_json_result():
     assert updated.result == {"doc_id": "doc-1", "chunks_added": 2}
     assert [call for call in redis.calls if call[0] == "pipeline"] == [
         ("pipeline", True),
-        ("pipeline", True),
     ]
+    assert len([call for call in redis.calls if call[0] == "eval"]) == 1
     key = f"travel-assistant:knowledge-job:{created.job_id}"
     assert [call for call in redis.calls if call[0] == "expire"] == [
         ("expire", key, 123),
@@ -145,6 +190,34 @@ def test_hash_schema_never_contains_request_or_user_content():
     assert "url" not in redis.hashes[key]
 
 
+def test_result_summary_strips_content_urls_requests_and_unknown_fields():
+    redis = FakeRedis()
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+    job = store.create(source_type="url", message="created")
+
+    updated = store.update(
+        job.job_id,
+        status="completed",
+        result={
+            "doc_id": "doc-safe",
+            "document_id": "document-safe",
+            "chunks_added": 3,
+            "content": "private body secret-123",
+            "source_url": "https://private.example/secret-123",
+            "url": "https://private.example/other",
+            "request": {"content": "secret-123"},
+            "unknown": "secret-123",
+        },
+    )
+
+    key = f"travel-assistant:knowledge-job:{job.job_id}"
+    stored_result = json.loads(redis.hashes[key]["result_json"])
+    expected = {"doc_id": "doc-safe", "document_id": "document-safe", "chunks_added": 3}
+    assert updated.result == expected
+    assert stored_result == expected
+    assert "secret-123" not in redis.hashes[key]["result_json"]
+
+
 def test_expire_queue_failure_does_not_leave_hash_without_ttl():
     redis = FakeRedis(expire_error=RuntimeError("expire failed"))
     store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
@@ -155,14 +228,14 @@ def test_expire_queue_failure_does_not_leave_hash_without_ttl():
     assert redis.hashes == {}
 
 
-def test_transaction_execute_failure_does_not_leave_hash_without_ttl():
+def test_create_transaction_execute_failure_maps_to_unavailable():
     redis = FakeRedis(execute_error=RuntimeError("execute failed"))
     store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
 
-    with pytest.raises(KnowledgeJobStoreUnavailable):
+    with pytest.raises(KnowledgeJobStoreUnavailable) as raised:
         store.create(source_type="upload", message="queued")
 
-    assert redis.hashes == {}
+    assert "execute failed" not in str(raised.value)
 
 
 def test_unknown_job_has_stable_not_found_exception():
@@ -172,6 +245,72 @@ def test_unknown_job_has_stable_not_found_exception():
         store.get("missing")
     with pytest.raises(KnowledgeJobNotFound):
         store.update("missing", status="running")
+
+
+def test_update_uses_atomic_transition_and_terminal_state_cannot_regress():
+    redis = FakeRedis()
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+    job = store.create(source_type="upload", message="queued")
+
+    running = store.update(job.job_id, status="running", message="running")
+    completed = store.update(
+        job.job_id,
+        status="completed",
+        message="done",
+        result={"doc_id": "doc-1", "chunks_added": 2},
+    )
+    idempotent = store.update(job.job_id, status="completed", message="done again")
+
+    with pytest.raises(KnowledgeJobInvalidTransition):
+        store.update(job.job_id, status="running")
+    with pytest.raises(KnowledgeJobInvalidTransition):
+        store.update(job.job_id, status="failed")
+
+    assert running.status == "running"
+    assert completed.status == "completed"
+    assert idempotent.status == "completed"
+    assert store.get(job.job_id).message == "done again"
+    assert len([call for call in redis.calls if call[0] == "eval"]) == 5
+
+
+def test_failed_terminal_state_only_allows_idempotent_failed_update():
+    redis = FakeRedis()
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+    job = store.create(source_type="upload", message="queued")
+    failed = store.update(job.job_id, status="failed", error_code="KNOWLEDGE_INGEST_FAILED")
+    idempotent = store.update(job.job_id, status="failed", message="still failed")
+
+    with pytest.raises(KnowledgeJobInvalidTransition):
+        store.update(job.job_id, status="completed")
+
+    assert failed.status == "failed"
+    assert idempotent.status == "failed"
+
+
+def test_update_does_not_recreate_an_expired_job():
+    redis = FakeRedis()
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+    job = store.create(source_type="upload", message="queued")
+    key = f"travel-assistant:knowledge-job:{job.job_id}"
+    del redis.hashes[key]
+
+    with pytest.raises(KnowledgeJobNotFound):
+        store.update(job.job_id, status="running")
+
+    assert key not in redis.hashes
+    assert any(call[0] == "eval" for call in redis.calls)
+
+
+def test_update_eval_failure_maps_to_stable_unavailable():
+    redis = FakeRedis()
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+    job = store.create(source_type="upload", message="queued")
+    redis.eval_error = RuntimeError("redis://secret@endpoint")
+
+    with pytest.raises(KnowledgeJobStoreUnavailable) as raised:
+        store.update(job.job_id, status="running")
+
+    assert "secret" not in str(raised.value)
 
 
 def test_missing_or_failed_redis_has_stable_unavailable_exception():
@@ -184,6 +323,15 @@ def test_missing_or_failed_redis_has_stable_unavailable_exception():
         failed.get("job-1")
 
     assert "secret" not in str(raised.value)
+
+
+def test_invalid_utf8_hash_is_mapped_to_stable_unavailable():
+    redis = FakeRedis()
+    redis.hashes["travel-assistant:knowledge-job:broken"] = {b"job_id": b"\xff"}
+    store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
+
+    with pytest.raises(KnowledgeJobStoreUnavailable):
+        store.get("broken")
 
 
 def test_settings_default_knowledge_job_ttl_is_seven_days(monkeypatch):
@@ -257,6 +405,16 @@ def test_create_job_endpoint_maps_missing_resource_store_to_stable_503(monkeypat
 
     assert response.status_code == 503
     assert response.json()["code"] == "KNOWLEDGE_JOB_STORE_UNAVAILABLE"
+
+
+def test_background_update_handles_invalid_transition_without_raising(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "update_knowledge_ingest_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KnowledgeJobInvalidTransition()),
+    )
+
+    assert main_module._safe_update_knowledge_ingest_job("job-1", status="running") is False
 
 
 class _FakeOrchestrator:

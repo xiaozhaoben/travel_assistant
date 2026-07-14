@@ -70,6 +70,7 @@ from .integrations.services import UnsplashMCPClient
 from .knowledge.news_agent import TravelNewsIngestionAgent, configured_travel_feeds
 from .knowledge.job_store import (
     KnowledgeIngestJob,
+    KnowledgeJobInvalidTransition,
     KnowledgeJobNotFound,
     KnowledgeJobStoreUnavailable,
     RedisKnowledgeJobStore,
@@ -1189,7 +1190,7 @@ def _safe_update_knowledge_ingest_job(job_id: str, **changes) -> bool:
     try:
         update_knowledge_ingest_job(job_id, **changes)
         return True
-    except (KnowledgeJobNotFound, KnowledgeJobStoreUnavailable) as exc:
+    except (KnowledgeJobInvalidTransition, KnowledgeJobNotFound, KnowledgeJobStoreUnavailable) as exc:
         logger.warning("Knowledge ingest job status update failed exception_type=%s", type(exc).__name__)
         return False
 

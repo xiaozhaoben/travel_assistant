@@ -61,6 +61,32 @@ class FakeKnowledgeJobRedis:
         self.hashes.setdefault(key, {}).update(mapping)
         return [len(mapping), True]
 
+    def eval(self, _script, _numkeys, key, *args):
+        if key not in self.hashes:
+            return 0
+        (
+            status_flag,
+            status,
+            message_flag,
+            message,
+            result_flag,
+            result_json,
+            error_flag,
+            error_code,
+            updated_at,
+            _ttl,
+        ) = args
+        for flag, field, value in (
+            (status_flag, "status", status),
+            (message_flag, "message", message),
+            (result_flag, "result_json", result_json),
+            (error_flag, "error_code", error_code),
+        ):
+            if flag == "1":
+                self.hashes[key][field] = value
+        self.hashes[key]["updated_at"] = updated_at
+        return 1
+
 
 class FakeCursor:
     def __init__(self):
