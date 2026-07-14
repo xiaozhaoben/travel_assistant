@@ -37,6 +37,8 @@ class OwnedReportStore:
         self.reports: dict[str, dict] = {}
         self.updated_plans: list[tuple[str, str, str]] = []
         self.updated_images: list[tuple[str, str, str, str]] = []
+        self.owner_checks: list[tuple[str, str, str]] = []
+        self.detail_reads: list[tuple[str, str, str]] = []
 
     def health(self):
         return {"enabled": True, "ok": True}
@@ -79,7 +81,12 @@ class OwnedReportStore:
         ][:limit]
 
     def get_report(self, report_id, *, owner_type, owner_id):
+        self.detail_reads.append((report_id, owner_type, owner_id))
         return TripReportDetail.model_validate(self._owned(report_id, owner_type, owner_id))
+
+    def assert_report_owner(self, report_id, *, owner_type, owner_id):
+        self._owned(report_id, owner_type, owner_id)
+        self.owner_checks.append((report_id, owner_type, owner_id))
 
     def update_report_plan(self, report_id, plan, operation, research_context, *, owner_type, owner_id):
         report = self._owned(report_id, owner_type, owner_id)
@@ -186,6 +193,8 @@ def test_recalculate_and_photo_report_writes_reject_cross_owner(report_api):
     assert allowed_photo.status_code == 200
     assert (report_id, "user", "user-a") in store.updated_plans
     assert any(item[:3] == (report_id, "user", "user-a") for item in store.updated_images)
+    assert store.owner_checks.count((report_id, "user", "user-a")) == 2
+    assert not store.detail_reads
 
 
 @pytest.mark.parametrize(
@@ -208,6 +217,14 @@ def test_photo_without_report_id_remains_public(report_api):
     client, _ = report_api
     response = client.get("/api/poi/photo", params={"name": "故宫博物院", "city": "北京"})
     assert response.status_code == 200
+
+
+def test_get_report_returns_stable_error_when_store_is_unavailable(monkeypatch):
+    monkeypatch.setattr(main_module, "get_app_resources", lambda: SimpleNamespace(report_store=None))
+    response = TestClient(app).get("/api/reports/missing", headers=_headers("user-a", "user"))
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "REPORT_STORE_UNAVAILABLE"
 
 
 def test_report_schema_adds_nullable_owner_columns_and_owner_index():
@@ -296,6 +313,106 @@ class RecordingConnections:
     @contextmanager
     def connection(self):
         yield RecordingConnection(self.statements)
+
+
+class AttractionUpdateCursor:
+    def __init__(self, statements, *, update_row):
+        self.statements = statements
+        self.update_row = update_row
+        self._one = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split())
+        self.statements.append((normalized, tuple(params)))
+        if normalized.startswith("SELECT result_payload, selected_plan_payload"):
+            attraction = {"name": "故宫博物院", "image_url": ""}
+            self._one = {
+                "result_payload": {"days": [{"attractions": [dict(attraction)]}]},
+                "selected_plan_payload": {"days": [{"attractions": [dict(attraction)]}]},
+            }
+        elif normalized.startswith("UPDATE trip_reports SET result_payload"):
+            self._one = self.update_row
+        else:
+            self._one = None
+        return self
+
+    def fetchone(self):
+        return self._one
+
+
+class AttractionUpdateConnection:
+    def __init__(self, statements, *, update_row):
+        self.statements = statements
+        self.update_row = update_row
+
+    def cursor(self, row_factory=None):
+        return AttractionUpdateCursor(self.statements, update_row=self.update_row)
+
+
+class AttractionUpdateConnections:
+    def __init__(self, *, update_row):
+        self.statements = []
+        self.update_row = update_row
+
+    @contextmanager
+    def connection(self):
+        yield AttractionUpdateConnection(self.statements, update_row=self.update_row)
+
+
+def test_image_update_locks_owned_report_and_checks_returning_row(monkeypatch):
+    connections = AttractionUpdateConnections(update_row={"id": "report-a"})
+    store = PostgresReportStore("postgresql://unused", connection_manager=connections)
+    store._schema_ready = True
+    monkeypatch.setattr(report_store_module, "Jsonb", lambda value: value)
+
+    assert store.update_report_attraction_image(
+        "report-a",
+        "故宫博物院",
+        "https://img.example.test/new.jpg",
+        owner_type="user",
+        owner_id="user-a",
+    ) is True
+
+    select_sql, _ = connections.statements[0]
+    update_sql, _ = connections.statements[1]
+    assert "FOR UPDATE" in select_sql
+    assert "RETURNING id" in update_sql
+
+
+def test_image_update_raises_when_locked_report_disappears_before_write(monkeypatch):
+    connections = AttractionUpdateConnections(update_row=None)
+    store = PostgresReportStore("postgresql://unused", connection_manager=connections)
+    store._schema_ready = True
+    monkeypatch.setattr(report_store_module, "Jsonb", lambda value: value)
+
+    with pytest.raises(report_store_module.ReportNotFound):
+        store.update_report_attraction_image(
+            "report-a",
+            "故宫博物院",
+            "https://img.example.test/new.jpg",
+            owner_type="user",
+            owner_id="user-a",
+        )
+
+
+def test_assert_report_owner_uses_lightweight_owned_lookup():
+    connections = RecordingConnections()
+    store = PostgresReportStore("postgresql://unused", connection_manager=connections)
+    store._schema_ready = True
+
+    with pytest.raises(report_store_module.ReportNotFound):
+        store.assert_report_owner("missing", owner_type="user", owner_id="user-a")
+
+    sql, params = connections.statements[0]
+    assert sql.startswith("SELECT 1 FROM trip_reports")
+    assert "owner_type = %s AND owner_id = %s" in sql
+    assert params == ("missing", "user", "user-a")
 
 
 def test_postgres_report_queries_bind_owner_to_each_report_operation(report_api, monkeypatch):

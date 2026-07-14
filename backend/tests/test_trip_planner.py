@@ -3991,7 +3991,7 @@ def test_api_poi_photo_uses_cached_asset_and_updates_report_without_provider_cal
             assert "故宫博物院" in cache_key
             return {"value": "https://img.example.test/cached.jpg"}
 
-        def get_report(self, report_id, *, owner_type, owner_id):
+        def assert_report_owner(self, report_id, *, owner_type, owner_id):
             return {"id": report_id}
 
         def update_report_attraction_image(
@@ -4047,7 +4047,7 @@ def test_api_poi_photo_caches_provider_result_and_updates_report():
         def upsert_asset_cache(self, asset_type, cache_key, city, name, value, response_payload=None):
             self.cached_assets.append((asset_type, cache_key, city, name, value, response_payload))
 
-        def get_report(self, report_id, *, owner_type, owner_id):
+        def assert_report_owner(self, report_id, *, owner_type, owner_id):
             return {"id": report_id}
 
         def update_report_attraction_image(
@@ -4156,7 +4156,7 @@ def test_api_recalculate_persists_report_revision_when_report_id_is_supplied():
                 "updated_at": datetime(2026, 5, 19, 8, 0, tzinfo=timezone.utc),
             }
 
-        def get_report(self, report_id, *, owner_type, owner_id):
+        def assert_report_owner(self, report_id, *, owner_type, owner_id):
             return {"id": report_id}
 
         def update_report_plan(

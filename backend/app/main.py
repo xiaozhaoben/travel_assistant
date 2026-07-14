@@ -1265,7 +1265,7 @@ def recalculate_trip(
         if resources.report_store is None:
             raise api_error(503, "REPORT_STORE_UNAVAILABLE", "报告数据库未启用")
         try:
-            resources.report_store.get_report(
+            resources.report_store.assert_report_owner(
                 request.report_id,
                 owner_type=owner_type,
                 owner_id=owner_id,
@@ -1327,7 +1327,7 @@ def list_reports(
 def get_report(report_id: str, principal: Principal = Depends(get_current_principal)):
     resources = get_app_resources()
     if resources.report_store is None:
-        raise HTTPException(status_code=503, detail="数据库未启用")
+        raise api_error(503, "REPORT_STORE_UNAVAILABLE", "报告数据库未启用")
     try:
         report = resources.report_store.get_report(
             report_id,
@@ -1358,7 +1358,7 @@ def get_poi_photo(
         if resources.report_store is None:
             raise api_error(503, "REPORT_STORE_UNAVAILABLE", "报告数据库未启用")
         try:
-            resources.report_store.get_report(
+            resources.report_store.assert_report_owner(
                 report_id,
                 owner_type=owner_type,
                 owner_id=owner_id,

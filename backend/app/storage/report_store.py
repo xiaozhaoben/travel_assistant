@@ -359,6 +359,7 @@ class PostgresReportStore:
                     SELECT result_payload, selected_plan_payload
                     FROM trip_reports
                     WHERE id = %s AND owner_type = %s AND owner_id = %s
+                    FOR UPDATE
                     """,
                     (report_id, owner_type, owner_id),
                 ).fetchone()
@@ -372,13 +373,14 @@ class PostgresReportStore:
                 if not changed:
                     return False
 
-                cur.execute(
+                updated = cur.execute(
                     """
                     UPDATE trip_reports
                     SET result_payload = %s,
                         selected_plan_payload = %s,
                         updated_at = now()
                     WHERE id = %s AND owner_type = %s AND owner_id = %s
+                    RETURNING id
                     """,
                     (
                         Jsonb(result_payload),
@@ -387,7 +389,9 @@ class PostgresReportStore:
                         owner_type,
                         owner_id,
                     ),
-                )
+                ).fetchone()
+                if updated is None:
+                    raise ReportNotFound(report_id)
         return True
 
     def list_reports(self, *, owner_type: str, owner_id: str, limit: int = 50) -> list[TripReportSummary]:
@@ -406,6 +410,22 @@ class PostgresReportStore:
                     (owner_type, owner_id, max(1, min(limit, 200))),
                 ).fetchall()
         return [TripReportSummary.model_validate(dict(row)) for row in rows]
+
+    def assert_report_owner(self, report_id: str, *, owner_type: str, owner_id: str) -> None:
+        owner_type, owner_id = _validate_owner(owner_type, owner_id)
+        self._ensure_schema_once()
+        with self.connections.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                owned = cur.execute(
+                    """
+                    SELECT 1
+                    FROM trip_reports
+                    WHERE id = %s AND owner_type = %s AND owner_id = %s
+                    """,
+                    (report_id, owner_type, owner_id),
+                ).fetchone()
+        if owned is None:
+            raise ReportNotFound(report_id)
 
     def get_report(self, report_id: str, *, owner_type: str, owner_id: str) -> TripReportDetail:
         owner_type, owner_id = _validate_owner(owner_type, owner_id)
