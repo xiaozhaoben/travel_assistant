@@ -1688,6 +1688,7 @@ def register_user(
             access_token=token,
             user_id=user["id"],
             username=user["username"],
+            role=user["role"],
         ),
     )
 
@@ -1715,6 +1716,7 @@ def login_user(
             access_token=token,
             user_id=user["id"],
             username=user["username"],
+            role=user["role"],
         ),
     )
 
@@ -1724,7 +1726,11 @@ def get_current_auth_user(current_user: dict = Depends(get_current_user)):
     return {
         "success": True,
         "message": "当前用户信息",
-        "data": {"user_id": current_user["user_id"], "username": current_user["username"]},
+        "data": {
+            "user_id": current_user["user_id"],
+            "username": current_user["username"],
+            "role": current_user["role"],
+        },
     }
 
 

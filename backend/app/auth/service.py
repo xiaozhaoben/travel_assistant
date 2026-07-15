@@ -4,9 +4,10 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 
 from app.auth.principal import (
+    Principal,
     configure_principal_auth,
     create_principal_token,
     decode_principal_token,
@@ -14,6 +15,7 @@ from app.auth.principal import (
     get_current_principal_optional,
     require_user_principal,
 )
+from app.core.api_errors import api_error
 from app.storage.db import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -300,7 +302,17 @@ def get_current_user(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
     principal = require_user_principal(get_current_principal(authorization))
-    return {"user_id": principal.subject, "username": principal.username}
+    try:
+        user = get_user_by_id(get_auth_connections(), principal.subject)
+    except Exception as exc:
+        raise api_error(503, "AUTH_ROLE_CHECK_UNAVAILABLE", "无法确认当前用户权限") from exc
+    if user is None:
+        raise api_error(401, "AUTH_TOKEN_INVALID", "认证令牌已过期或无效")
+    return {
+        "user_id": str(user["id"]),
+        "username": str(user["username"]),
+        "role": str(user["role"]),
+    }
 
 
 def get_current_user_optional(
@@ -310,4 +322,27 @@ def get_current_user_optional(
     if principal is None:
         return None
     principal = require_user_principal(principal)
-    return {"user_id": principal.subject, "username": principal.username}
+    try:
+        user = get_user_by_id(get_auth_connections(), principal.subject)
+    except Exception as exc:
+        raise api_error(503, "AUTH_ROLE_CHECK_UNAVAILABLE", "无法确认当前用户权限") from exc
+    if user is None:
+        raise api_error(401, "AUTH_TOKEN_INVALID", "认证令牌已过期或无效")
+    return {
+        "user_id": str(user["id"]),
+        "username": str(user["username"]),
+        "role": str(user["role"]),
+    }
+
+
+def require_admin_principal(
+    principal: Principal = Depends(get_current_principal),
+) -> Principal:
+    principal = require_user_principal(principal)
+    try:
+        user = get_user_by_id(get_auth_connections(), principal.subject)
+    except Exception as exc:
+        raise api_error(503, "AUTH_ROLE_CHECK_UNAVAILABLE", "无法确认管理员权限") from exc
+    if user is None or user.get("role") != "admin":
+        raise api_error(403, "AUTH_ADMIN_REQUIRED", "该操作需要管理员权限")
+    return principal

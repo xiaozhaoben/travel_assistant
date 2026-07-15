@@ -3,16 +3,26 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
+import app.auth.service as auth_service
+import app.main as main_module
+from app.auth.principal import Principal, create_principal_token
 from app.auth.service import (
     UserRoleNotFound,
     change_user_role,
+    configure_auth,
     create_user,
+    get_current_user,
     get_user_by_id,
     get_user_by_username,
     list_user_role_audit,
     migrate_auth_schema,
+    require_admin_principal,
 )
+from app.core.api_errors import install_api_error_handlers
+from app.core.config import get_settings
 
 
 class FakeCursor:
@@ -74,6 +84,60 @@ class FakeConnectionManager:
 
     def connection(self):
         return self._connection
+
+
+class FailingConnectionManager:
+    def connection(self):
+        raise RuntimeError("private database connection details")
+
+
+AUTH_SECRET = "admin-rbac-test-secret"
+AUTH_ALGORITHM = "HS256"
+
+
+def user_headers(user_id: str = "user-1", username: str = "alice") -> dict[str, str]:
+    token = create_principal_token(
+        user_id,
+        "user",
+        username,
+        AUTH_SECRET,
+        AUTH_ALGORITHM,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def anonymous_headers() -> dict[str, str]:
+    token = create_principal_token(
+        "anon-1",
+        "anonymous",
+        "",
+        AUTH_SECRET,
+        AUTH_ALGORITHM,
+        30,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def admin_dependency_client(manager) -> TestClient:
+    configure_auth(manager, AUTH_SECRET, AUTH_ALGORITHM)
+    app = FastAPI()
+    install_api_error_handlers(app)
+
+    @app.get("/admin")
+    def admin_only(principal: Principal = Depends(require_admin_principal)):
+        return {"subject": principal.subject}
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture(autouse=True)
+def restore_auth_configuration():
+    original_connections = auth_service._connections
+    yield
+    auth_service._connections = original_connections
+    settings = get_settings()
+    auth_service.configure_principal_auth(settings.jwt_secret_key, settings.jwt_algorithm)
 
 
 def test_auth_schema_migration_adds_default_role_constraint_and_audit_table():
@@ -219,3 +283,154 @@ def test_list_user_role_audit_is_newest_first_and_limit_is_bounded():
     sql, params = connection.executed[0]
     assert "ORDER BY changed_at DESC" in sql
     assert params == ("user-1", 100)
+
+
+def test_admin_dependency_allows_database_admin_with_existing_jwt():
+    manager = FakeConnectionManager(
+        FakeConnection(fetchone={"id": "user-1", "username": "alice", "role": "admin"})
+    )
+
+    response = admin_dependency_client(manager).get("/admin", headers=user_headers())
+
+    assert response.status_code == 200
+    assert response.json() == {"subject": "user-1"}
+
+
+def test_admin_dependency_rejects_user_and_old_token_after_demotion():
+    connection = FakeConnection(fetchone={"id": "user-1", "username": "alice", "role": "admin"})
+    client = admin_dependency_client(FakeConnectionManager(connection))
+    headers = user_headers()
+    assert client.get("/admin", headers=headers).status_code == 200
+
+    connection.fetchone_value = {"id": "user-1", "username": "alice", "role": "user"}
+    response = client.get("/admin", headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_ADMIN_REQUIRED"
+
+
+def test_admin_dependency_rejects_anonymous_before_role_lookup():
+    response = admin_dependency_client(FailingConnectionManager()).get(
+        "/admin",
+        headers=anonymous_headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_USER_REQUIRED"
+
+
+def test_admin_dependency_rejects_missing_database_user():
+    response = admin_dependency_client(FakeConnectionManager(FakeConnection(fetchone=None))).get(
+        "/admin",
+        headers=user_headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AUTH_ADMIN_REQUIRED"
+
+
+def test_admin_dependency_fails_closed_when_role_store_is_unavailable():
+    response = admin_dependency_client(FailingConnectionManager()).get(
+        "/admin",
+        headers=user_headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "AUTH_ROLE_CHECK_UNAVAILABLE"
+    assert "private database" not in response.text
+
+
+def test_current_user_uses_database_role_instead_of_token_claims():
+    manager = FakeConnectionManager(
+        FakeConnection(fetchone={"id": "user-1", "username": "renamed", "role": "admin"})
+    )
+    configure_auth(manager, AUTH_SECRET, AUTH_ALGORITHM)
+
+    current = get_current_user(user_headers(username="old-name")["Authorization"])
+
+    assert current == {"user_id": "user-1", "username": "renamed", "role": "admin"}
+
+
+def test_current_user_rejects_token_for_deleted_user():
+    configure_auth(FakeConnectionManager(FakeConnection(fetchone=None)), AUTH_SECRET, AUTH_ALGORITHM)
+
+    with pytest.raises(HTTPException) as raised:
+        get_current_user(user_headers()["Authorization"])
+
+    assert raised.value.status_code == 401
+    assert raised.value.code == "AUTH_TOKEN_INVALID"
+
+
+def test_current_user_fails_closed_when_database_is_unavailable():
+    configure_auth(FailingConnectionManager(), AUTH_SECRET, AUTH_ALGORITHM)
+
+    with pytest.raises(HTTPException) as raised:
+        get_current_user(user_headers()["Authorization"])
+
+    assert raised.value.status_code == 503
+    assert raised.value.code == "AUTH_ROLE_CHECK_UNAVAILABLE"
+
+
+def test_register_response_role_is_always_user(monkeypatch):
+    monkeypatch.setattr(main_module, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(main_module, "get_user_by_username", lambda _connections, _username: None)
+    monkeypatch.setattr(
+        main_module,
+        "create_user",
+        lambda _connections, username, _password_hash: {
+            "id": "user-new",
+            "username": username,
+            "role": "user",
+        },
+    )
+    monkeypatch.setattr(main_module, "hash_password", lambda _password: "hash")
+
+    response = TestClient(main_module.app, raise_server_exceptions=False).post(
+        "/api/auth/register",
+        json={"username": "new_user", "password": "secret1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["role"] == "user"
+
+
+def test_login_response_returns_database_role(monkeypatch):
+    monkeypatch.setattr(main_module, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "get_user_by_username",
+        lambda _connections, _username: {
+            "id": "admin-1",
+            "username": "alice",
+            "password_hash": "hash",
+            "role": "admin",
+        },
+    )
+    monkeypatch.setattr(main_module, "verify_password", lambda _plain, _hashed: True)
+
+    response = TestClient(main_module.app, raise_server_exceptions=False).post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "secret1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["role"] == "admin"
+
+
+def test_auth_me_response_includes_database_current_role():
+    main_module.app.dependency_overrides[main_module.get_current_user] = lambda: {
+        "user_id": "admin-1",
+        "username": "alice",
+        "role": "admin",
+    }
+    try:
+        response = TestClient(main_module.app).get("/api/auth/me")
+    finally:
+        main_module.app.dependency_overrides.pop(main_module.get_current_user, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "user_id": "admin-1",
+        "username": "alice",
+        "role": "admin",
+    }
