@@ -20,6 +20,7 @@ from app.auth.principal import create_principal_token
 from app.core.config import get_settings
 from app.core.rate_limit import Policy, RateLimiter
 from app.core.redis_client import RedisClient, create_redis_client
+import app.auth.service as auth_service
 import app.main as main_module
 
 
@@ -303,6 +304,12 @@ def test_knowledge_read_is_fail_closed_at_api_boundary(monkeypatch):
         },
     )
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
+    monkeypatch.setattr(auth_service, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        auth_service,
+        "get_user_by_id",
+        lambda _connections, user_id: {"id": user_id, "role": "admin"},
+    )
 
     response = TestClient(main_module.app).get("/api/news/status", headers=_user_headers())
 

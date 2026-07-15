@@ -52,6 +52,7 @@ from .auth.service import (
     get_current_user,
     get_user_by_username,
     hash_password,
+    require_admin_principal,
     verify_password,
 )
 from .auth.principal import (
@@ -413,14 +414,14 @@ def _limit_map(
 
 def _limit_knowledge_read(
     http_request: Request,
-    principal: Principal = Depends(require_user_principal),
+    principal: Principal = Depends(require_admin_principal),
 ):
     return _enforce_rate_limit("knowledge_read", http_request, principal)
 
 
 def _limit_knowledge_write(
     http_request: Request,
-    principal: Principal = Depends(require_user_principal),
+    principal: Principal = Depends(require_admin_principal),
 ):
     return _enforce_rate_limit("knowledge_write", http_request, principal)
 
