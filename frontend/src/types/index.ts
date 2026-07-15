@@ -364,6 +364,7 @@ export interface AuthTokenResponse {
   token_type: 'bearer'
   user_id: string
   username: string
+  role: 'user' | 'admin'
 }
 
 export interface PrincipalTokenResponse {
@@ -383,4 +384,5 @@ export interface AnonymousMergeResponse {
 export interface AuthUser {
   user_id: string
   username: string
+  role: 'user' | 'admin'
 }

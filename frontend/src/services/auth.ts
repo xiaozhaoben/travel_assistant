@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import type { AuthUser } from '@/types'
-import { loginUser, mergeAnonymousSessions, registerUser } from '@/services/api'
+import { getAuthMe, loginUser, mergeAnonymousSessions, registerUser } from '@/services/api'
 import {
   clearMergedAnonymousToken,
   clearStoredUserPrincipal,
@@ -32,10 +32,11 @@ subscribeToAuthSession(() => {
 
 export function useAuth() {
   const isAuthenticated = computed(() => Boolean(token.value && user.value))
+  const isAdmin = computed(() => isAuthenticated.value && user.value?.role === 'admin')
 
   async function login(username: string, password: string): Promise<AuthUser> {
     const result = await loginUser(username, password)
-    persistAuth(result.access_token, { user_id: result.user_id, username: result.username })
+    persistAuth(result.access_token, { user_id: result.user_id, username: result.username, role: result.role })
     stageCurrentAnonymousForMerge(result.user_id)
     await mergeAnonymousConversations(result.user_id)
     return user.value!
@@ -43,7 +44,7 @@ export function useAuth() {
 
   async function register(username: string, password: string): Promise<AuthUser> {
     const result = await registerUser(username, password)
-    persistAuth(result.access_token, { user_id: result.user_id, username: result.username })
+    persistAuth(result.access_token, { user_id: result.user_id, username: result.username, role: result.role })
     stageCurrentAnonymousForMerge(result.user_id)
     await mergeAnonymousConversations(result.user_id)
     return user.value!
@@ -55,6 +56,14 @@ export function useAuth() {
     clearStoredUserPrincipal()
     // 登出已经完成；后续受保护请求会安全重试匿名令牌签发。
     void ensureAnonymousToken().catch(() => undefined)
+  }
+
+  async function refreshCurrentUser(): Promise<AuthUser | null> {
+    const accessToken = getStoredUserToken()
+    if (!accessToken || !getStoredUser()) return null
+    const current = await getAuthMe()
+    persistUserPrincipal(accessToken, current)
+    return current
   }
 
   async function mergeAnonymousConversations(
@@ -112,10 +121,12 @@ export function useAuth() {
     token,
     user,
     isAuthenticated,
+    isAdmin,
     anonymousMergePending,
     login,
     register,
     logout,
+    refreshCurrentUser,
     mergeAnonymousConversations,
   }
 }

@@ -77,11 +77,12 @@ def test_login_merge_uses_preserved_anonymous_token_header_without_identity_body
     assert re.search(r"clear\w*Anonymous\w*\(", auth_source)
 
 
-def test_router_guest_and_knowledge_access_are_based_on_user_principal():
+def test_router_guest_and_knowledge_access_are_based_on_live_admin_role():
     main_source = _read("main.ts")
 
     assert "hasStoredUserPrincipal" in main_source
-    assert re.search(r"/knowledge.*requiresUser", main_source)
+    assert re.search(r"/knowledge.*requiresAdmin", main_source)
+    assert "refreshCurrentUser" in main_source
     assert "travel_auth_token" not in main_source
 
 
@@ -196,3 +197,57 @@ def test_anonymous_merge_token_is_cleared_only_after_pending_state_is_durable():
         r"function writePendingAnonymousPrincipals\([^)]*\)\s*:\s*boolean",
         session_source,
     )
+
+
+def test_frontend_auth_user_role_defaults_fail_closed_for_legacy_cache():
+    types_source = _read("types/index.ts")
+    session_source = _read("services/authSession.ts")
+
+    assert types_source.count("role: 'user' | 'admin'") >= 2
+    assert re.search(r"parsed\.role === 'admin'\s*\?\s*'admin'\s*:\s*'user'", session_source)
+    assert re.search(r"authUser\.role === 'admin'\s*\?\s*'admin'\s*:\s*'user'", session_source)
+
+
+def test_login_register_and_refresh_persist_database_role_without_fail_open_logout():
+    auth_source = _read("services/auth.ts")
+
+    assert "getAuthMe" in auth_source
+    assert len(re.findall(r"role:\s*result\.role", auth_source)) == 2
+    assert "const isAdmin = computed" in auth_source
+    refresh_match = re.search(
+        r"async\s+function\s+refreshCurrentUser\b(?P<body>.*?)(?=\n\s*async\s+function\s+)",
+        auth_source,
+        re.DOTALL,
+    )
+    assert refresh_match is not None
+    refresh_body = refresh_match.group("body")
+    assert "await getAuthMe()" in refresh_body
+    assert "persistUserPrincipal(accessToken" in refresh_body
+    assert "logout(" not in refresh_body
+    assert "clearStoredUserPrincipal" not in refresh_body
+
+
+def test_knowledge_navigation_route_and_bootstrap_require_live_admin_role():
+    app_source = _read("App.vue")
+    main_source = _read("main.ts")
+
+    assert "auth.isAdmin.value" in app_source
+    assert "void auth.refreshCurrentUser().catch" in app_source
+    assert re.search(r"router\.beforeEach\(async", main_source)
+    assert "to.meta.requiresAdmin" in main_source
+    assert "await auth.refreshCurrentUser()" in main_source
+    assert "message.warning('需要管理员权限')" in main_source
+    assert re.search(r"return\s+\{\s*name:\s*'QA'\s*\}", main_source)
+    assert "message.error('权限校验服务暂不可用，请稍后重试')" in main_source
+
+
+def test_admin_required_api_response_refreshes_role_and_leaves_admin_page_without_logout():
+    api_source = _read("services/api.ts")
+    session_source = _read("services/authSession.ts")
+    main_source = _read("main.ts")
+
+    assert "AUTH_ADMIN_REQUIRED" in api_source
+    assert "notifyAdminRoleInvalidated" in api_source
+    assert "ADMIN_ROLE_INVALIDATED_EVENT" in session_source
+    assert "addEventListener(ADMIN_ROLE_INVALIDATED_EVENT" in main_source
+    assert "void leaveAdminArea()" in main_source

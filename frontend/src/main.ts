@@ -17,6 +17,7 @@ import {
   InputNumber,
   Layout,
   List,
+  message,
   Menu,
   Modal,
   Progress,
@@ -32,7 +33,12 @@ import {
 import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
 import './styles.css'
-import { ensureAnonymousToken, hasStoredUserPrincipal } from '@/services/authSession'
+import { useAuth } from '@/services/auth'
+import {
+  ADMIN_ROLE_INVALIDATED_EVENT,
+  ensureAnonymousToken,
+  hasStoredUserPrincipal,
+} from '@/services/authSession'
 
 const Home = () => import('./views/Home.vue')
 const Login = () => import('./views/Login.vue')
@@ -47,21 +53,54 @@ const router = createRouter({
     { path: '/', name: 'QA', component: QA },
     { path: '/login', name: 'Login', component: Login, meta: { guest: true } },
     { path: '/plan', name: 'Home', component: Home },
-    { path: '/knowledge', name: 'Knowledge', component: Knowledge, meta: { requiresUser: true } },
+    { path: '/knowledge', name: 'Knowledge', component: Knowledge, meta: { requiresAdmin: true } },
     { path: '/reports', name: 'Reports', component: Reports },
     { path: '/result', name: 'Result', component: Result },
   ],
 })
 
-router.beforeEach((to, _from, next) => {
+const auth = useAuth()
+
+router.beforeEach(async (to) => {
   const hasUserPrincipal = hasStoredUserPrincipal()
-  if (to.meta.requiresUser && !hasUserPrincipal) {
-    next({ name: 'Login', query: { redirect: to.fullPath } })
-  } else if (to.meta.guest && hasUserPrincipal) {
-    next({ name: 'QA' })
-  } else {
-    next()
+  if (to.meta.requiresAdmin) {
+    if (!hasUserPrincipal) {
+      return { name: 'Login', query: { redirect: to.fullPath } }
+    }
+    try {
+      const currentUser = await auth.refreshCurrentUser()
+      if (currentUser?.role === 'admin') return true
+      if (!hasStoredUserPrincipal()) {
+        return { name: 'Login', query: { redirect: to.fullPath } }
+      }
+      message.warning('需要管理员权限')
+      return { name: 'QA' }
+    } catch {
+      if (!hasStoredUserPrincipal()) {
+        return { name: 'Login', query: { redirect: to.fullPath } }
+      }
+      message.error('权限校验服务暂不可用，请稍后重试')
+      return false
+    }
   }
+  if (to.meta.guest && hasUserPrincipal) return { name: 'QA' }
+  return true
+})
+
+async function leaveAdminArea(): Promise<void> {
+  try {
+    await auth.refreshCurrentUser()
+  } catch {
+    // The original 403 is authoritative; leaving the admin page remains fail closed.
+  }
+  if (router.currentRoute.value.meta.requiresAdmin) {
+    message.warning('需要管理员权限')
+    await router.replace({ name: 'QA' })
+  }
+}
+
+window.addEventListener(ADMIN_ROLE_INVALIDATED_EVENT, () => {
+  void leaveAdminArea()
 })
 
 const app = createApp(App)

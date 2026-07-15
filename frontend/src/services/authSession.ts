@@ -5,6 +5,7 @@ const USER_KEY = 'travel_auth_user'
 const ANONYMOUS_PRINCIPAL_KEY = 'travel_anonymous_principal'
 const PENDING_ANONYMOUS_MERGES_PREFIX = 'travel_pending_anonymous_merges_by_user'
 const LEGACY_PENDING_ANONYMOUS_MERGES_KEY = 'travel_pending_anonymous_merges'
+export const ADMIN_ROLE_INVALIDATED_EVENT = 'travel-admin-role-invalidated'
 
 interface StoredAnonymousPrincipal {
   access_token: string
@@ -22,6 +23,10 @@ storageRemove(LEGACY_PENDING_ANONYMOUS_MERGES_KEY)
 export function subscribeToAuthSession(listener: () => void): () => void {
   authSessionListeners.add(listener)
   return () => authSessionListeners.delete(listener)
+}
+
+export function notifyAdminRoleInvalidated(): void {
+  window.dispatchEvent(new Event(ADMIN_ROLE_INVALIDATED_EVENT))
 }
 
 function notifyAuthSessionChanged(): void {
@@ -48,7 +53,8 @@ export function getStoredUser(): AuthUser | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<AuthUser>
     if (typeof parsed.user_id !== 'string' || typeof parsed.username !== 'string') return null
-    return { user_id: parsed.user_id, username: parsed.username }
+    const role: AuthUser['role'] = parsed.role === 'admin' ? 'admin' : 'user'
+    return { user_id: parsed.user_id, username: parsed.username, role }
   } catch {
     return null
   }
@@ -61,7 +67,11 @@ export function hasStoredUserPrincipal(): boolean {
 export function persistUserPrincipal(accessToken: string, authUser: AuthUser): void {
   const previousToken = storageGet(USER_TOKEN_KEY)
   const previousUser = storageGet(USER_KEY)
-  if (!storageSet(USER_KEY, JSON.stringify(authUser)) || !storageSet(USER_TOKEN_KEY, accessToken)) {
+  const normalizedUser: AuthUser = {
+    ...authUser,
+    role: authUser.role === 'admin' ? 'admin' : 'user',
+  }
+  if (!storageSet(USER_KEY, JSON.stringify(normalizedUser)) || !storageSet(USER_TOKEN_KEY, accessToken)) {
     restoreStorage(USER_KEY, previousUser)
     restoreStorage(USER_TOKEN_KEY, previousToken)
     throw new Error('Browser storage is unavailable')

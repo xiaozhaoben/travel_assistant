@@ -13,7 +13,7 @@
           <MessageOutlined />
           <span>智能问答</span>
         </router-link>
-        <router-link v-if="auth.isAuthenticated.value" to="/knowledge" class="nav-link" active-class="nav-link-active">
+        <router-link v-if="auth.isAdmin.value" to="/knowledge" class="nav-link" active-class="nav-link-active">
           <DatabaseOutlined />
           <span>知识库</span>
         </router-link>
@@ -63,8 +63,11 @@ const auth = useAuth()
 const router = useRouter()
 
 onMounted(() => {
-  if (auth.isAuthenticated.value && auth.anonymousMergePending.value) {
-    void auth.mergeAnonymousConversations()
+  if (auth.isAuthenticated.value) {
+    void auth.refreshCurrentUser().catch(() => undefined)
+    if (auth.anonymousMergePending.value) {
+      void auth.mergeAnonymousConversations()
+    }
   }
 })
 

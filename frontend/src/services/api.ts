@@ -31,6 +31,7 @@ import type {
 import {
   configureAnonymousTokenIssuer,
   invalidateBearerToken,
+  notifyAdminRoleInvalidated,
   resolveBearerToken,
 } from '@/services/authSession'
 
@@ -75,6 +76,10 @@ apiClient.interceptors.response.use(
       if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
         invalidateBearerToken(authorization.slice('Bearer '.length))
       }
+    }
+    const responseCode = (error.response?.data as { code?: unknown } | undefined)?.code
+    if (error.response?.status === 403 && responseCode === 'AUTH_ADMIN_REQUIRED') {
+      notifyAdminRoleInvalidated()
     }
     return Promise.reject(error)
   },
