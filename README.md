@@ -75,6 +75,21 @@ Redis 不可用时，匿名签发、注册、登录和知识库读写采用 fail
 
 服务端 URL 抓取仅接受 `http` / `https` 的公网目标，拒绝本机、私网、链路本地、多播、保留地址及重定向，并将 DNS 解析结果固定到已校验的公网 IP。响应只允许白名单文本或 Feed Content-Type；默认最大响应为 2 MiB，连接、读取和总耗时分别由 `URL_FETCH_CONNECT_TIMEOUT_SECONDS`（8 秒）、`URL_FETCH_READ_TIMEOUT_SECONDS`（20 秒）和 `URL_FETCH_TOTAL_TIMEOUT_SECONDS`（30 秒）限制，大小由 `URL_FETCH_MAX_BYTES` 调整。
 
+### 管理员角色管理
+
+新注册用户固定为普通用户。知识管理页面以及资讯采集、文档入库、知识检索和状态查询接口仅允许管理员访问；服务端会在每次管理员请求时读取数据库中的当前角色，因此降权会立即生效，旧 JWT 不会继续保留管理员权限。
+
+项目不提供在线提升管理员的接口。部署人员应在后端目录使用本地命令管理角色，命令会自动补齐角色表结构，并把实际变更写入 `user_role_audit` 审计表：
+
+```bash
+cd backend
+python -m app.auth.admin_cli promote alice
+python -m app.auth.admin_cli demote alice
+python -m app.auth.admin_cli show alice
+```
+
+命令读取与后端相同的 `backend/.env` 数据库配置。`promote` 和 `demote` 重复执行是幂等的；审计记录包含原角色、新角色、本机操作系统用户和变更时间。
+
 高德地图后端调用走 MCP stdio，不再直接请求高德 REST API。后端会通过以下 MCP server 启动方式调用工具：
 
 ```json

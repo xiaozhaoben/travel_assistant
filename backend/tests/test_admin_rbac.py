@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
@@ -434,3 +435,167 @@ def test_auth_me_response_includes_database_current_role():
         "username": "alice",
         "role": "admin",
     }
+
+
+class FakeCliManager:
+    def __init__(self, _database_url: str):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_admin_cli_promotes_user_and_records_local_actor(monkeypatch, capsys):
+    from app.auth import admin_cli
+
+    manager = FakeCliManager("postgresql://example")
+    calls = []
+    monkeypatch.setattr(admin_cli, "migrate_auth_schema", lambda current: calls.append(("migrate", current)))
+    monkeypatch.setattr(
+        admin_cli,
+        "change_user_role",
+        lambda current, username, role, *, changed_by: calls.append(
+            ("change", current, username, role, changed_by)
+        )
+        or SimpleNamespace(username=username, previous_role="user", new_role=role, changed=True),
+    )
+
+    exit_code = admin_cli.main(
+        ["promote", "alice"],
+        settings_loader=lambda: SimpleNamespace(database_url="postgresql://example"),
+        manager_factory=lambda _url: manager,
+        actor_loader=lambda: "deploy-user",
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ("migrate", manager),
+        ("change", manager, "alice", "admin", "deploy-user"),
+    ]
+    assert "alice: user -> admin" in capsys.readouterr().out
+    assert manager.closed is True
+
+
+def test_admin_cli_demote_is_idempotent(monkeypatch, capsys):
+    from app.auth import admin_cli
+
+    manager = FakeCliManager("postgresql://example")
+    monkeypatch.setattr(admin_cli, "migrate_auth_schema", lambda _manager: None)
+    monkeypatch.setattr(
+        admin_cli,
+        "change_user_role",
+        lambda _manager, username, role, *, changed_by: SimpleNamespace(
+            username=username,
+            previous_role=role,
+            new_role=role,
+            changed=False,
+        ),
+    )
+
+    exit_code = admin_cli.main(
+        ["demote", "alice"],
+        settings_loader=lambda: SimpleNamespace(database_url="postgresql://example"),
+        manager_factory=lambda _url: manager,
+        actor_loader=lambda: "deploy-user",
+    )
+
+    assert exit_code == 0
+    assert "alice: 已是 user" in capsys.readouterr().out
+    assert manager.closed is True
+
+
+def test_admin_cli_show_prints_current_role_and_recent_audit(monkeypatch, capsys):
+    from app.auth import admin_cli
+
+    manager = FakeCliManager("postgresql://example")
+    changed_at = datetime(2026, 7, 15, 8, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(admin_cli, "migrate_auth_schema", lambda _manager: None)
+    monkeypatch.setattr(
+        admin_cli,
+        "get_user_by_username",
+        lambda _manager, _username: {"id": "user-1", "username": "alice", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        admin_cli,
+        "list_user_role_audit",
+        lambda _manager, _user_id: [
+            {
+                "previous_role": "user",
+                "new_role": "admin",
+                "changed_by": "deploy-user",
+                "changed_at": changed_at,
+            }
+        ],
+    )
+
+    exit_code = admin_cli.main(
+        ["show", "alice"],
+        settings_loader=lambda: SimpleNamespace(database_url="postgresql://example"),
+        manager_factory=lambda _url: manager,
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "用户名: alice" in output
+    assert "角色: admin" in output
+    assert "user -> admin" in output
+    assert "deploy-user" in output
+    assert manager.closed is True
+
+
+def test_admin_cli_rejects_missing_database_configuration(capsys):
+    from app.auth import admin_cli
+
+    exit_code = admin_cli.main(
+        ["show", "alice"],
+        settings_loader=lambda: SimpleNamespace(database_url=None),
+        manager_factory=lambda _url: pytest.fail("manager should not be created"),
+    )
+
+    assert exit_code == 2
+    assert "DATABASE_URL 未配置" in capsys.readouterr().err
+
+
+def test_admin_cli_unknown_user_returns_safe_error_and_closes_manager(monkeypatch, capsys):
+    from app.auth import admin_cli
+
+    manager = FakeCliManager("postgresql://example")
+    monkeypatch.setattr(admin_cli, "migrate_auth_schema", lambda _manager: None)
+    monkeypatch.setattr(
+        admin_cli,
+        "change_user_role",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(UserRoleNotFound("missing")),
+    )
+
+    exit_code = admin_cli.main(
+        ["promote", "missing"],
+        settings_loader=lambda: SimpleNamespace(database_url="postgresql://example"),
+        manager_factory=lambda _url: manager,
+    )
+
+    assert exit_code == 2
+    assert "用户不存在: missing" in capsys.readouterr().err
+    assert manager.closed is True
+
+
+def test_admin_cli_database_failure_does_not_expose_private_details(monkeypatch, capsys):
+    from app.auth import admin_cli
+
+    manager = FakeCliManager("postgresql://example")
+    monkeypatch.setattr(
+        admin_cli,
+        "migrate_auth_schema",
+        lambda _manager: (_ for _ in ()).throw(RuntimeError("private database details")),
+    )
+
+    exit_code = admin_cli.main(
+        ["show", "alice"],
+        settings_loader=lambda: SimpleNamespace(database_url="postgresql://example"),
+        manager_factory=lambda _url: manager,
+    )
+
+    error = capsys.readouterr().err
+    assert exit_code == 1
+    assert "角色管理失败" in error
+    assert "private database details" not in error
+    assert manager.closed is True
