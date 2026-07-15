@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.auth.principal import create_principal_token
+import app.auth.service as auth_service
 from app.core.config import get_settings
 from app.knowledge.job_store import RedisKnowledgeJobStore
 from app.main import app
@@ -22,6 +23,15 @@ def _user_headers() -> dict[str, str]:
         30,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _set_admin_role(monkeypatch) -> None:
+    monkeypatch.setattr(auth_service, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        auth_service,
+        "get_user_by_id",
+        lambda _connections, user_id: {"id": user_id, "username": "admin", "role": "admin"},
+    )
 
 
 class FakeEmbeddingService:
@@ -395,7 +405,8 @@ def jsonb_payload(value):
     return getattr(value, "obj", value)
 
 
-def test_api_ingests_and_searches_travel_documents():
+def test_api_ingests_and_searches_travel_documents(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeStore:
         def __init__(self):
             self.ingested = None
@@ -468,6 +479,7 @@ def test_api_ingests_and_searches_travel_documents():
 
 
 def test_api_ingests_travel_document_from_url(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeStore:
         def __init__(self):
             self.ingested = None
@@ -519,6 +531,7 @@ def test_api_ingests_travel_document_from_url(monkeypatch):
 
 
 def test_api_auto_ingest_uses_llm_to_extract_metadata(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeStore:
         def __init__(self):
             self.ingested = None
@@ -577,6 +590,7 @@ def test_api_auto_ingest_uses_llm_to_extract_metadata(monkeypatch):
 
 
 def test_api_url_ingest_accepts_only_url(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeStore:
         def __init__(self):
             self.ingested = None
@@ -617,6 +631,7 @@ def test_api_url_ingest_accepts_only_url(monkeypatch):
 
 
 def test_api_auto_ingest_job_completes(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeStore:
         def __init__(self):
             self.ingested = None

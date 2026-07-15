@@ -17,6 +17,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.core.config import get_settings
 from app.auth.principal import create_principal_token
+import app.auth.service as auth_service
 from app.knowledge.job_store import (
     KnowledgeJobInvalidTransition,
     KnowledgeJobNotFound,
@@ -37,6 +38,15 @@ def _user_headers() -> dict[str, str]:
         30,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _set_admin_role(monkeypatch) -> None:
+    monkeypatch.setattr(auth_service, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        auth_service,
+        "get_user_by_id",
+        lambda _connections, user_id: {"id": user_id, "username": "admin", "role": "admin"},
+    )
 
 
 class FakeRedis:
@@ -382,6 +392,7 @@ def test_create_app_resources_builds_job_store_even_when_rate_limit_is_disabled(
 
 
 def test_job_status_endpoint_delegates_to_resource_store_and_maps_errors(monkeypatch):
+    _set_admin_role(monkeypatch)
     redis = FakeRedis()
     store = RedisKnowledgeJobStore(redis, ttl_seconds=60)
     job = store.create(source_type="upload", message="created")
@@ -402,6 +413,7 @@ def test_job_status_endpoint_delegates_to_resource_store_and_maps_errors(monkeyp
 
 
 def test_job_status_endpoint_has_no_in_memory_fallback(monkeypatch):
+    _set_admin_role(monkeypatch)
     resources = SimpleNamespace(knowledge_job_store=RedisKnowledgeJobStore(None, ttl_seconds=60))
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
 
@@ -415,6 +427,7 @@ def test_job_status_endpoint_has_no_in_memory_fallback(monkeypatch):
 
 
 def test_create_job_endpoint_maps_missing_resource_store_to_stable_503(monkeypatch):
+    _set_admin_role(monkeypatch)
     resources = SimpleNamespace(knowledge_job_store=None)
     monkeypatch.setattr(main_module, "get_app_resources", lambda: resources)
 

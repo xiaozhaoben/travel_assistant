@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.auth.principal import create_principal_token
+import app.auth.service as auth_service
 from app.main import app
 from app.core.config import get_settings
 from app.domain.models import Attraction, Hotel, Location, Meal, TravelKnowledgeSource, TravelQAResponse, TravelRequirement, TripPlanRequest, WeatherInfo
@@ -52,6 +53,15 @@ def _user_auth_headers() -> dict[str, str]:
         30,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _set_admin_role(monkeypatch) -> None:
+    monkeypatch.setattr(auth_service, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        auth_service,
+        "get_user_by_id",
+        lambda _connections, user_id: {"id": user_id, "username": "admin", "role": "admin"},
+    )
 
 
 class FakeMessage:
@@ -3620,6 +3630,7 @@ def test_api_health_plan_and_recalculate_endpoints():
 
 
 def test_api_exposes_travel_qa_and_news_ingestion(monkeypatch):
+    _set_admin_role(monkeypatch)
     class FakeQAAgent:
         def ask(self, question, top_k=5, conversation_history=None):
             return TravelQAResponse(
