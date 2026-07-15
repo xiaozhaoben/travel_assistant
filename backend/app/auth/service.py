@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Header, HTTPException, status
@@ -27,9 +28,57 @@ CREATE TABLE IF NOT EXISTS users (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     username text UNIQUE NOT NULL,
     password_hash text NOT NULL,
+    role text NOT NULL DEFAULT 'user',
     created_at timestamptz NOT NULL DEFAULT now()
 );
 """
+
+USERS_ROLE_MIGRATION_SQL = """
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'users_role_check'
+          AND conrelid = 'users'::regclass
+    ) THEN
+        ALTER TABLE users
+        ADD CONSTRAINT users_role_check CHECK (role IN ('user', 'admin'));
+    END IF;
+END
+$$;
+"""
+
+USER_ROLE_AUDIT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS user_role_audit (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id),
+    username text NOT NULL,
+    previous_role text NOT NULL CHECK (previous_role IN ('user', 'admin')),
+    new_role text NOT NULL CHECK (new_role IN ('user', 'admin')),
+    changed_by text NOT NULL,
+    changed_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_role_audit_user_changed_at
+ON user_role_audit (user_id, changed_at DESC);
+"""
+
+
+@dataclass(frozen=True)
+class RoleChangeResult:
+    user_id: str
+    username: str
+    previous_role: str
+    new_role: str
+    changed: bool
+
+
+class UserRoleNotFound(LookupError):
+    pass
 
 _pwd_context: CryptContext | None = None
 
@@ -75,10 +124,16 @@ def decode_access_token(token: str, secret: str, algorithm: str) -> dict[str, An
     return {"user_id": principal.subject, "username": principal.username}
 
 
+def migrate_auth_schema(connections: DatabaseConnectionManager) -> None:
+    with connections.connection() as conn:
+        conn.execute(USERS_TABLE_SQL)
+        conn.execute(USERS_ROLE_MIGRATION_SQL)
+        conn.execute(USER_ROLE_AUDIT_TABLE_SQL)
+
+
 def ensure_users_table(connections: DatabaseConnectionManager) -> None:
     try:
-        with connections.connection() as conn:
-            conn.execute(USERS_TABLE_SQL)
+        migrate_auth_schema(connections)
         logger.info("Users table ensured")
     except Exception as exc:
         logger.warning("Failed to ensure users table: %s", exc)
@@ -92,7 +147,7 @@ def get_user_by_username(connections: DatabaseConnectionManager, username: str) 
     with connections.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT id::text, username, password_hash, created_at FROM users WHERE username = %s",
+                "SELECT id::text, username, password_hash, role, created_at FROM users WHERE username = %s",
                 (username,),
             ).fetchone()
     return dict(row) if row else None
@@ -106,7 +161,7 @@ def get_user_by_id(connections: DatabaseConnectionManager, user_id: str) -> dict
     with connections.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT id::text, username, password_hash, created_at FROM users WHERE id = %s",
+                "SELECT id::text, username, password_hash, role, created_at FROM users WHERE id = %s",
                 (user_id,),
             ).fetchone()
     return dict(row) if row else None
@@ -121,11 +176,86 @@ def create_user(connections: DatabaseConnectionManager, username: str, password_
                 """
                 INSERT INTO users (username, password_hash)
                 VALUES (%s, %s)
-                RETURNING id::text, username, created_at
+                RETURNING id::text, username, role, created_at
                 """,
                 (username, password_hash),
             ).fetchone()
     return dict(row)
+
+
+def change_user_role(
+    connections: DatabaseConnectionManager,
+    username: str,
+    new_role: str,
+    *,
+    changed_by: str,
+) -> RoleChangeResult:
+    if new_role not in {"user", "admin"}:
+        raise ValueError("unsupported user role")
+    actor = changed_by.strip() or "unknown"
+    from psycopg.rows import dict_row
+
+    with connections.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            user = cur.execute(
+                "SELECT id::text, username, role FROM users WHERE username = %s FOR UPDATE",
+                (username,),
+            ).fetchone()
+            if user is None:
+                raise UserRoleNotFound(username)
+            user_id = str(user["id"])
+            current_username = str(user["username"])
+            previous_role = str(user["role"])
+            if previous_role == new_role:
+                return RoleChangeResult(
+                    user_id=user_id,
+                    username=current_username,
+                    previous_role=previous_role,
+                    new_role=new_role,
+                    changed=False,
+                )
+            cur.execute("UPDATE users SET role = %s WHERE id = %s", (new_role, user_id))
+            cur.execute(
+                """
+                INSERT INTO user_role_audit
+                    (user_id, username, previous_role, new_role, changed_by)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (user_id, current_username, previous_role, new_role, actor),
+            )
+            return RoleChangeResult(
+                user_id=user_id,
+                username=current_username,
+                previous_role=previous_role,
+                new_role=new_role,
+                changed=True,
+            )
+
+
+def list_user_role_audit(
+    connections: DatabaseConnectionManager,
+    user_id: str,
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    try:
+        from psycopg.rows import dict_row
+    except ImportError:
+        return []
+    bounded_limit = max(1, min(int(limit), 100))
+    with connections.connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                """
+                SELECT previous_role, new_role, changed_by, changed_at
+                FROM user_role_audit
+                WHERE user_id = %s
+                ORDER BY changed_at DESC
+                LIMIT %s
+                """,
+                (user_id, bounded_limit),
+            ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def merge_anonymous_conversations(

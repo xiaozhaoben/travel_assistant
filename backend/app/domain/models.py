@@ -458,11 +458,15 @@ class UserLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=128)
 
 
+UserRole = Literal["user", "admin"]
+
+
 class AuthTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
     username: str
+    role: UserRole
 
 
 class PrincipalTokenResponse(BaseModel):
