@@ -87,20 +87,17 @@ router.beforeEach(async (to) => {
   return true
 })
 
-async function leaveAdminArea(): Promise<void> {
-  try {
-    await auth.refreshCurrentUser()
-  } catch {
-    // The original 403 is authoritative; leaving the admin page remains fail closed.
-  }
+function leaveAdminArea(): void {
+  auth.invalidateAdminRole()
   if (router.currentRoute.value.meta.requiresAdmin) {
     message.warning('需要管理员权限')
-    await router.replace({ name: 'QA' })
+    void router.replace({ name: 'QA' })
   }
+  void auth.refreshCurrentUser().catch(() => undefined)
 }
 
 window.addEventListener(ADMIN_ROLE_INVALIDATED_EVENT, () => {
-  void leaveAdminArea()
+  leaveAdminArea()
 })
 
 const app = createApp(App)

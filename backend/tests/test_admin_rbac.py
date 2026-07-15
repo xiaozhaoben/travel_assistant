@@ -149,6 +149,9 @@ def test_auth_schema_migration_adds_default_role_constraint_and_audit_table():
     sql = "\n".join(statement for statement, _params in connection.executed)
     assert "ADD COLUMN IF NOT EXISTS role" in sql
     assert "DEFAULT 'user'" in sql
+    assert "UPDATE users SET role = 'user' WHERE role IS NULL" in sql
+    assert "ALTER COLUMN role SET DEFAULT 'user'" in sql
+    assert "ALTER COLUMN role SET NOT NULL" in sql
     assert "CHECK (role IN ('user', 'admin'))" in sql
     assert "CREATE TABLE IF NOT EXISTS user_role_audit" in sql
     assert connection.committed is True

@@ -23,6 +23,7 @@ const user = ref<AuthUser | null>(initialUser)
 const anonymousMergePending = ref(initialUser ? hasPendingAnonymousMerge(initialUser.user_id) : false)
 const mergePromises = new Map<string, Promise<AnonymousMergeState>>()
 const mergeRerunRequested = new Set<string>()
+let refreshSequence = 0
 
 subscribeToAuthSession(() => {
   token.value = getStoredUserToken()
@@ -51,6 +52,7 @@ export function useAuth() {
   }
 
   async function logout(): Promise<void> {
+    refreshSequence += 1
     token.value = null
     user.value = null
     clearStoredUserPrincipal()
@@ -61,9 +63,21 @@ export function useAuth() {
   async function refreshCurrentUser(): Promise<AuthUser | null> {
     const accessToken = getStoredUserToken()
     if (!accessToken || !getStoredUser()) return null
+    const requestSequence = ++refreshSequence
     const current = await getAuthMe()
+    if (requestSequence !== refreshSequence || getStoredUserToken() !== accessToken) {
+      return getStoredUser()
+    }
     persistUserPrincipal(accessToken, current)
     return current
+  }
+
+  function invalidateAdminRole(): void {
+    refreshSequence += 1
+    const accessToken = getStoredUserToken()
+    const current = getStoredUser()
+    if (!accessToken || !current || current.role !== 'admin') return
+    persistUserPrincipal(accessToken, { ...current, role: 'user' })
   }
 
   async function mergeAnonymousConversations(
@@ -127,10 +141,12 @@ export function useAuth() {
     register,
     logout,
     refreshCurrentUser,
+    invalidateAdminRole,
     mergeAnonymousConversations,
   }
 }
 
 function persistAuth(accessToken: string, authUser: AuthUser): void {
+  refreshSequence += 1
   persistUserPrincipal(accessToken, authUser)
 }

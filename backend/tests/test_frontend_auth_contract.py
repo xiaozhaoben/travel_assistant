@@ -225,6 +225,10 @@ def test_login_register_and_refresh_persist_database_role_without_fail_open_logo
     assert "persistUserPrincipal(accessToken" in refresh_body
     assert "logout(" not in refresh_body
     assert "clearStoredUserPrincipal" not in refresh_body
+    assert "refreshSequence" in auth_source
+    assert re.search(r"requestSequence\s*!==\s*refreshSequence", refresh_body)
+    assert re.search(r"getStoredUserToken\(\)\s*!==\s*accessToken", refresh_body)
+    assert "return getStoredUser()" in refresh_body
 
 
 def test_knowledge_navigation_route_and_bootstrap_require_live_admin_role():
@@ -250,4 +254,15 @@ def test_admin_required_api_response_refreshes_role_and_leaves_admin_page_withou
     assert "notifyAdminRoleInvalidated" in api_source
     assert "ADMIN_ROLE_INVALIDATED_EVENT" in session_source
     assert "addEventListener(ADMIN_ROLE_INVALIDATED_EVENT" in main_source
-    assert "void leaveAdminArea()" in main_source
+    assert "invalidateAdminRole" in main_source
+    leave_match = re.search(
+        r"function\s+leaveAdminArea\b(?P<body>.*?)(?=\n\}\n\nwindow\.addEventListener)",
+        main_source,
+        re.DOTALL,
+    )
+    assert leave_match is not None
+    leave_body = leave_match.group("body")
+    assert leave_body.index("auth.invalidateAdminRole()") < leave_body.index("router.replace")
+    assert leave_body.index("router.replace") < leave_body.index("auth.refreshCurrentUser()")
+    assert "void auth.refreshCurrentUser().catch" in leave_body
+    assert "await auth.refreshCurrentUser()" not in leave_body
