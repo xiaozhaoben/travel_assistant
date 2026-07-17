@@ -266,3 +266,19 @@ def test_admin_required_api_response_refreshes_role_and_leaves_admin_page_withou
     assert leave_body.index("router.replace") < leave_body.index("auth.refreshCurrentUser()")
     assert "void auth.refreshCurrentUser().catch" in leave_body
     assert "await auth.refreshCurrentUser()" not in leave_body
+
+
+def test_login_and_register_prefer_api_envelope_message_over_axios_default():
+    login_source = _read("views/Login.vue")
+
+    helper_match = re.search(
+        r"function\s+authErrorMessage\b(?P<body>.*?)(?=\n\}\n\nasync\s+function\s+handleLogin)",
+        login_source,
+        re.DOTALL,
+    )
+    assert helper_match is not None
+    helper_body = helper_match.group("body")
+    assert "error?.response?.data?.message" in helper_body
+    assert helper_body.index("responseMessage") < helper_body.index("error?.message")
+    assert "message.error(authErrorMessage(error, '登录失败'))" in login_source
+    assert "message.error(authErrorMessage(error, '注册失败'))" in login_source

@@ -105,6 +105,14 @@ function confirmPasswordValidator(_rule: unknown, value: string) {
   return Promise.resolve()
 }
 
+function authErrorMessage(error: any, fallback: string): string {
+  const responseMessage = error?.response?.data?.message
+  if (typeof responseMessage === 'string' && responseMessage.trim()) return responseMessage
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  return error?.message || fallback
+}
+
 async function handleLogin() {
   loading.value = true
   try {
@@ -113,8 +121,7 @@ async function handleLogin() {
     if (auth.anonymousMergePending.value) message.warning('匿名历史暂未合并，将在稍后安全重试')
     router.push(typeof router.currentRoute.value.query.redirect === 'string' ? router.currentRoute.value.query.redirect : '/')
   } catch (error: any) {
-    const detail = error?.response?.data?.detail
-    message.error(typeof detail === 'string' ? detail : error.message || '登录失败')
+    message.error(authErrorMessage(error, '登录失败'))
   } finally {
     loading.value = false
   }
@@ -128,8 +135,7 @@ async function handleRegister() {
     if (auth.anonymousMergePending.value) message.warning('匿名历史暂未合并，将在稍后安全重试')
     router.push(typeof router.currentRoute.value.query.redirect === 'string' ? router.currentRoute.value.query.redirect : '/')
   } catch (error: any) {
-    const detail = error?.response?.data?.detail
-    message.error(typeof detail === 'string' ? detail : error.message || '注册失败')
+    message.error(authErrorMessage(error, '注册失败'))
   } finally {
     loading.value = false
   }
