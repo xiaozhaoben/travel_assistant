@@ -280,3 +280,20 @@ GitHub Pages 部署使用 `.github/workflows/deploy-frontend-pages.yml`。在仓
 - `VITE_AMAP_WEB_JS_KEY` / `VITE_AMAP_SECURITY_JS_CODE`：需要真实高德 JS 地图时填写
 
 Pull Request 会先运行完整后端测试、前端生产构建以及前后端 Docker 构建/前端容器冒烟测试。推送到 `main` 或 `master` 后也会执行这些门禁，全部通过后才构建并发布到 GitHub Pages。
+
+### 一键更新服务器 Docker 服务
+
+Windows 本地可运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-docker.ps1
+```
+
+运行前需要：
+
+- 本机已安装并可调用 OpenSSH 的 `ssh`、`scp`，以及 Windows 自带的 `tar`；
+- 本地已准备好 `backend/.env` 和 `frontend/.env`；
+- 服务器已安装 Git、Docker、Docker Compose 插件和 `curl`；
+- 服务器能够通过 HTTPS 访问 GitHub 项目仓库。
+
+脚本会在执行时由 OpenSSH 交互请求认证，不保存 SSH 密码。首次运行会在服务器部署目录克隆 `master` 分支；后续运行仅允许 fast-forward 更新，然后上传两个本地环境文件、重建现有 `travel` Compose 服务并检查前后端 HTTP 状态。SSH 地址和端口集中配置在 `scripts/deploy-docker.ps1` 顶部。
