@@ -1702,7 +1702,7 @@ def login_user(
     connections = get_auth_connections()
     user = get_user_by_username(connections, request.username)
     if user is None or not verify_password(request.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        raise api_error(401, "HTTP_401", "密码错误")
     token = create_access_token(
         user["id"],
         user["username"],

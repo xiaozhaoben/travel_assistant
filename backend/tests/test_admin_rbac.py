@@ -421,6 +421,29 @@ def test_login_response_returns_database_role(monkeypatch):
     assert response.json()["data"]["role"] == "admin"
 
 
+def test_login_wrong_password_returns_password_error(monkeypatch):
+    monkeypatch.setattr(main_module, "get_auth_connections", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "get_user_by_username",
+        lambda _connections, _username: {
+            "id": "user-1",
+            "username": "alice",
+            "password_hash": "hash",
+            "role": "user",
+        },
+    )
+    monkeypatch.setattr(main_module, "verify_password", lambda _plain, _hashed: False)
+
+    response = TestClient(main_module.app, raise_server_exceptions=False).post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "wrong-password"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["message"] == "密码错误"
+
+
 def test_auth_me_response_includes_database_current_role():
     main_module.app.dependency_overrides[main_module.get_current_user] = lambda: {
         "user_id": "admin-1",
